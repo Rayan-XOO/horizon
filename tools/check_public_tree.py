@@ -9,12 +9,15 @@ import sys
 PRIVATE_ROOTS = {".local", "decompiled", "minecraft", "assets", "run", "logs"}
 PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {"tools/JfrSummary.java", "tests/java/JfrFixture.java"}
+# The Android port's own Java glue (activities, service, documents provider),
+# not recovered game code.
+ANDROID_JAVA = "packaging/android/java/"
 
 
 def prohibited(path):
     parsed = PurePosixPath(path)
     # Original JDK-only tools are an exact allowlist; recovered game Java stays private.
-    if path in ORIGINAL_JDK_TOOLS:
+    if path in ORIGINAL_JDK_TOOLS or path.startswith(ANDROID_JAVA):
         return False
     # Original Horizon mod sources may also be tracked.
     if parsed.suffix == ".java" and path.startswith(("mods/horizon/src/", "mods/horizon-lab/src/")):
