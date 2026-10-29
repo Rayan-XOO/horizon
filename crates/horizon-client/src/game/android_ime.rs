@@ -48,7 +48,7 @@ extern "system" fn Java_dev_horizonlab_horizon_HorizonActivity_nativeKey(
 
 /// Show or hide the soft keyboard (`HorizonActivity.showKeyboard`).
 pub(super) fn show(show: bool) {
-    let Some(app) = super::ANDROID_APP.get() else {
+    let Some(app) = app() else {
         return;
     };
     // SAFETY: the VM and activity pointers android-activity hands out live as long as the app.
@@ -66,7 +66,7 @@ pub(super) fn show(show: bool) {
 
 /// Open the profile screen (`HorizonActivity.openProfile`): name and skin.
 pub(super) fn open_profile() {
-    let Some(app) = super::ANDROID_APP.get() else {
+    let Some(app) = app() else {
         return;
     };
     // SAFETY: as in `show`.
@@ -80,4 +80,13 @@ pub(super) fn open_profile() {
     if let Err(e) = result {
         log::warn!("Horizon: profile screen: {e}");
     }
+}
+
+/// The current activity, or None before `android_main` stored it.
+fn app() -> Option<winit::platform::android::activity::AndroidApp> {
+    super::ANDROID_APP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .cloned()
 }

@@ -40,10 +40,31 @@ fn android_main(app: AndroidApp) {
     logging::init(&home, "Render thread");
     log::info!("Horizon {} (Android) home {}", crash::version(), home.display());
     crash::install(home.clone(), "client");
-    let _ = game::ANDROID_APP.set(app);
+    let finish_app = app.clone();
+    {
+        let mut slot = game::ANDROID_APP.lock().expect("the Android app lock");
+        *slot = Some(app);
+    }
     if let Err(error) = game::run() {
         log::error!("Horizon: {error}");
         crash::report_error(&home, "client", &*error);
     }
     logging::flush();
+    finish_activity(&finish_app);
+}
+
+/// Finish the Android activity once the game has stopped: without it the
+/// NativeActivity survives `android_main`'s return and the next launch
+/// reuses a dead activity (black screen).
+fn finish_activity(app: &AndroidApp) {
+    let result = (|| -> jni::errors::Result<()> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
+        let mut env = vm.attach_current_thread_permanently()?;
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        env.call_method(&activity, "finishGame", "()V", &[])?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        log::warn!("Horizon: could not finish the Android activity: {error}");
+    }
 }

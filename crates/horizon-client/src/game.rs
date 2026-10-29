@@ -14910,7 +14910,12 @@ fn new_event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoo
     #[cfg(target_os = "android")]
     {
         use winit::platform::android::EventLoopBuilderExtAndroid;
-        let app = ANDROID_APP.get().expect("android_main sets the activity").clone();
+        let app = ANDROID_APP
+            .lock()
+            .expect("the Android app lock")
+            .as_ref()
+            .expect("android_main sets the activity")
+            .clone();
         EventLoop::builder().with_android_app(app).build()
     }
     #[cfg(not(target_os = "android"))]
@@ -14918,9 +14923,11 @@ fn new_event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoo
 }
 
 /// The activity the Android entry point (`android_main.rs`) was started with.
+/// It is replaced on every `android_main`: Android may reuse the process after
+/// the task is finished, and the old activity pointer would be stale.
 #[cfg(target_os = "android")]
-pub static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
-    std::sync::OnceLock::new();
+pub static ANDROID_APP: std::sync::Mutex<Option<winit::platform::android::activity::AndroidApp>> =
+    std::sync::Mutex::new(None);
 
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
     new_event_loop()?.run_app(&mut game)?;
@@ -15020,7 +15027,11 @@ impl Loading {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
             return;
         }
-        if let Err(error) = self.menu_event(event_loop, event) {
+        let result = match event {
+            WindowEvent::Touch(touch) => self.touch_event(event_loop, touch),
+            event => self.menu_event(event_loop, event),
+        };
+        if let Err(error) = result {
             self.error = Some(error);
             event_loop.exit();
         }

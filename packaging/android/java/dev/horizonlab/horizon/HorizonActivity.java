@@ -2,6 +2,7 @@ package dev.horizonlab.horizon;
 
 import android.app.NativeActivity;
 import android.content.Context;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.KeyEvent;
@@ -30,6 +31,7 @@ public class HorizonActivity extends NativeActivity {
     static native void nativeKey(int key);
 
     private TextSink sink;
+    private WifiManager.WifiLock wifiLock;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -43,9 +45,42 @@ public class HorizonActivity extends NativeActivity {
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // On Wi-Fi, power save adds latency spikes that Minecraft servers see
+        // as lag or a timeout. Hold the radio at full performance while playing.
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi != null && wifiLock == null) {
+            wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "horizon:game");
+            wifiLock.setReferenceCounted(false);
+            wifiLock.acquire();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (wifiLock != null) {
+            wifiLock.release();
+            wifiLock = null;
+        }
+        super.onPause();
+    }
+
     /** Called from the game thread: the profile screen (name, skin). */
     public void openProfile() {
         startActivity(new android.content.Intent(this, ProfileActivity.class));
+    }
+
+    /** Called from the game thread once the native loop has returned. */
+    public void finishGame() {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                if (!isFinishing()) {
+                    finishAndRemoveTask();
+                }
+            }
+        });
     }
 
     /** Called from the game thread. */

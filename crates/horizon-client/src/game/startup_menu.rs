@@ -5,7 +5,10 @@ use horizon_client::{
     clipboard::{self, AppendSelection, SystemClipboard},
     options_ui::{Event, OptionsUi, Page},
 };
-use winit::{event::KeyEvent, keyboard::ModifiersState};
+use winit::{
+    event::{KeyEvent, Touch, TouchPhase},
+    keyboard::ModifiersState,
+};
 
 #[derive(Default)]
 pub(super) struct StartupMenu {
@@ -607,6 +610,57 @@ impl Loading {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Android sends touches, not a mouse: translate one into the mouse
+    /// events the startup menu already handles. Without this the title is
+    /// untouchable until the resource loader hands the screen to `Game`.
+    pub(super) fn touch_event(&mut self, event_loop: &ActiveEventLoop, touch: Touch) -> Result<()> {
+        let device_id = touch.device_id;
+        let position = touch.location;
+        match touch.phase {
+            TouchPhase::Started => {
+                self.menu_event(
+                    event_loop,
+                    WindowEvent::CursorMoved {
+                        device_id,
+                        position,
+                    },
+                )?;
+                self.menu_event(
+                    event_loop,
+                    WindowEvent::MouseInput {
+                        device_id,
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                    },
+                )
+            }
+            TouchPhase::Moved => self.menu_event(
+                event_loop,
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                },
+            ),
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.menu_event(
+                    event_loop,
+                    WindowEvent::CursorMoved {
+                        device_id,
+                        position,
+                    },
+                )?;
+                self.menu_event(
+                    event_loop,
+                    WindowEvent::MouseInput {
+                        device_id,
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    },
+                )
+            }
+        }
     }
 
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
