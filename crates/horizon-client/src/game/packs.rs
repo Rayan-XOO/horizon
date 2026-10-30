@@ -35,15 +35,24 @@ pub fn packs_dir() -> PathBuf {
 }
 /// `Util.getPlatform().openPath`: the system file manager on the folder.
 pub fn open_folder(dir: &Path) {
-    let program = if cfg!(target_os = "windows") {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
-        log::warn!("Horizon: could not open {}: {e}", dir.display());
+    #[cfg(target_os = "android")]
+    {
+        let _ = dir;
+        super::android_ime::open_game_folder();
+        return;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let program = if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        if let Err(e) = std::process::Command::new(program).arg(dir).spawn() {
+            log::warn!("Horizon: could not open {}: {e}", dir.display());
+        }
     }
 }
 /// `Util.getPlatform().openUri`: the system browser on the link.

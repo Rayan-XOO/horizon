@@ -2,6 +2,7 @@ package dev.horizonlab.horizon;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -29,11 +30,14 @@ import java.nio.file.Files;
  */
 public class ProfileActivity extends Activity implements View.OnClickListener {
     private static final int PICK = 7;
+    private static final int PICK_DRIVER = 8;
     private File dir;
     private EditText name;
     private TextView message;
     private ImageView preview;
-    private Button pick, model, save, back;
+    private Button pick, model, save, back, driver, systemDriver, microsoft, signOut;
+    private TextView driverStatus, accountStatus;
+    private EditText clientId;
     private boolean slim;
 
     @Override
@@ -71,6 +75,58 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         card.addView(model, Ui.gap(this, 8));
         message = Ui.text(this, "", 13, Ui.WARN, false);
         card.addView(message, Ui.gap(this, 6));
+        card.addView(Ui.text(this, "Vulkan", 14, Ui.MUTED, false), Ui.gap(this, 16));
+        driverStatus = Ui.text(this, Turnip.status(this), 13, Ui.TEXT, false);
+        card.addView(driverStatus);
+        card.addView(Ui.text(this, Ui.t(
+                "Zip с Turnip (libvulkan_freedreno.so). На Snapdragon часто быстрее системного драйвера. Нужен перезапуск.",
+                "A Turnip zip (libvulkan_freedreno.so). Often faster than the system driver on Snapdragon. Restart required."),
+                12, Ui.MUTED, false), Ui.gap(this, 4));
+        driver = Ui.button(this, Ui.t("Установить Turnip", "Install Turnip"), false);
+        driver.setOnClickListener(this);
+        card.addView(driver, Ui.gap(this, 8));
+        systemDriver = Ui.button(this, Ui.t("Системный драйвер", "System driver"), false);
+        systemDriver.setOnClickListener(this);
+        card.addView(systemDriver, Ui.gap(this, 8));
+        card.addView(Ui.text(this, Ui.t("Вырез камеры", "Camera cutout"), 14, Ui.MUTED, false), Ui.gap(this, 16));
+        Button cutout = Ui.button(this, cutoutLabel(), false);
+        cutout.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String next = "short";
+                String cur = cutoutMode();
+                if (cur.equals("short")) next = "never";
+                else if (cur.equals("never")) next = "always";
+                try {
+                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "cutout.txt").toPath(),
+                            (next + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {
+                }
+                HorizonActivity.applyCutout(ProfileActivity.this);
+                ((Button) v).setText(cutoutLabel());
+            }
+        });
+        card.addView(cutout, Ui.gap(this, 8));
+        card.addView(Ui.text(this, "Microsoft", 14, Ui.MUTED, false), Ui.gap(this, 16));
+        accountStatus = Ui.text(this, accountLine(), 13, Ui.TEXT, false);
+        card.addView(accountStatus);
+        card.addView(Ui.text(this, Ui.t(
+                "Свой Azure client ID (не чужой). Без одобрения Mojang вход на лицензионные сервера не пройдёт. aka.ms/mce-reviewappid",
+                "Your own Azure client ID (not someone else's). Without Mojang's approval, licensed servers will refuse the sign-in. aka.ms/mce-reviewappid"),
+                12, Ui.MUTED, false), Ui.gap(this, 4));
+        clientId = new EditText(this);
+        clientId.setSingleLine(true);
+        clientId.setTextColor(Ui.TEXT);
+        clientId.setHint("00000000-0000-0000-0000-000000000000");
+        clientId.setText(Msa.clientId(this));
+        clientId.setPadding(p, p, p, p);
+        clientId.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.EDGE, 8));
+        card.addView(clientId, Ui.gap(this, 8));
+        microsoft = Ui.button(this, Ui.t("Войти в Microsoft", "Sign in with Microsoft"), true);
+        microsoft.setOnClickListener(this);
+        card.addView(microsoft, Ui.gap(this, 8));
+        signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
+        signOut.setOnClickListener(this);
+        card.addView(signOut, Ui.gap(this, 8));
         save = Ui.button(this, Ui.t("Сохранить", "Save"), true);
         save.setOnClickListener(this);
         card.addView(save, Ui.gap(this, 12));
@@ -132,15 +188,112 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             } catch (Exception e) {
                 message.setText(Ui.t("Не удалось сохранить.", "Could not save."));
             }
+        } else if (v == driver) {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            startActivityForResult(i, PICK_DRIVER);
+        } else if (v == systemDriver) {
+            Turnip.useSystem(this);
+            driverStatus.setText(Turnip.status(this));
+            message.setTextColor(Ui.GREEN);
+            message.setText(Ui.t("Системный драйвер. Перезапустите игру.", "System driver. Restart the game."));
+        } else if (v == microsoft) {
+            String id = clientId.getText().toString().trim();
+            if (id.length() < 32) {
+                message.setTextColor(Ui.WARN);
+                message.setText(Ui.t("Вставьте свой Azure client ID.", "Paste your own Azure client ID."));
+                return;
+            }
+            try {
+                Msa.saveClientId(this, id);
+            } catch (Exception e) {
+                message.setText(Ui.t("Не удалось сохранить client ID.", "Could not save the client ID."));
+                return;
+            }
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Запрашиваем код…", "Requesting a code…"));
+            Msa.start(this, id, new Msa.Listener() {
+                public void onCode(final String userCode, final String uri) {
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            message.setText(Ui.t("Откройте ", "Open ") + uri + Ui.t(" и введите ", " and enter ") + userCode);
+                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(uri)));
+                        }
+                    });
+                }
+                public void onDone(final String name) {
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            accountStatus.setText(accountLine());
+                            message.setTextColor(Ui.GREEN);
+                            message.setText(Ui.t("Вход выполнен: ", "Signed in: ") + name
+                                    + Ui.t(". Перезапустите игру, чтобы зайти на лицензионный сервер.",
+                                    ". Restart the game to join a licensed server."));
+                        }
+                    });
+                }
+                public void onError(final String error) {
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            message.setTextColor(Ui.WARN);
+                            message.setText(error);
+                        }
+                    });
+                }
+            });
+        } else if (v == signOut) {
+            Msa.cancel();
+            Msa.signOut(this);
+            accountStatus.setText(accountLine());
+            message.setTextColor(Ui.GREEN);
+            message.setText(Ui.t("Вышли. Перезапустите игру.", "Signed out. Restart the game."));
         } else if (v == back) {
             finish();
         }
     }
 
+    private String cutoutMode() {
+        try {
+            return new String(java.nio.file.Files.readAllBytes(new java.io.File(getFilesDir(), "cutout.txt").toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8).trim();
+        } catch (Exception e) {
+            return "short";
+        }
+    }
+
+    private String cutoutLabel() {
+        String m = cutoutMode();
+        if (m.equals("never")) return Ui.t("Вырез: не заходить под камеру", "Cutout: stay clear of the camera");
+        if (m.equals("always")) return Ui.t("Вырез: всегда под камеру", "Cutout: draw under the camera");
+        return Ui.t("Вырез: по краям экрана", "Cutout: short edges");
+    }
+
+    private String accountLine() {
+        String name = Msa.signedIn(this);
+        if (name.isEmpty()) return Ui.t("Аккаунт не подключён. Сервера с лицензией не пустят.", "No account. Licensed servers will refuse you.");
+        return Ui.t("Аккаунт: ", "Account: ") + name;
+    }
+
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != PICK || result != RESULT_OK || data == null || data.getData() == null) return;
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == PICK_DRIVER) {
+            message.setTextColor(Ui.WARN);
+            try {
+                String name = Turnip.install(this, data.getData());
+                driverStatus.setText(Turnip.status(this));
+                message.setTextColor(Ui.GREEN);
+                message.setText(Ui.t("Драйвер установлен: ", "Driver installed: ") + name
+                        + Ui.t(". Полностью закройте игру и откройте снова.", ". Fully close the game and open it again."));
+            } catch (Exception e) {
+                message.setText(Ui.t("В архиве нет .so драйвера (нужен zip с libvulkan_freedreno.so).",
+                        "The archive has no driver .so (a zip with libvulkan_freedreno.so is needed)."));
+            }
+            return;
+        }
+        if (request != PICK) return;
         message.setTextColor(Ui.WARN);
         try (InputStream in = getContentResolver().openInputStream(data.getData())) {
             ByteArrayOutputStream out = new ByteArrayOutputStream();

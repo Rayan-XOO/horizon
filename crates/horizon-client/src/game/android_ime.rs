@@ -64,6 +64,45 @@ pub(super) fn show(show: bool) {
     }
 }
 
+/// End the activity after the native loop exits (`HorizonActivity.quit`).
+pub(crate) fn quit() {
+    let Some(app) = super::ANDROID_APP.get() else {
+        return;
+    };
+    let result = (|| -> jni::errors::Result<()> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
+        let mut env = vm.attach_current_thread_permanently()?;
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        env.call_method(&activity, "quit", "()V", &[])?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::warn!("Horizon: quit: {e}");
+        std::process::exit(0);
+    }
+}
+
+/// Open the game folder in the Files app (`HorizonActivity.openGameFolder`).
+pub fn open_game_folder() {
+    call("openGameFolder");
+}
+
+fn call(method: &str) {
+    let Some(app) = super::ANDROID_APP.get() else {
+        return;
+    };
+    let result = (|| -> jni::errors::Result<()> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
+        let mut env = vm.attach_current_thread_permanently()?;
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        env.call_method(&activity, method, "()V", &[])?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::warn!("Horizon: {method}: {e}");
+    }
+}
+
 /// Open the profile screen (`HorizonActivity.openProfile`): name and skin.
 pub(super) fn open_profile() {
     let Some(app) = super::ANDROID_APP.get() else {

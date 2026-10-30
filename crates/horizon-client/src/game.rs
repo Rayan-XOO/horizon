@@ -277,7 +277,9 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{
+        DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    },
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
@@ -12490,6 +12492,8 @@ impl ApplicationHandler for Game<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             // Android: the native window is back after the app was in the background.
+            #[cfg(target_os = "android")]
+            ANDROID_BACKGROUND.store(false, Ordering::Relaxed);
             if let Some(renderer) = &mut self.renderer
                 && let Err(e) = renderer.regain_surface()
             {
@@ -12537,8 +12541,14 @@ impl ApplicationHandler for Game<'_> {
         self.apply_settings();
         self.previous = Instant::now();
     }
-    fn suspended(&mut self, _: &ActiveEventLoop) {
-        // Android: the native window goes away in the background.
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        // Android: the native window goes away in the background. Stop polling
+        // so the process sleeps instead of running at full speed behind Home.
+        #[cfg(target_os = "android")]
+        {
+            ANDROID_BACKGROUND.store(true, Ordering::Relaxed);
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
         if let Some(renderer) = &mut self.renderer {
             renderer.lose_surface();
         }
@@ -13538,6 +13548,11 @@ impl ApplicationHandler for Game<'_> {
             } else {
                 w.request_redraw();
             }
+        }
+        #[cfg(target_os = "android")]
+        if ANDROID_BACKGROUND.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
         }
         event_loop.set_control_flow(ControlFlow::Poll);
     }
@@ -14922,6 +14937,17 @@ fn new_event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoo
 pub static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
     std::sync::OnceLock::new();
 
+/// The activity is stopped (Home or another app). The loop waits instead of spinning.
+#[cfg(target_os = "android")]
+static ANDROID_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quit Game ended the native loop. Ask the activity to die so the next launch
+/// is a new process, not a resumed black window.
+#[cfg(target_os = "android")]
+pub fn finish_activity() {
+    android_ime::quit();
+}
+
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
     new_event_loop()?.run_app(&mut game)?;
     horizon_client::discord_presence::stop();
@@ -15018,6 +15044,43 @@ impl Loading {
     }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
+            return;
+        }
+        // The loading screen has no Game yet, so it does not go through
+        // touch.rs. Android sends fingers as Touch, not mouse: without this
+        // the title is on screen and dead until the world renderer swap.
+        if let WindowEvent::Touch(touch) = event {
+            let device_id = touch.device_id;
+            let position = touch.location;
+            if let Err(error) = self.menu_event(
+                event_loop,
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                },
+            ) {
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+            let state = match touch.phase {
+                TouchPhase::Started => Some(ElementState::Pressed),
+                TouchPhase::Ended | TouchPhase::Cancelled => Some(ElementState::Released),
+                TouchPhase::Moved => None,
+            };
+            if let Some(state) = state
+                && let Err(error) = self.menu_event(
+                    event_loop,
+                    WindowEvent::MouseInput {
+                        device_id,
+                        state,
+                        button: MouseButton::Left,
+                    },
+                )
+            {
+                self.error = Some(error);
+                event_loop.exit();
+            }
             return;
         }
         if let Err(error) = self.menu_event(event_loop, event) {

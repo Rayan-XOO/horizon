@@ -579,7 +579,14 @@ impl super::Instance {
             // a new release can happen.
             #[cfg(target_env = "ohos")]
             let loaded = ash::Entry::load_from("libvulkan.so");
-            #[cfg(not(target_env = "ohos"))]
+            // A Turnip (or other) .so chosen in the Android profile, loaded by path.
+            // The system loader ignores VK_DRIVER_FILES, so the game opens the file itself.
+            #[cfg(all(target_os = "android", not(target_env = "ohos")))]
+            let loaded = match std::env::var("HORIZON_VULKAN_LIB") {
+                Ok(path) if !path.is_empty() => ash::Entry::load_from(path),
+                _ => ash::Entry::load(),
+            };
+            #[cfg(not(any(target_env = "ohos", target_os = "android")))]
             let loaded = ash::Entry::load();
             loaded
         }

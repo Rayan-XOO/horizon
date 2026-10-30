@@ -95,6 +95,15 @@ impl Game<'_> {
         let settings = &self.settings.controller;
         if !settings.enabled {
             self.pad_output_off();
+            // Touch controls write the virtual pad even when a physical
+            // controller is off. Dropping that input left walking dead on
+            // servers while a boat (which still read the stick) could move.
+            let injected = self.pad.injected;
+            if injected != PadState::default() {
+                self.pad.virtual_input = true;
+                self.pad.state = injected;
+                return;
+            }
             if self.pad.state != PadState::default() {
                 self.pad.state = PadState::default();
                 for (button, down) in self.pad.edges.release_all() {

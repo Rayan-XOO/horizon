@@ -319,9 +319,57 @@ impl Settings {
                 ..Self::default()
             },
         };
+        #[cfg(target_os = "android")]
+        let settings = settings.fit_phone();
         settings.describe_for_crashes();
         settings
     }
+    /// Phones under 7 GiB (Redmi Note 9 Pro is 6 GB) stall and get killed on
+    /// Java servers at the desktop default of 12 chunks: the client cannot
+    /// answer keep-alives, so the tab list shows thousands of ms, then the
+    /// process dies. The mined items are already on the server.
+    #[cfg(target_os = "android")]
+    fn fit_phone(mut self) -> Self {
+        let kb = mem_total_kb();
+        if kb == 0 || kb >= 7 * 1024 * 1024 {
+            return self;
+        }
+        if self.render_distance > 6 {
+            log::info!(
+                "Horizon: {} MB RAM, render distance {} -> 6",
+                kb / 1024,
+                self.render_distance
+            );
+            self.render_distance = 6;
+        }
+        if self.simulation_distance > 6 {
+            self.simulation_distance = 6;
+        }
+        if self.horizon.workers == 0 || self.horizon.workers > 2 {
+            self.horizon.workers = 2;
+        }
+        if self.max_fps > 60 {
+            self.max_fps = 60;
+        }
+        self
+    }
+}
+
+#[cfg(target_os = "android")]
+fn mem_total_kb() -> u64 {
+    let Ok(text) = fs::read_to_string("/proc/meminfo") else {
+        return 0;
+    };
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        return rest.split_whitespace().next().unwrap_or("0").parse().unwrap_or(0);
+    }
+    0
+}
+
+impl Settings {
     /// The render settings and resource packs a crash report lists.
     fn describe_for_crashes(&self) {
         let on = |b: bool| if b { "on" } else { "off" };

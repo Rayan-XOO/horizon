@@ -81,7 +81,7 @@ winit = { version = "0.30.13", features = ["android-native-activity"] }
 jni = "0.21"
 
 [features]
-default = ["audio"]
+default = ["audio", "mods"]
 # AAudio through cpal.
 audio = ["dep:cpal", "horizon-client/audio"]
 # No `controllers`: gilrs has no Android backend; the touch controls drive the virtual pad.

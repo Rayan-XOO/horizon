@@ -1476,7 +1476,7 @@ impl OptionsUi {
             Page::Mods => {
                 if s.mods.installed.is_empty() {
                     return vec![Row::Header(
-                        "No mods: put .hmod files in the horizon-mods folder",
+                        "No mods: put .hmod files in the Horizon folder or in horizon-mods. .hnmod is a native mod and only builds on a PC",
                     )];
                 }
                 s.mods

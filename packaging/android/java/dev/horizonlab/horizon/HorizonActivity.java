@@ -34,13 +34,24 @@ public class HorizonActivity extends NativeActivity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        if (android.os.Build.VERSION.SDK_INT >= 28) {
-            WindowManager.LayoutParams lp = getWindow().getAttributes();
-            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-            getWindow().setAttributes(lp);
-        }
+        applyCutout(this);
         sink = new TextSink(this);
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+    }
+
+    /** 0 short edges, 1 never (letterbox past the camera), 2 always. */
+    static void applyCutout(android.app.Activity a) {
+        if (android.os.Build.VERSION.SDK_INT < 28) return;
+        int mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        try {
+            String t = new String(java.nio.file.Files.readAllBytes(new java.io.File(a.getFilesDir(), "cutout.txt").toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+            if (t.equals("never")) mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
+            else if (t.equals("always")) mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+        } catch (Exception ignored) {
+        }
+        WindowManager.LayoutParams lp = a.getWindow().getAttributes();
+        lp.layoutInDisplayCutoutMode = mode;
+        a.getWindow().setAttributes(lp);
     }
 
     /** Called from the game thread: the profile screen (name, skin). */
@@ -48,7 +59,55 @@ public class HorizonActivity extends NativeActivity {
         startActivity(new android.content.Intent(this, ProfileActivity.class));
     }
 
+    /**
+     * Called when the native loop has exited (Quit Game). NativeActivity does not
+     * finish itself, so the task stays and the next launch resumes a dead window
+     * (black screen, then it minimizes). Kill the process so the next tap is fresh.
+     */
+    public void quit() {
+        new Thread(new Runnable() {
+            public void run() {
+                runOnUiThread(new Runnable() {
+                    public void run() {
+                        finishAndRemoveTask();
+                    }
+                });
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ignored) {
+                }
+                android.os.Process.killProcess(android.os.Process.myPid());
+                System.exit(0);
+            }
+        }, "horizon-quit").start();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (isFinishing()) {
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
+
     /** Called from the game thread. */
+    /** Called from the game thread: the Files app on the game folder. */
+    public void openGameFolder() {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                android.content.Intent view = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                view.setData(android.provider.DocumentsContract.buildRootUri(
+                        "dev.horizonlab.horizon.documents", "horizon"));
+                view.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    startActivity(view);
+                } catch (Exception e) {
+                    startActivity(new android.content.Intent(HorizonActivity.this, ProfileActivity.class));
+                }
+            }
+        });
+    }
+
     public void showKeyboard(final boolean show) {
         runOnUiThread(new Toggle(this, show));
     }

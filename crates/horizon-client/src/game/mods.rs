@@ -13,7 +13,49 @@ use horizon_client::{
     hud::HudBatch,
     mod_list,
 };
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+/// Phones drop downloads in the Horizon folder, not in `horizon-mods/`.
+/// Move `.hmod` and `.hnmod` from the game folder (and `mods/`) into `horizon-mods/`.
+fn import_loose_mods(dir: &Path) {
+    let Some(home) = dir.parent() else {
+        return;
+    };
+    let _ = fs::create_dir_all(dir);
+    for folder in [home.to_path_buf(), home.join("mods")] {
+        if folder == dir {
+            continue;
+        }
+        let Ok(read) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !ext.eq_ignore_ascii_case("hmod") && !ext.eq_ignore_ascii_case("hnmod") {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            let dest = dir.join(name);
+            if dest.exists() {
+                continue;
+            }
+            if fs::rename(&path, &dest).is_err() {
+                if fs::copy(&path, &dest).is_ok() {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
 #[cfg(feature = "mods")]
 use {
     super::Screen,
@@ -261,6 +303,7 @@ impl Game<'_> {
     /// Says why the installed and dev mods don't run.
     pub(super) fn start_mods(&mut self) {
         let dir = Self::options_path().with_file_name(mod_list::DIR);
+        import_loose_mods(&dir);
         let found = horizon_mods::find(&dir).len() + self.mods.dev.len();
         if found > 0 {
             log::warn!(
@@ -292,6 +335,7 @@ impl Game<'_> {
     /// Reads `horizon-mods/` and the dev mods, and starts the ones turned on.
     pub(super) fn start_mods(&mut self) {
         let dir = Self::options_path().with_file_name(mod_list::DIR);
+        import_loose_mods(&dir);
         let dev = &self.mods.dev;
         let mut paths = horizon_mods::find(&dir);
         paths.retain(|p| !dev.contains(p));

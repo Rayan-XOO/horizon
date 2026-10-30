@@ -83,6 +83,13 @@ public class SetupActivity extends Activity
         card.addView(stage, Ui.gap(this, 6));
         detail = Ui.text(this, "", 13, Ui.MUTED, false);
         card.addView(detail);
+        Button turnip = Ui.button(this, Ui.t("Драйвер Vulkan (Turnip)", "Vulkan driver (Turnip)"), false);
+        turnip.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                startActivity(new Intent(SetupActivity.this, ProfileActivity.class));
+            }
+        });
+        card.addView(turnip, Ui.gap(this, 8));
         profile = Ui.button(this, Ui.t("Профиль: ник и скин", "Profile: name and skin"), false);
         profile.setOnClickListener(this);
         card.addView(profile, Ui.gap(this, 14));

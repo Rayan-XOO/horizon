@@ -382,8 +382,18 @@ fn pipeline(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
         compilation_options: Default::default(),
         cache: None,
     });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let internal = pollster::block_on(internal.pop());
-    match internal.or(pollster::block_on(validation.pop())) {
+    if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+        log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");
+        return None;
+    }
+    // Adreno rejects the pipeline only when the layout is read, and wgpu then
+    // aborts if that error is not in a scope. Probe it here and fall back.
+    let probe = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _ = pipeline.get_bind_group_layout(0);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    match pollster::block_on(probe.pop()) {
         None => Some(pipeline),
         Some(e) => {
             log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");

@@ -593,12 +593,20 @@ struct Widget {
 pub struct GraphicsUi {
     scroll: f32,
     dragging: Option<Item>,
+    /// Finger or scrollbar drag: last pointer y, and whether it is the bar.
+    scroll_from: Option<f32>,
+    scrollbar_drag: bool,
 }
 
 impl GraphicsUi {
     pub fn reset(&mut self) {
         self.scroll = 0.0;
         self.dragging = None;
+        self.scroll_from = None;
+        self.scrollbar_drag = false;
+    }
+    fn bar_x(w: f32) -> f32 {
+        STYLE.row_x(w) + STYLE.control_width + STYLE.gap + STYLE.text_width(w) + 6.0
     }
     fn bounds(h: f32) -> (f32, f32) {
         (STYLE.band, h - STYLE.band)
@@ -802,9 +810,38 @@ impl GraphicsUi {
                 item.set_slider(s, ui::slider_value(wd.x, wd.w, x));
                 return vec![Action::Changed];
             }
+            if let Some(previous) = self.scroll_from {
+                let content = Self::content_height(level);
+                let view = bottom - top;
+                let max = (content - view).max(0.0);
+                if self.scrollbar_drag {
+                    if let Some((_, thumb)) = ui::scrollbar_thumb(top, bottom, content, self.scroll)
+                    {
+                        let track = (view - thumb).max(1.0);
+                        self.scroll = if y < top {
+                            0.0
+                        } else if y > bottom {
+                            max
+                        } else {
+                            self.scroll + (y - previous) * max / track
+                        };
+                    }
+                } else {
+                    self.scroll -= y - previous;
+                }
+                self.clamp_scroll(h, content);
+                self.scroll_from = Some(y);
+            }
             return Vec::new();
         }
         if right {
+            return Vec::new();
+        }
+        if ui::scrollbar_thumb(top, bottom, Self::content_height(level), self.scroll).is_some()
+            && ui::hovered((x, y), Self::bar_x(w) - 12.0, top, 36.0, bottom - top)
+        {
+            self.scrollbar_drag = true;
+            self.scroll_from = Some(y);
             return Vec::new();
         }
         for wd in widgets {
@@ -830,9 +867,15 @@ impl GraphicsUi {
                 }
             };
         }
+        if y >= top && y < bottom {
+            self.scrollbar_drag = false;
+            self.scroll_from = Some(y);
+        }
         Vec::new()
     }
     pub fn release(&mut self) -> bool {
+        self.scroll_from = None;
+        self.scrollbar_drag = false;
         self.dragging.take().is_some()
     }
     pub fn scroll(&mut self, level: Level, h: f32, amount: f32) {

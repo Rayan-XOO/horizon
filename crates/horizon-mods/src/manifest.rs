@@ -322,6 +322,12 @@ impl Package {
     /// A `.hmod` (a zip holding `horizon-mod.toml`, `mod.wasm` and, for
     /// content, `assets/` and `data/`) or a folder holding the same.
     pub fn read(path: &Path) -> Result<Self, String> {
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("hnmod")) {
+            return Err(
+                "native mod (.hnmod): the phone cannot compile it. Download the .hmod file if the mod has one, or build it with the PC launcher"
+                    .into(),
+            );
+        }
         let (toml, wasm) = if path.is_dir() {
             let toml = std::fs::read_to_string(path.join(MANIFEST));
             let wasm = path.join(WASM);
@@ -400,7 +406,11 @@ pub fn find(dir: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = read
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "hmod") || p.join(MANIFEST).is_file())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("hmod") || e.eq_ignore_ascii_case("hnmod"))
+                || p.join(MANIFEST).is_file()
+        })
         .collect();
     found.sort();
     found
