@@ -120,9 +120,21 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 - Редактор раскладки (шестерёнка): двигай кнопки, меняй размер и прозрачность, сохраняй.
 - Быстрый тап по мобу — атака.
 
-### На чём проверено
+### Поддерживаемые устройства
 
-Samsung Galaxy S25 (Adreno 830, Vulkan). Доходит до меню и одиночного мира, всё играбельно.
+Порту нужны **arm64**, **Android 8.0+ (API 26)** и GPU с **Vulkan**.
+Желательно **4 ГБ ОЗУ и больше**: игра занимает около 2,2 ГБ, на слабых телефонах ставьте дальность прорисовки 4–6.
+
+| Устройство / чип | GPU | Статус |
+|---|---|---|
+| Samsung Galaxy S25 | Adreno 830 | ✅ Проверено |
+| Vivo Y31 4G (Snapdragon 662) | Adreno 610 | ✅ Проверено |
+| Samsung Galaxy S24 FE (Exynos 2400e) | Xclipse 940 | ✅ Проверено |
+| Samsung Galaxy S20+ (Snapdragon 865) | Adreno 650 | ✅ Проверено |
+| Samsung Galaxy S20+ (Exynos 990) | Mali-G77 | ✅ Проверено |
+| Samsung Galaxy M54 5G (Exynos 1380) | Mali-G68 | ✅ Проверено |
+| Samsung Galaxy S6 (Exynos 7420) | Mali-T760 | ✅ Проверено |
+
 
 ### Известные проблемы
 
@@ -137,7 +149,7 @@ Samsung Galaxy S25 (Adreno 830, Vulkan). Доходит до меню и оди�
 
 **Нужна ли лицензия Minecraft?** Да, нужна своя легальная копия Minecraft: Java Edition. В APK нет ни одного файла игры.
 
-**Будет ли работать на моём телефоне?** Нужны Android 8.0+, arm64 и желательно от 4 ГБ ОЗУ. Проверено на Galaxy S25, на других устройствах может по-разному.
+**Будет ли работать на моём телефоне?** Нужны Android 8.0+, arm64 и желательно от 4 ГБ ОЗУ. Список устройств — в разделе «Поддерживаемые устройства».
 
 ### Сборка
 
@@ -248,9 +260,20 @@ To prepare everything on a PC without the on-phone download, see [ANDROID.md](AN
 - Layout editor (gear icon): move buttons, resize them, change opacity, save.
 - Quick tap on a mob attacks it.
 
-### Tested on
+### Supported Devices
 
-Samsung Galaxy S25 (Adreno 830, Vulkan). Gets to the menus and a single-player world, and it's playable.
+The port requires **arm64**, **Android 8.0+ (API 26)**, and a GPU with **Vulkan** support.
+**4 GB of RAM or more** is recommended: the game takes up about 2.2 GB; on lower-end phones, set the draw distance to 4–6.
+
+| Device / Chip | GPU | Status |
+|---|---|---|
+| Samsung Galaxy S25 | Adreno 830 | ✅ Tested |
+| Vivo Y31 4G (Snapdragon 662) | Adreno 610 | ✅ Tested |
+| Samsung Galaxy S24 FE (Exynos 2400e) | Xclipse 940 | ✅ Verified |
+| Samsung Galaxy S20+ (Snapdragon 865) | Adreno 650 | ✅ Verified |
+| Samsung Galaxy S20+ (Exynos 990) | Mali-G77 | ✅ Verified |
+| Samsung Galaxy M54 5G (Exynos 1380) | Mali-G68 | ✅ Verified |
+| Samsung Galaxy S6 (Exynos 7420) | Mali-T760 | ✅ Verified |
 
 ### Known issues
 
@@ -265,7 +288,7 @@ Samsung Galaxy S25 (Adreno 830, Vulkan). Gets to the menus and a single-player w
 
 **Do I need to own Minecraft?** Yes, your own legit copy of Minecraft: Java Edition. The APK contains no game files.
 
-**Will it run on my phone?** Android 8.0+, arm64, ideally 4 GB of RAM or more. Tested on a Galaxy S25; other devices may vary.
+**Will it run on my phone?** Android 8.0+, arm64, ideally 4 GB of RAM or more. See "Supported devices" above.
 
 ### Building
 
