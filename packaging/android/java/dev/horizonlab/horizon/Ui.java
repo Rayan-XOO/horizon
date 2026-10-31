@@ -51,7 +51,8 @@ final class Ui {
     /** A full-screen background with a centered card; returns the card to fill. */
     static LinearLayout card(android.app.Activity a) {
         FrameLayout root = new FrameLayout(a);
-        root.setBackgroundColor(BG);
+        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[] {Color.rgb(28, 34, 40), BG, Color.rgb(10, 10, 13)}));
         android.widget.ScrollView scroll = new android.widget.ScrollView(a);
         scroll.setFillViewport(true);
         FrameLayout center = new FrameLayout(a);
@@ -59,7 +60,8 @@ final class Ui {
         card.setOrientation(LinearLayout.VERTICAL);
         int p = dp(a, 22);
         card.setPadding(p, p, p, p);
-        card.setBackground(rounded(a, CARD, EDGE, 14));
+        card.setBackground(rounded(a, CARD, EDGE, 18));
+        card.setElevation(dp(a, 6));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 Math.min(dp(a, 520), a.getResources().getDisplayMetrics().widthPixels - dp(a, 32)),
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
@@ -100,6 +102,21 @@ final class Ui {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         lp.topMargin = dp(c, top);
         return lp;
+    }
+
+    /** A section header: a thin divider and a small green caption (empty title: divider only). */
+    static void section(LinearLayout card, String title) {
+        Context c = card.getContext();
+        View line = new View(c);
+        line.setBackgroundColor(EDGE);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Math.max(1, dp(c, 1)));
+        lp.topMargin = dp(c, 18);
+        lp.bottomMargin = dp(c, 8);
+        card.addView(line, lp);
+        if (title.isEmpty()) return;
+        TextView t = text(c, title.toUpperCase(Locale.getDefault()), 12, GREEN, true);
+        t.setLetterSpacing(0.08f);
+        card.addView(t);
     }
 
     /** A rounded progress bar, 0..1000. */

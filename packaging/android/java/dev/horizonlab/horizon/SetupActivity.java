@@ -42,6 +42,9 @@ public class SetupActivity extends Activity
     private final Handler handler = new Handler();
     private long lastBytes = -1, lastTime;
     private double speed;
+    private int failures;
+    private String lastError = "";
+    private Button copyError;
 
     static String home(Context c) {
         File dir = c.getExternalFilesDir(null);
@@ -64,7 +67,7 @@ public class SetupActivity extends Activity
             return;
         }
         LinearLayout card = Ui.card(this);
-        card.addView(Ui.text(this, "Horizon", 30, Ui.TEXT, true));
+        card.addView(Ui.text(this, "Horizon", 32, Ui.TEXT, true));
         card.addView(Ui.text(this, Ui.t("Первый запуск", "First launch"), 15, Ui.MUTED, false));
         card.addView(Ui.text(this, Ui.t(
                 "Игре нужны файлы Minecraft 26.3. Они скачаются автоматически, около 700 МБ. Лучше подключиться к Wi-Fi.",
@@ -79,11 +82,23 @@ public class SetupActivity extends Activity
         bar = new Ui.Bar(this);
         bar.setVisibility(View.GONE);
         card.addView(bar, Ui.gap(this, 18));
+        copyError = Ui.button(this, Ui.t("Скопировать текст ошибки", "Copy the error text"), false);
+        copyError.setVisibility(View.GONE);
+        copyError.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("error",
+                        "Horizon " + version() + " setup: " + lastError));
+                copyError.setText(Ui.t("Скопировано ✓", "Copied ✓"));
+            }
+        });
+        card.addView(copyError, Ui.gap(this, 8));
         stage = Ui.text(this, "", 15, Ui.TEXT, true);
         card.addView(stage, Ui.gap(this, 6));
         detail = Ui.text(this, "", 13, Ui.MUTED, false);
         card.addView(detail);
-        Button turnip = Ui.button(this, Ui.t("Драйвер Vulkan (Turnip)", "Vulkan driver (Turnip)"), false);
+        Ui.section(card, "");
+        Button turnip = Ui.button(this, Ui.t("Драйвер Vulkan (экспериментально)", "Vulkan driver (experimental)"), false);
         turnip.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
                 startActivity(new Intent(SetupActivity.this, ProfileActivity.class));
@@ -183,6 +198,25 @@ public class SetupActivity extends Activity
             return Ui.t("Не найден пакет данных Horizon. Положите horizon-derived.zip в папку игры и нажмите «Повторить».",
                     "The Horizon data pack was not found. Put horizon-derived.zip in the game folder and tap Retry.");
         }
+        if (e.contains("status code 404") || e.contains("status code 410")) {
+            return Ui.t("Файл на сервере не найден (404). Ссылка в этой сборке устарела: обновите Horizon.",
+                    "A file is missing on the server (404). This build's link is out of date: update Horizon.");
+        }
+        if (e.contains("status code 403") || e.contains("status code 429")) {
+            return Ui.t("Сервер не отдал файл (доступ ограничен). Подождите пару минут или смените сеть (VPN/мобильный интернет).",
+                    "The server refused the file. Wait a few minutes or switch networks (VPN or mobile data).");
+        }
+        if (e.contains("status code 5")) {
+            return Ui.t("Сервер загрузки временно недоступен. Попробуйте позже.", "The download server is down for now. Try again later.");
+        }
+        if (e.contains("certificate") || e.contains("TLS") || e.contains("tls")) {
+            return Ui.t("Защищённое соединение не установилось. Проверьте дату и время на телефоне или смените сеть.",
+                    "A secure connection failed. Check the phone's date and time, or switch networks.");
+        }
+        if (e.contains("zip") || e.contains("Zip") || e.contains("archive")) {
+            return Ui.t("Пакет данных повреждён. Удалите horizon-derived.zip из папки игры и нажмите «Повторить».",
+                    "The data pack is damaged. Delete horizon-derived.zip from the game folder and tap Retry.");
+        }
         if (e.contains("SHA-1")) {
             return Ui.t("Файл скачался с ошибкой. Нажмите «Повторить».", "A file arrived damaged. Tap Retry.");
         }
@@ -234,13 +268,26 @@ public class SetupActivity extends Activity
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             stage.setText(Ui.t("Загрузка остановилась", "The download stopped"));
             detail.setText("");
-            showNote(friendlyError(p[6]));
-            button.setText(Ui.t("Повторить", "Retry"));
+            failures++;
+            lastError = p[6];
+            String raw = p[6].replaceAll("https?://\\S+", "").trim();
+            if (raw.length() > 160) raw = raw.substring(0, 160) + "…";
+            showNote(friendlyError(p[6]) + (failures >= 2 && !raw.isEmpty() ? "\n\n" + Ui.t("Подробно: ", "Details: ") + raw : ""));
+            if (failures >= 3) copyError.setVisibility(View.VISIBLE);
+            button.setText(Ui.t("Повторить", "Retry") + (failures > 1 ? " (" + failures + ")" : ""));
             button.setEnabled(true);
             button.setAlpha(1f);
             return;
         }
         handler.postDelayed(this, 500);
+    }
+
+    private String version() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     private void launch() {
