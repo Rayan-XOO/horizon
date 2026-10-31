@@ -583,6 +583,11 @@ impl Game<'_> {
 
     /// The controls over the HUD, while playing.
     pub(super) fn draw_touch_controls(&self, batch: &mut HudBatch) {
+        // The headset has controllers; nothing is touched.
+        #[cfg(feature = "vr")]
+        if super::vr::active() {
+            return;
+        }
         let gui = Gui { w: batch.width, h: batch.height };
         let atlas = &self.gui.atlas;
         if self.touch_close_shown() {

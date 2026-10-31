@@ -435,6 +435,8 @@ pub struct Renderer {
     spare_surface: std::sync::Mutex<Option<wgpu::Surface<'static>>>,
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
+    /// A headset eye drawn instead of the screen view, and the view both eyes cull with.
+    eye: Option<(View, View)>,
     /// Offscreen submissions still on the GPU: at most two frames run ahead.
     in_flight: std::collections::VecDeque<wgpu::SubmissionIndex>,
     /// Which steps of the first frame on this device still go to the log
@@ -712,13 +714,18 @@ fn sprite_split() -> u32 {
 }
 /// The last opened adapter's array layer limit as a split, so the resource
 /// worker prepares arrays the device can hold.
-static ADAPTER_SPLIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(SPRITE_SPLIT);
+static ADAPTER_SPLIT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(SPRITE_SPLIT);
 /// The split for an adapter: GPUs such as Mali-T760 hold only 256 layers per
 /// array, so the sprites go to more arrays. One layer short of a multiple of
 /// six, because `array_layers` adds one on OpenGL.
 fn adapter_split(limits: &wgpu::Limits) -> u32 {
     let max = limits.max_texture_array_layers.max(1);
-    let max = if max % 6 == 0 && max > 1 { max - 1 } else { max };
+    let max = if max % 6 == 0 && max > 1 {
+        max - 1
+    } else {
+        max
+    };
     let split = max.min(SPRITE_SPLIT);
     ADAPTER_SPLIT.store(split, std::sync::atomic::Ordering::Relaxed);
     sprite_split()
@@ -923,6 +930,30 @@ fn mip_chain(
 /// turns it back on. DirectX 12 keeps it too: there wgpu-core's validation
 /// pass is also what passes each draw's first instance to shaders reading
 /// `instance_index`, and DirectX 12 is the fallback, where working matters
+/// A display the window does not own (a headset runtime): it creates the
+/// Vulkan instance and device itself, with the extensions it needs, and the
+/// renderer draws offscreen at its size for it to show.
+pub struct ExternalDisplay {
+    /// Creates the instance from the descriptor the renderer would use.
+    pub instance: fn(wgpu::InstanceDescriptor) -> wgpu::Instance,
+    /// Opens the device on the adapter; `None` leaves it to wgpu.
+    pub device: fn(
+        &wgpu::Adapter,
+        &wgpu::DeviceDescriptor<'_>,
+    ) -> Option<
+        std::result::Result<(wgpu::Device, wgpu::Queue), wgpu::RequestDeviceError>,
+    >,
+    /// The size of one image, once the display knows it.
+    pub size: fn() -> Option<(u32, u32)>,
+}
+static EXTERNAL_DISPLAY: std::sync::OnceLock<ExternalDisplay> = std::sync::OnceLock::new();
+/// Draws every frame for `display` instead of the window; set before the renderer starts.
+pub fn set_external_display(display: ExternalDisplay) {
+    let _ = EXTERNAL_DISPLAY.set(display);
+}
+fn external_display() -> Option<&'static ExternalDisplay> {
+    EXTERNAL_DISPLAY.get()
+}
 /// more than CPU time.
 /// `allow_nonconformant` offers the adapters wgpu hides for reporting no Vulkan
 /// conformance version: Mesa's hasvk, which drives Ivy Bridge and Haswell,
@@ -1155,11 +1186,13 @@ async fn open_backend(
     layers: u32,
 ) -> std::result::Result<Opened, NoDevice> {
     let name = backends_name(backends);
-    let instance = wgpu::Instance::new(instance_descriptor(
-        backends,
-        Some(window),
-        allow_nonconformant,
-    ));
+    let descriptor = instance_descriptor(backends, Some(window), allow_nonconformant);
+    let instance = match external_display() {
+        Some(display) if backends.contains(wgpu::Backends::VULKAN) => {
+            (display.instance)(descriptor)
+        }
+        _ => wgpu::Instance::new(descriptor),
+    };
     let surface = if offscreen {
         None
     } else {
@@ -1218,8 +1251,9 @@ async fn open_backend(
         ..Default::default()
     };
     #[cfg(not(target_os = "macos"))]
-    let opened = match info.backend {
-        wgpu::Backend::Vulkan => horizon_hdr::open_vulkan_device(&adapter, &desc),
+    let opened = match (info.backend, external_display()) {
+        (wgpu::Backend::Vulkan, Some(display)) => (display.device)(&adapter, &desc),
+        (wgpu::Backend::Vulkan, None) => horizon_hdr::open_vulkan_device(&adapter, &desc),
         _ => None,
     };
     #[cfg(target_os = "macos")]
@@ -1313,6 +1347,7 @@ impl Renderer {
         previous: Option<&Self>,
         api: GraphicsApi,
     ) -> Result<Self> {
+        let offscreen = offscreen || external_display().is_some();
         let Opened {
             instance,
             surface,
@@ -1364,7 +1399,10 @@ impl Renderer {
         }
         let info = adapter.get_info();
         crate::graphics::suggest_reduced_far_detail(crate::graphics::lod_capped(&info));
-        let size = window.inner_size();
+        let mut size = window.inner_size();
+        if let Some((width, height)) = external_display().and_then(|d| (d.size)()) {
+            size = winit::dpi::PhysicalSize::new(width, height);
+        }
         let max_side = device.limits().max_texture_dimension_2d;
         let (config, present_modes, hdr_output) = if let Some(surface) = &surface {
             let mut config = surface
@@ -1410,7 +1448,10 @@ impl Renderer {
         } else {
             let format = wgpu::TextureFormat::Bgra8Unorm;
             let config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                // Sampled: an external display copies frames out with a draw.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 format,
                 width: size.width.clamp(1, max_side),
                 height: size.height.clamp(1, max_side),
@@ -2848,6 +2889,7 @@ impl Renderer {
             surface,
             spare_surface: std::sync::Mutex::new(None),
             offscreen,
+            eye: None,
             in_flight: std::collections::VecDeque::new(),
             first_frame: if previous.is_none() {
                 FirstFrame::Acquire
@@ -3179,6 +3221,12 @@ impl Renderer {
     /// Follows the window to `width` x `height`. A size the swapchain can't take
     /// ([`drawable_size`]) keeps the last one and draws nothing until the next.
     pub fn resize(&mut self, width: u32, height: u32) {
+        let (width, height) = external_display()
+            .and_then(|d| (d.size)())
+            .unwrap_or((width, height));
+        if self.offscreen.is_some() && (width, height) == (self.config.width, self.config.height) {
+            return;
+        }
         let max = self.device.limits().max_texture_dimension_2d;
         self.suspended = !drawable_size(width, height, max);
         if self.suspended {
@@ -3980,8 +4028,20 @@ impl Renderer {
         self.mipmaps = levels;
         self.rebuild_terrain_group();
     }
+    /// Draws the next frames from a headset eye (`None`: the screen view
+    /// again), culled with `cull`, a view covering both eyes.
+    pub fn set_eye(&mut self, eye: Option<(View, View)>) {
+        self.eye = eye;
+    }
+    /// The offscreen frame `render` drew last, for an external display to show.
+    pub fn offscreen_texture(&self) -> Option<&wgpu::Texture> {
+        self.offscreen.as_ref()
+    }
     /// The views `render` draws `frame` from.
     pub fn views(&self, frame: &Frame) -> ViewSet {
+        if let Some((eye, cull)) = self.eye {
+            return ViewSet::with_cull(eye, cull);
+        }
         ViewSet::single(self.screen_view(
             frame.fov_degrees,
             frame.yaw,
@@ -3999,6 +4059,11 @@ impl Renderer {
         bob: Mat4,
         depth_far: f32,
     ) -> Frustum {
+        if let Some((_, cull)) = self.eye {
+            return Frustum {
+                planes: frustum(cull.view_proj(Mat4::IDENTITY)),
+            };
+        }
         let views = ViewSet::single(self.screen_view(fov_degrees, yaw, pitch, depth_far));
         Frustum {
             planes: frustum(views.cull().view_proj(bob)),
@@ -4195,7 +4260,12 @@ impl Renderer {
             frame.boss_darken,
         );
         let views = self.views(frame);
-        let pose = frame.bob * frame.spin;
+        // A headset's eye is where the head is: no bobbing or spin on it.
+        let pose = if self.eye.is_some() {
+            Mat4::IDENTITY
+        } else {
+            frame.bob * frame.spin
+        };
         let view_proj = views.primary().view_proj(pose);
         // TAA runs where the world post pass does, not under a shader pack's own.
         let taa = !frame.title
@@ -4549,8 +4619,12 @@ impl Renderer {
                         pages.push((s.page, None));
                     }
                 });
-                self.cutout_spans
-                    .push((v.distance, s.page, cut_start, self.cutout_draws.len() - cut_start));
+                self.cutout_spans.push((
+                    v.distance,
+                    s.page,
+                    cut_start,
+                    self.cutout_draws.len() - cut_start,
+                ));
             } else {
                 facing_runs(&s.sides, eye, v.origin, |first, quads| {
                     indices += quads * 6;
@@ -4612,8 +4686,12 @@ impl Renderer {
                         pages.push((s.page, None));
                     }
                 });
-                self.cutout_spans
-                    .push((v.distance, s.page, cut_start, self.cutout_draws.len() - cut_start));
+                self.cutout_spans.push((
+                    v.distance,
+                    s.page,
+                    cut_start,
+                    self.cutout_draws.len() - cut_start,
+                ));
             } else {
                 facing_runs(&s.sides, eye, v.origin, |first, quads| {
                     let base = s.start as u32 + first * 4;
@@ -6549,6 +6627,8 @@ fn camera_section(camera: DVec3, min_y: i32) -> SectionKey {
     )
 }
 
+/// The near plane every world view clips at (`world_projection`, `View::eye`).
+const NEAR_PLANE: f32 = 0.05;
 fn world_projection(fov_degrees: f32, aspect: f32, far: f32) -> Mat4 {
     Mat4::perspective_rh(fov_degrees.to_radians(), aspect, far, 0.05)
 }

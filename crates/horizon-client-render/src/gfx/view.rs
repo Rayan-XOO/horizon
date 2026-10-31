@@ -34,6 +34,31 @@ impl View {
         }
     }
 
+    /// A headset eye: `view` from the camera-relative world, and an
+    /// off-center lens from the tangents of its four half-angles
+    /// (left and down negative), reversed-Z like the screen's.
+    pub fn eye(view: Mat4, tangents: [f32; 4], far: f32) -> Self {
+        let [l, r, d, u] = tangents;
+        let near = super::NEAR_PLANE;
+        let projection = Mat4::from_cols(
+            glam::Vec4::new(2.0 / (r - l), 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, 2.0 / (u - d), 0.0, 0.0),
+            glam::Vec4::new(
+                (r + l) / (r - l),
+                (u + d) / (u - d),
+                near / (far - near),
+                -1.0,
+            ),
+            glam::Vec4::new(0.0, 0.0, near * far / (far - near), 0.0),
+        );
+        Self {
+            view,
+            projection,
+            aspect: (r - l) / (u - d),
+            tan_half_fov: (u - d) / 2.0,
+        }
+    }
+
     /// Clip space from the camera-relative world, with `pose` (view bobbing,
     /// nausea spin) between the lens and the rotation.
     pub fn view_proj(&self, pose: Mat4) -> Mat4 {
@@ -56,6 +81,16 @@ impl ViewSet {
             views: [view; MAX_VIEWS],
             len: 1,
             cull: view,
+        }
+    }
+
+    /// A frame drawn from `view`, culled with `cull` (a wider view, shared
+    /// by every eye of the frame).
+    pub fn with_cull(view: View, cull: View) -> Self {
+        Self {
+            views: [view; MAX_VIEWS],
+            len: 1,
+            cull,
         }
     }
 

@@ -103,6 +103,8 @@ controllers = ["dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/contr
 rng-trace = ["horizon-core/rng-trace"]
 # Compatibility with earlier experiment commands: main already uses mimalloc.
 windows-mimalloc = []
+# The Quest build; only horizon-android enables it (game/vr.rs).
+vr = []
 # Opt-in Windows heap experiment; see docs/windows-allocators.md.
 windows-segment-heap = []
 

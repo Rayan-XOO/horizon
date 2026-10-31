@@ -39,6 +39,8 @@ fn pack_files(world_tables: &Option<WorldTables>) -> horizon_world::loot::PackOv
     }
 }
 
+#[cfg(feature = "vr")]
+pub(crate) mod vr;
 mod advancements;
 mod advancements_screen;
 mod agent;
@@ -13794,9 +13796,18 @@ impl Game<'_> {
             },
             chunk_fade: self.settings.chunk_fade,
         };
+        #[cfg(feature = "vr")]
+        let in_menu = self.pad_in_menu();
         let result = match self.renderer.as_mut() {
             Some(renderer) => {
                 renderer.set_pass_timing(self.debug);
+                #[cfg(feature = "vr")]
+                if let Some(result) = vr::render(renderer, &frame, in_menu) {
+                    result
+                } else {
+                    horizon_client::spans::time("renderer", || renderer.render(&frame))
+                }
+                #[cfg(not(feature = "vr"))]
                 horizon_client::spans::time("renderer", || renderer.render(&frame))
             }
             None => Err("renderer".into()),
@@ -15678,6 +15689,8 @@ impl ApplicationHandler for Game<'_> {
             return;
         }
         self.touch_frame();
+        #[cfg(feature = "vr")]
+        self.vr_input(event_loop);
         self.poll_pads(event_loop);
         self.pause_if_inactive();
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {

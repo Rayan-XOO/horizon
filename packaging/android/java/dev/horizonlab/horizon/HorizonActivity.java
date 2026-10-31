@@ -132,7 +132,7 @@ public class HorizonActivity extends NativeActivity {
     public void openGameFolder(final String rel) {
         runOnUiThread(new Runnable() {
             public void run() {
-                String authority = "dev.horizonlab.horizon.documents";
+                String authority = getPackageName() + ".documents";
                 android.net.Uri root = android.provider.DocumentsContract.buildRootUri(authority, "horizon");
                 java.util.List<android.content.Intent> tries = new java.util.ArrayList<>();
                 if (rel != null && !rel.isEmpty() && !rel.contains("..")) {

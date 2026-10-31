@@ -8,6 +8,9 @@ export ANDROID_NDK_HOME="$NDK"
 BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)"
 PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
 PROFILE="${PROFILE:-fast}"
+# The Quest build (build_quest.sh) passes its own manifest and the OpenXR loader.
+MANIFEST="${MANIFEST:-packaging/android/AndroidManifest.xml}"
+EXTRA_LIBS="${EXTRA_LIBS:-}"
 OUT=target/android
 rm -rf "$OUT/stage" && mkdir -p "$OUT/stage/lib"
 cargo ndk -t arm64-v8a -P 26 -o "$OUT/jni" build -p horizon-android --profile "$PROFILE" ${CARGO_FLAGS:-}
@@ -20,14 +23,18 @@ rm -rf "$OUT/java" && mkdir -p "$OUT/java/classes"
 "$BT/d8" --min-api 26 --lib "$PLATFORM" --output "$OUT/java" $(find "$OUT/java/classes" -name '*.class')
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
 "$BT/aapt2" compile --dir packaging/android/res -o "$OUT/res/res.zip"
-"$BT/aapt2" link -o "$OUT/unaligned.apk" --manifest packaging/android/AndroidManifest.xml -I "$PLATFORM" \
+"$BT/aapt2" link -o "$OUT/unaligned.apk" --manifest "$MANIFEST" -I "$PLATFORM" \
   --min-sdk-version 26 --target-sdk-version 35 "$OUT/res/res.zip"
-python3 - "$OUT" <<'PY'
-import sys, zipfile
+python3 - "$OUT" "$EXTRA_LIBS" <<'PY'
+import os, sys, zipfile
 out = sys.argv[1]
+extra = sys.argv[2]
 with zipfile.ZipFile(f"{out}/unaligned.apk", "a", zipfile.ZIP_DEFLATED) as z:
     z.write(f"{out}/java/classes.dex", "classes.dex")
     z.write(f"{out}/stage/lib/arm64-v8a/libhorizon.so", "lib/arm64-v8a/libhorizon.so")
+    if extra:
+        for name in sorted(os.listdir(extra)):
+            z.write(os.path.join(extra, name), f"lib/arm64-v8a/{name}")
 PY
 "$BT/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/aligned.apk"
 if [ -n "${HORIZON_KEYSTORE:-}" ] && [ -f "$HORIZON_KEYSTORE" ]; then

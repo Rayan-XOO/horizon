@@ -52,6 +52,9 @@ fn android_main(app: AndroidApp) {
         apply_vulkan_driver(&internal);
         android_msa::prepare(&internal, &home);
     }
+    // The Quest build draws on the headset (game/vr.rs).
+    #[cfg(feature = "vr")]
+    game::vr::install();
     let _ = game::ANDROID_APP.set(app.clone());
     // A panic here is already in the crash report (crash::install). Catch it so the activity is
     // still finished below: a NativeActivity whose loop died shows a dead window otherwise.

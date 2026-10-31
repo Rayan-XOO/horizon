@@ -83,6 +83,10 @@ winit = { version = "0.30.13", features = ["android-native-activity"] }
 # The soft keyboard bridge and the activity calls (HorizonActivity.java, game/android_ime.rs).
 jni = "0.21"
 libc = "0.2"
+# The Quest build (`vr`): OpenXR through the Khronos loader, bundled in the APK.
+openxr = { version = "0.22", default-features = false, features = ["loaded"], optional = true }
+ash = { version = "0.38", default-features = false, optional = true }
+ndk-context = { version = "0.1", optional = true }
 
 [features]
 default = ["audio"]
@@ -90,6 +94,8 @@ audio = ["horizon-client/audio"]
 # Never on (gilrs has no Android backend); declared so the shared game code's cfg checks know it.
 controllers = []
 rng-trace = []
+# Meta Quest: stereo rendering through OpenXR and the controllers as the virtual pad (game/vr.rs).
+vr = ["dep:openxr", "dep:ash", "dep:ndk-context"]
 windows-mimalloc = []
 windows-segment-heap = []
 
