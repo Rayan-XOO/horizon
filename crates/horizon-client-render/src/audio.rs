@@ -872,6 +872,20 @@ impl Audio {
             &mut self.backend,
         );
     }
+    /// Stops (or restarts) the output stream itself, so nothing mixes or plays while the app is
+    /// in the background on a phone. Sounds keep their place and carry on afterwards.
+    pub fn set_output_paused(&mut self, paused: bool) {
+        #[cfg(feature = "audio")]
+        if let Some(stream) = &self._stream {
+            use cpal::traits::StreamTrait;
+            let result = if paused { stream.pause().map_err(|e| e.to_string()) } else { stream.play().map_err(|e| e.to_string()) };
+            if let Err(e) = result {
+                log::warn!("Horizon: audio output {}: {e}", if paused { "pause" } else { "resume" });
+            }
+        }
+        #[cfg(not(feature = "audio"))]
+        let _ = paused;
+    }
     /// `SoundManager.resume`.
     pub fn resume(&mut self) {
         self.engine.resume(&mut self.backend);

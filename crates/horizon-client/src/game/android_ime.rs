@@ -82,9 +82,30 @@ pub(crate) fn quit() {
     }
 }
 
-/// Open the game folder in the Files app (`HorizonActivity.openGameFolder`).
-pub fn open_game_folder() {
-    call("openGameFolder");
+/// Open `dir` (inside the game folder, else the game folder) in the Files app
+/// (`HorizonActivity.openGameFolder`).
+pub fn open_game_folder(dir: &std::path::Path) {
+    let home = std::env::current_dir().unwrap_or_default();
+    let rel = dir
+        .strip_prefix(&home)
+        .ok()
+        .map(|r| r.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let Some(app) = super::ANDROID_APP.get() else {
+        return;
+    };
+    let result = (|| -> jni::errors::Result<()> {
+        // SAFETY: as in `show`.
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
+        let mut env = vm.attach_current_thread_permanently()?;
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        let rel = env.new_string(rel)?;
+        env.call_method(&activity, "openGameFolder", "(Ljava/lang/String;)V", &[jni::objects::JValue::Object(&rel)])?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::warn!("Horizon: open folder: {e}");
+    }
 }
 
 fn call(method: &str) {

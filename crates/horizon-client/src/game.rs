@@ -14444,7 +14444,12 @@ impl ApplicationHandler for Game<'_> {
         if self.window.is_some() {
             // Android: the native window is back after the app was in the background.
             #[cfg(target_os = "android")]
-            ANDROID_BACKGROUND.store(false, Ordering::Relaxed);
+            {
+                ANDROID_BACKGROUND.store(false, Ordering::Relaxed);
+                self.audio.set_output_paused(false);
+                // The time away is not simulated in one go when the loop wakes up.
+                self.previous = Instant::now();
+            }
             if let Some(renderer) = &mut self.renderer
                 && let Err(e) = renderer.regain_surface()
             {
@@ -14499,10 +14504,25 @@ impl ApplicationHandler for Game<'_> {
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
         // Android: the native window goes away in the background. Stop polling
         // so the process sleeps instead of running at full speed behind Home.
+        // Home or another app: the game freezes. A world opens the pause menu (single player
+        // stops its server ticking), the sound output stops and the loop sleeps until the
+        // window is back.
         #[cfg(target_os = "android")]
         {
             ANDROID_BACKGROUND.store(true, Ordering::Relaxed);
             event_loop.set_control_flow(ControlFlow::Wait);
+            if self.player.is_some()
+                && self.title.is_none()
+                && self.screen == Screen::Playing
+                && self.control.is_none()
+            {
+                self.screen = Screen::Paused;
+            }
+            if let Some(server) = &self.integrated {
+                server.set_paused(true);
+            }
+            self.touch_release_all();
+            self.audio.set_output_paused(true);
         }
         if let Some(renderer) = &mut self.renderer {
             renderer.lose_surface();
@@ -15660,6 +15680,12 @@ impl ApplicationHandler for Game<'_> {
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
             self.error = Some("frame-limited run timed out".into());
             event_loop.exit();
+            return;
+        }
+        // In the background nothing is simulated or drawn: the loop waits for `resumed`.
+        #[cfg(target_os = "android")]
+        if ANDROID_BACKGROUND.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
         if let Some(w) = &self.window {

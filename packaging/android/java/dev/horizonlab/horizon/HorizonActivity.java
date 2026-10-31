@@ -30,6 +30,7 @@ public class HorizonActivity extends NativeActivity {
     static native void nativeKey(int key);
 
     private TextSink sink;
+    private volatile boolean quitting;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -60,23 +61,25 @@ public class HorizonActivity extends NativeActivity {
     }
 
     /**
-     * Called when the native loop has exited (Quit Game). NativeActivity does not
-     * finish itself, so the task stays and the next launch resumes a dead window
-     * (black screen, then it minimizes). Kill the process so the next tap is fresh.
+     * Called from the game thread once the native loop has exited (Quit Game, or the game could
+     * not go on). NativeActivity can't run the game twice in one process, so the task is removed
+     * and the process ends; the next launch starts clean instead of on a dead black window.
+     * Only this explicit path ends the process: opening Profile or Files, or the system
+     * recreating the activity, never does.
      */
     public void quit() {
+        quitting = true;
+        runOnUiThread(new Runnable() {
+            public void run() {
+                finishAndRemoveTask();
+            }
+        });
         new Thread(new Runnable() {
             public void run() {
-                runOnUiThread(new Runnable() {
-                    public void run() {
-                        finishAndRemoveTask();
-                    }
-                });
                 try {
-                    Thread.sleep(200);
+                    Thread.sleep(300);
                 } catch (InterruptedException ignored) {
                 }
-                android.os.Process.killProcess(android.os.Process.myPid());
                 System.exit(0);
             }
         }, "horizon-quit").start();
@@ -85,29 +88,48 @@ public class HorizonActivity extends NativeActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (isFinishing()) {
-            android.os.Process.killProcess(android.os.Process.myPid());
+        // The window went away for good while the game still ran in this process (swiped away,
+        // or finished by the system). The native side can't start again here: end the process
+        // so the next launch is a fresh one. A configuration change is not an end.
+        if (isFinishing() && !isChangingConfigurations() && !quitting) {
+            System.exit(0);
         }
     }
 
-    /** Called from the game thread. */
-    /** Called from the game thread: the Files app on the game folder. */
-    public void openGameFolder() {
+    /**
+     * Called from the game thread: the Files app on {@code rel}, a folder inside the game folder
+     * ("" for the game folder itself). Falls back to the game folder's root, then to Profile.
+     */
+    public void openGameFolder(final String rel) {
         runOnUiThread(new Runnable() {
             public void run() {
-                android.content.Intent view = new android.content.Intent(android.content.Intent.ACTION_VIEW);
-                view.setData(android.provider.DocumentsContract.buildRootUri(
-                        "dev.horizonlab.horizon.documents", "horizon"));
-                view.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-                try {
-                    startActivity(view);
-                } catch (Exception e) {
-                    startActivity(new android.content.Intent(HorizonActivity.this, ProfileActivity.class));
+                String authority = "dev.horizonlab.horizon.documents";
+                android.net.Uri root = android.provider.DocumentsContract.buildRootUri(authority, "horizon");
+                java.util.List<android.content.Intent> tries = new java.util.ArrayList<>();
+                if (rel != null && !rel.isEmpty() && !rel.contains("..")) {
+                    android.content.Intent dir = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                    dir.setDataAndType(android.provider.DocumentsContract.buildDocumentUri(authority, "root:" + rel),
+                            android.provider.DocumentsContract.Document.MIME_TYPE_DIR);
+                    tries.add(dir);
                 }
+                android.content.Intent top = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+                top.setData(root);
+                tries.add(top);
+                for (android.content.Intent i : tries) {
+                    i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                            | android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    try {
+                        startActivity(i);
+                        return;
+                    } catch (Exception ignored) {
+                    }
+                }
+                startActivity(new android.content.Intent(HorizonActivity.this, ProfileActivity.class));
             }
         });
     }
 
+    /** Called from the game thread while a text field has the focus. */
     public void showKeyboard(final boolean show) {
         runOnUiThread(new Toggle(this, show));
     }

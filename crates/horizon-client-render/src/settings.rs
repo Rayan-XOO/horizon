@@ -341,6 +341,7 @@ impl Settings {
             .parent()
             .map(crate::mod_list::ModList::load)
             .unwrap_or_default();
+        let first_run = !path.exists();
         let settings = match fs::read(path) {
             Ok(bytes) => Self {
                 horizon,
@@ -357,8 +358,11 @@ impl Settings {
                 ..Self::default()
             },
         };
+        // Only the first start's defaults: what the player sets afterwards stays.
         #[cfg(target_os = "android")]
-        let settings = settings.fit_phone();
+        let settings = if first_run { settings.fit_phone() } else { settings };
+        #[cfg(not(target_os = "android"))]
+        let _ = first_run;
         settings.describe_for_crashes();
         // Options.load: the backend asked for at startup, what a restart is measured from.
         Self {

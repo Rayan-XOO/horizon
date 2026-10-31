@@ -473,6 +473,17 @@ impl Game<'_> {
         self.pad.taps.push(Button::Start);
     }
 
+    /// Every finger lifted at once (the app went to the background): nothing stays held.
+    pub(super) fn touch_release_all(&mut self) {
+        self.touch.fingers.clear();
+        self.touch.knob = [0.0, 0.0];
+        self.touch.trigger_release = [0; 2];
+        self.touch.sprinting = false;
+        let sneaking = self.touch.sneaking;
+        self.pad.injected = Default::default();
+        self.pad.injected.set(Button::RightStick, sneaking);
+    }
+
     /// The controls over the HUD, while playing.
     pub(super) fn draw_touch_controls(&self, batch: &mut HudBatch) {
         let gui = Gui { w: batch.width, h: batch.height };

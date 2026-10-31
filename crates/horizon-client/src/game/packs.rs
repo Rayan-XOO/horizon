@@ -37,8 +37,7 @@ pub fn packs_dir() -> PathBuf {
 pub fn open_folder(dir: &Path) {
     #[cfg(target_os = "android")]
     {
-        let _ = dir;
-        super::android_ime::open_game_folder();
+        super::android_ime::open_game_folder(dir);
         return;
     }
     #[cfg(not(target_os = "android"))]
