@@ -35,6 +35,13 @@ fn android_main(app: AndroidApp) {
             std::env::set_var("HORIZON_CACHE", internal.join("horizon-cache"));
         }
         std::env::set_var("TMPDIR", app.internal_data_path().unwrap_or(home.clone()).join("tmp"));
+        // `spikes.txt` in the game folder (a number of milliseconds) turns on HORIZON_SPIKES:
+        // frames slower than that log their timings, without a debug build.
+        if let Ok(text) = std::fs::read_to_string(home.join("spikes.txt"))
+            && text.trim().parse::<f32>().is_ok()
+        {
+            std::env::set_var("HORIZON_SPIKES", text.trim());
+        }
     }
     let _ = std::fs::create_dir_all(home.join("..").join("cache"));
     let _ = std::env::set_current_dir(&home);
