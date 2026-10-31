@@ -60,6 +60,52 @@ final class Msa {
         }
     }
 
+    /** The saved account's Minecraft token runs out within the hour and it can be renewed. */
+    static boolean needsRefresh(Context c) {
+        try {
+            JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+            long exp = o.optLong("minecraft_expires_at", 0);
+            return !o.optString("refresh_token", "").isEmpty() && !clientId(c).isEmpty()
+                    && exp < System.currentTimeMillis() / 1000L + 3600;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Renews the saved account with its refresh token, so a player signs in once and stays
+     * signed in. Blocking; call it off the UI thread. Returns the error, or null when renewed.
+     * A refused refresh token signs the account out (the player has to sign in again).
+     */
+    static synchronized String refresh(Context c) {
+        try {
+            JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+            String refresh = o.optString("refresh_token", "");
+            String id = clientId(c);
+            if (refresh.isEmpty() || id.isEmpty()) return Ui.t("Нет данных для обновления входа.", "Nothing to renew the sign-in with.");
+            JSONObject token = postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                    "grant_type=refresh_token&client_id=" + enc(id) + "&refresh_token=" + enc(refresh)
+                            + "&scope=" + enc("XboxLive.signin offline_access"));
+            String access = token.optString("access_token", "");
+            if (access.isEmpty()) {
+                String err = token.optString("error", "");
+                if ("invalid_grant".equals(err)) {
+                    signOut(c);
+                    return Ui.t("Вход устарел, войдите в Microsoft ещё раз.", "The sign-in has expired; sign in with Microsoft again.");
+                }
+                return oauth(token);
+            }
+            String next = token.optString("refresh_token", "");
+            JSONObject account = finish(access, next.isEmpty() ? refresh : next);
+            write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
+            return null;
+        } catch (java.io.IOException e) {
+            return Ui.t("Нет сети, вход обновится позже.", "No network; the sign-in renews later.");
+        } catch (Exception e) {
+            return e.getMessage() == null ? Ui.t("Не удалось обновить вход.", "Could not renew the sign-in.") : e.getMessage();
+        }
+    }
+
     static void signOut(Context c) {
         accountFile(c).delete();
     }
@@ -88,7 +134,8 @@ final class Msa {
         String userCode = code.optString("user_code", "");
         String device = code.optString("device_code", "");
         if (userCode.isEmpty() || device.isEmpty()) throw new Exception(oauth(code));
-        listener.onCode(userCode, code.optString("verification_uri", "https://www.microsoft.com/link"));
+        String uri = code.optString("verification_uri", "https://www.microsoft.com/link");
+        listener.onCode(userCode, uri);
         int interval = Math.max(1, code.optInt("interval", 5));
         long deadline = System.currentTimeMillis() + code.optLong("expires_in", 900) * 1000L;
         JSONObject token = null;

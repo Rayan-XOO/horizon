@@ -28,6 +28,8 @@ public class HorizonActivity extends NativeActivity {
     static native void nativeText(String text);
     /** 1 = backspace, 2 = enter. */
     static native void nativeKey(int key);
+    /** The saved Microsoft account was renewed (Msa.refresh). */
+    static native void nativeAccountRefreshed();
 
     private TextSink sink;
     private volatile boolean quitting;
@@ -38,6 +40,33 @@ public class HorizonActivity extends NativeActivity {
         applyCutout(this);
         sink = new TextSink(this);
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+        renewAccount();
+    }
+
+    /** Keeps the Microsoft sign-in alive: renews it in the background when it is about to expire. */
+    private static volatile boolean renewing;
+
+    private void renewAccount() {
+        if (renewing || !Msa.needsRefresh(this)) return;
+        renewing = true;
+        final android.content.Context app = getApplicationContext();
+        new Thread(new Runnable() {
+            public void run() {
+                if (Msa.refresh(app) == null) {
+                    try {
+                        nativeAccountRefreshed();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                renewing = false;
+            }
+        }, "horizon-msa-refresh").start();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        renewAccount();
     }
 
     /** 0 short edges, 1 never (letterbox past the camera), 2 always. */

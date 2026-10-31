@@ -38,6 +38,10 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     private Button pick, model, save, back, driver, systemDriver, microsoft, signOut;
     private TextView driverStatus, accountStatus;
     private EditText clientId;
+    private LinearLayout codeBox, advancedBox;
+    private TextView code, codeHint;
+    private Button copy, browser, advanced;
+    private String verifyUri = "https://www.microsoft.com/link";
     private boolean slim;
 
     @Override
@@ -75,12 +79,18 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         card.addView(model, Ui.gap(this, 8));
         message = Ui.text(this, "", 13, Ui.WARN, false);
         card.addView(message, Ui.gap(this, 6));
-        card.addView(Ui.text(this, "Vulkan", 14, Ui.MUTED, false), Ui.gap(this, 16));
+        Ui.section(card, Ui.t("Драйвер Vulkan · экспериментально", "Vulkan driver · experimental"));
         driverStatus = Ui.text(this, Turnip.status(this), 13, Ui.TEXT, false);
         card.addView(driverStatus);
+        if (new File(getFilesDir(), "vulkan-driver.failed").isFile()) {
+            card.addView(Ui.text(this, Ui.t(
+                    "Свой драйвер не запустился в прошлый раз, игра вернулась на системный. Попробуйте другую сборку Turnip.",
+                    "The custom driver did not start last time, so the game went back to the system one. Try another Turnip build."),
+                    12, Ui.WARN, false), Ui.gap(this, 4));
+        }
         card.addView(Ui.text(this, Ui.t(
-                "Zip с Turnip (libvulkan_freedreno.so). На Snapdragon часто быстрее системного драйвера. Нужен перезапуск.",
-                "A Turnip zip (libvulkan_freedreno.so). Often faster than the system driver on Snapdragon. Restart required."),
+                "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного драйвера. Если игра с ним не стартует, при следующем запуске включится системный.",
+                "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."),
                 12, Ui.MUTED, false), Ui.gap(this, 4));
         driver = Ui.button(this, Ui.t("Установить Turnip", "Install Turnip"), false);
         driver.setOnClickListener(this);
@@ -88,7 +98,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         systemDriver = Ui.button(this, Ui.t("Системный драйвер", "System driver"), false);
         systemDriver.setOnClickListener(this);
         card.addView(systemDriver, Ui.gap(this, 8));
-        card.addView(Ui.text(this, Ui.t("Вырез камеры", "Camera cutout"), 14, Ui.MUTED, false), Ui.gap(this, 16));
+        Ui.section(card, Ui.t("Экран", "Screen"));
         Button cutout = Ui.button(this, cutoutLabel(), false);
         cutout.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -106,27 +116,67 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             }
         });
         card.addView(cutout, Ui.gap(this, 8));
-        card.addView(Ui.text(this, "Microsoft", 14, Ui.MUTED, false), Ui.gap(this, 16));
-        accountStatus = Ui.text(this, accountLine(), 13, Ui.TEXT, false);
+        Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+        accountStatus = Ui.text(this, accountLine(), 14, Ui.TEXT, true);
         card.addView(accountStatus);
         card.addView(Ui.text(this, Ui.t(
-                "Свой Azure client ID (не чужой). Без одобрения Mojang вход на лицензионные сервера не пройдёт. aka.ms/mce-reviewappid",
-                "Your own Azure client ID (not someone else's). Without Mojang's approval, licensed servers will refuse the sign-in. aka.ms/mce-reviewappid"),
-                12, Ui.MUTED, false), Ui.gap(this, 4));
-        clientId = new EditText(this);
-        clientId.setSingleLine(true);
-        clientId.setTextColor(Ui.TEXT);
-        clientId.setHint("00000000-0000-0000-0000-000000000000");
-        clientId.setText(Msa.clientId(this));
-        clientId.setPadding(p, p, p, p);
-        clientId.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.EDGE, 8));
-        card.addView(clientId, Ui.gap(this, 8));
-        microsoft = Ui.button(this, Ui.t("Войти в Microsoft", "Sign in with Microsoft"), true);
+                "Нужен только для лицензионных серверов. Войти можно один раз: вход обновляется сам.",
+                "Only needed for licensed servers. Sign in once: it renews by itself."),
+                12, Ui.MUTED, false), Ui.gap(this, 2));
+        codeBox = new LinearLayout(this);
+        codeBox.setOrientation(LinearLayout.VERTICAL);
+        codeBox.setPadding(p, p, p, p);
+        codeBox.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.GREEN_DARK, 10));
+        codeBox.setVisibility(View.GONE);
+        codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
+        codeBox.addView(codeHint);
+        code = Ui.text(this, "", 30, Ui.TEXT, true);
+        code.setGravity(android.view.Gravity.CENTER);
+        code.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+        code.setLetterSpacing(0.12f);
+        code.setTextIsSelectable(true);
+        codeBox.addView(code, Ui.gap(this, 4));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        copy = Ui.button(this, Ui.t("Скопировать код", "Copy code"), false);
+        copy.setOnClickListener(this);
+        browser = Ui.button(this, Ui.t("Открыть браузер", "Open browser"), true);
+        browser.setOnClickListener(this);
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        row.addView(copy, half);
+        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        half2.leftMargin = Ui.dp(this, 8);
+        row.addView(browser, half2);
+        codeBox.addView(row, Ui.gap(this, 8));
+        card.addView(codeBox, Ui.gap(this, 8));
+        microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
         microsoft.setOnClickListener(this);
         card.addView(microsoft, Ui.gap(this, 8));
         signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
         signOut.setOnClickListener(this);
+        signOut.setVisibility(Msa.signedIn(this).isEmpty() ? View.GONE : View.VISIBLE);
         card.addView(signOut, Ui.gap(this, 8));
+        advanced = Ui.button(this, Ui.t("Дополнительно ▾", "Advanced ▾"), false);
+        advanced.setOnClickListener(this);
+        card.addView(advanced, Ui.gap(this, 8));
+        advancedBox = new LinearLayout(this);
+        advancedBox.setOrientation(LinearLayout.VERTICAL);
+        advancedBox.addView(Ui.text(this, Ui.t(
+                "Azure client ID. Нужен свой, одобренный Mojang для Minecraft (заявка: aka.ms/mce-reviewappid), иначе сервисы Minecraft откажут во входе. Чужие ID не вставляйте.",
+                "Azure client ID. It has to be your own, approved by Mojang for Minecraft (apply at aka.ms/mce-reviewappid), or the Minecraft services refuse the sign-in. Don't paste someone else's ID."),
+                12, Ui.MUTED, false));
+        clientId = new EditText(this);
+        clientId.setSingleLine(true);
+        clientId.setTextColor(Ui.TEXT);
+        clientId.setHintTextColor(Ui.MUTED);
+        clientId.setHint("00000000-0000-0000-0000-000000000000");
+        clientId.setText(Msa.clientId(this));
+        clientId.setPadding(p, p, p, p);
+        clientId.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.EDGE, 8));
+        advancedBox.addView(clientId, Ui.gap(this, 6));
+        advancedBox.setVisibility(Msa.clientId(this).isEmpty() ? View.VISIBLE : View.GONE);
+        card.addView(advancedBox, Ui.gap(this, 6));
+        Ui.section(card, "");
         save = Ui.button(this, Ui.t("Сохранить", "Save"), true);
         save.setOnClickListener(this);
         card.addView(save, Ui.gap(this, 12));
@@ -198,11 +248,25 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             driverStatus.setText(Turnip.status(this));
             message.setTextColor(Ui.GREEN);
             message.setText(Ui.t("Системный драйвер. Перезапустите игру.", "System driver. Restart the game."));
+        } else if (v == copy) {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("code", code.getText()));
+            copy.setText(Ui.t("Скопировано ✓", "Copied ✓"));
+        } else if (v == browser) {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(verifyUri)));
+            } catch (Exception e) {
+                message.setText(Ui.t("Нет браузера. Откройте ", "No browser. Open ") + verifyUri);
+            }
+        } else if (v == advanced) {
+            advancedBox.setVisibility(advancedBox.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
         } else if (v == microsoft) {
             String id = clientId.getText().toString().trim();
-            if (id.length() < 32) {
+            if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+                advancedBox.setVisibility(View.VISIBLE);
                 message.setTextColor(Ui.WARN);
-                message.setText(Ui.t("Вставьте свой Azure client ID.", "Paste your own Azure client ID."));
+                message.setText(Ui.t("Сначала вставьте свой Azure client ID в «Дополнительно».",
+                        "Paste your own Azure client ID under Advanced first."));
                 return;
             }
             try {
@@ -213,12 +277,20 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             }
             message.setTextColor(Ui.WARN);
             message.setText(Ui.t("Запрашиваем код…", "Requesting a code…"));
+            microsoft.setEnabled(false);
             Msa.start(this, id, new Msa.Listener() {
                 public void onCode(final String userCode, final String uri) {
                     runOnUiThread(new Runnable() {
                         public void run() {
-                            message.setText(Ui.t("Откройте ", "Open ") + uri + Ui.t(" и введите ", " and enter ") + userCode);
-                            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(uri)));
+                            verifyUri = uri;
+                            code.setText(userCode);
+                            codeHint.setText(Ui.t("Откройте ", "Open ") + uri.replace("https://", "")
+                                    + Ui.t(", введите код и войдите. Эта страница сама поймёт, что вы вошли.",
+                                    ", enter the code and sign in. This screen notices by itself."));
+                            copy.setText(Ui.t("Скопировать код", "Copy code"));
+                            codeBox.setVisibility(View.VISIBLE);
+                            microsoft.setText(Ui.t("Ждём вход…", "Waiting for sign-in…"));
+                            message.setText("");
                         }
                     });
                 }
@@ -226,6 +298,10 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                     runOnUiThread(new Runnable() {
                         public void run() {
                             accountStatus.setText(accountLine());
+                            codeBox.setVisibility(View.GONE);
+                            signOut.setVisibility(View.VISIBLE);
+                            microsoft.setText(Ui.t("Войти через Microsoft", "Sign in with Microsoft"));
+                            microsoft.setEnabled(true);
                             message.setTextColor(Ui.GREEN);
                             message.setText(Ui.t("Вход выполнен: ", "Signed in: ") + name
                                     + Ui.t(". Перезапустите игру, чтобы зайти на лицензионный сервер.",
@@ -236,6 +312,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                 public void onError(final String error) {
                     runOnUiThread(new Runnable() {
                         public void run() {
+                            codeBox.setVisibility(View.GONE);
+                            microsoft.setText(Ui.t("Войти через Microsoft", "Sign in with Microsoft"));
+                            microsoft.setEnabled(true);
                             message.setTextColor(Ui.WARN);
                             message.setText(error);
                         }
@@ -246,6 +325,9 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             Msa.cancel();
             Msa.signOut(this);
             accountStatus.setText(accountLine());
+            signOut.setVisibility(View.GONE);
+            codeBox.setVisibility(View.GONE);
+            microsoft.setEnabled(true);
             message.setTextColor(Ui.GREEN);
             message.setText(Ui.t("Вышли. Перезапустите игру.", "Signed out. Restart the game."));
         } else if (v == back) {
@@ -271,7 +353,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
 
     private String accountLine() {
         String name = Msa.signedIn(this);
-        if (name.isEmpty()) return Ui.t("Аккаунт не подключён. Сервера с лицензией не пустят.", "No account. Licensed servers will refuse you.");
+        if (name.isEmpty()) return Ui.t("Не подключён", "Not connected");
         return Ui.t("Аккаунт: ", "Account: ") + name;
     }
 
