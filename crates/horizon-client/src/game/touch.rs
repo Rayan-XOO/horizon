@@ -217,6 +217,8 @@ pub(super) struct Touches {
     selected: Option<Id>,
     /// The soft keyboard was asked for.
     ime_shown: bool,
+    /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
+    ime_retap: bool,
 }
 
 impl Default for Touches {
@@ -231,6 +233,7 @@ impl Default for Touches {
             editing: false,
             selected: None,
             ime_shown: false,
+            ime_retap: false,
         }
     }
 }
@@ -611,11 +614,16 @@ impl Game<'_> {
     fn touch_ime(&mut self) {
         use super::android_ime::{self, ImeInput};
         let want = self.touch_text_focused()
-            || self.title.as_mut().is_some_and(|t| t.focused_field().is_some());
-        if want != self.touch.ime_shown {
+            || (self.screen == super::Screen::Options && self.ui.options.wants_text())
+            || (self.screen == super::Screen::WorldOptions
+                && self.world_options.as_ref().and_then(|o| o.rules.as_ref()).is_some_and(|r| r.typing()))
+            || (self.screen != super::Screen::Options
+                && self.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
+        if want != self.touch.ime_shown || (want && self.touch.ime_retap) {
             self.touch.ime_shown = want;
             android_ime::show(want);
         }
+        self.touch.ime_retap = false;
         for input in android_ime::take() {
             self.last_input = Instant::now();
             self.pad_osk_output(match input {
@@ -747,6 +755,9 @@ impl Game<'_> {
                 } else if !self.touch_controls_shown() {
                     send(self, cursor(device_id, pos));
                     send(self, click(device_id, ElementState::Pressed));
+                    // Asked again on the next frame: a tap on a text field brings the
+                    // keyboard back after the system's back gesture hid it.
+                    self.touch.ime_retap = true;
                     Finger::Pointer
                 } else if self.touch.editing {
                     if let Some(action) = gui.panel_hit(p) {

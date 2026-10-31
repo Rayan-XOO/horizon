@@ -151,8 +151,8 @@ public class HorizonActivity extends NativeActivity {
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo info) {
-            info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                    | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+            // Plain text: a password variation would lock some keyboards to Latin letters.
+            info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             info.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_FULLSCREEN
                     | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
             return new Connection(this);

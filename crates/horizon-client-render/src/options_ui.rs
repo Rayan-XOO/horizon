@@ -1473,6 +1473,18 @@ impl OptionsUi {
         let label = format!("{}: {}", item.caption(), item.value(&s.extras));
         button(0.0, 0.0, 150.0, Text::literal(label), Act::Extra(item))
     }
+    /// A text box here has the focus: the language or settings search, or the pack screen's.
+    /// Touch builds show the system keyboard while it is true.
+    pub fn wants_text(&self) -> bool {
+        if self.resource_error.is_some() {
+            return false;
+        }
+        match self.page() {
+            Page::Language => self.language_search.focused,
+            Page::Packs => self.pack_screen.as_ref().is_some_and(|p| p.search_focused()),
+            _ => self.settings_search_active(),
+        }
+    }
     fn settings_search_active(&self) -> bool {
         self.settings_search.focused
             && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds)
@@ -2939,6 +2951,16 @@ impl OptionsUi {
         }
         let (widgets, top, bottom, content) = self.layout(s, size.0, size.1);
         let mut events = Vec::new();
+        // A tap on the language search box focuses it (and brings up a phone's keyboard);
+        // a tap anywhere else lets it go. Typing still goes to it either way.
+        if !drag && self.page() == Page::Language {
+            let search = &mut self.language_search;
+            search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);
+            if search.focused {
+                search.click(atlas, x, false, false);
+                return events;
+            }
+        }
         if !drag && matches!(self.page(), Page::Video | Page::Controls | Page::KeyBinds) {
             let search = &mut self.settings_search;
             search.focused = ui::hovered((x, y), search.x, search.y, search.width, search.height);

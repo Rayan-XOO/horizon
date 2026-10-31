@@ -39,7 +39,7 @@ pub(super) struct WorldOptions {
     scroll: f32,
     view: View,
     /// InWorldGameRulesScreen, while it is open.
-    rules: Option<RulesScreen>,
+    pub(super) rules: Option<RulesScreen>,
 }
 /// The screen on show: the options, the lock's question over them, or the
 /// RestrictionsScreen or InWorldGameRulesScreen they opened (all return to

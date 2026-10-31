@@ -92,27 +92,22 @@ impl Pads {
 impl Game<'_> {
     /// Once per loop iteration: read the pads and act on button changes.
     pub(super) fn poll_pads(&mut self, event_loop: &ActiveEventLoop) {
-        let settings = &self.settings.controller;
-        if !settings.enabled {
+        // Controllers off: the touch controls still drive the virtual pad, and
+        // its buttons go through the same edge handling as a real pad's.
+        let touch_only = !self.settings.controller.enabled;
+        if touch_only {
             self.pad_output_off();
-            // Touch controls write the virtual pad even when a physical
-            // controller is off. Dropping that input left walking dead on
-            // servers while a boat (which still read the stick) could move.
-            let injected = self.pad.injected;
-            if injected != PadState::default() {
-                self.pad.virtual_input = true;
-                self.pad.state = injected;
+            if self.pad.injected == PadState::default() && self.pad.taps.is_empty() {
+                if self.pad.state != PadState::default() {
+                    self.pad.state = PadState::default();
+                    for (button, down) in self.pad.edges.release_all() {
+                        self.pad_edge(event_loop, button, down);
+                    }
+                }
                 return;
             }
-            if self.pad.state != PadState::default() {
-                self.pad.state = PadState::default();
-                for (button, down) in self.pad.edges.release_all() {
-                    self.pad_edge(event_loop, button, down);
-                }
-            }
-            return;
         }
-        let hardware = self.pad.read();
+        let hardware = if touch_only { PadState::default() } else { self.pad.read() };
         self.ui.options.pad_style = self.settings.controller.glyphs.resolve(self.pad.style);
         let state = hardware.merge(&self.pad.injected);
         self.pad.virtual_input = self.pad.injected != PadState::default();
@@ -123,10 +118,15 @@ impl Game<'_> {
         let edges = self.pad.edges.update(&state, threshold);
         if state.active(&self.settings.controller) {
             self.last_input = Instant::now();
-            self.pad.in_use = true;
+            // Touch is not a controller: no pad cursor, glyphs or pad keyboard for it.
+            if !touch_only {
+                self.pad.in_use = true;
+            }
         }
         self.pad.state = state;
-        self.pad_output_frame();
+        if !touch_only {
+            self.pad_output_frame();
+        }
         // Damage from any source, here or on a server; nothing counts on
         // the title screen.
         let health = self
