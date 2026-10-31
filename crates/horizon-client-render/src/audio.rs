@@ -820,6 +820,12 @@ impl Audio {
             self.devices_seen = output_devices();
             return true;
         }
+        // Android: AAudio follows the system's routing by itself, and listing the
+        // devices goes through JNI (AudioManager) on the game thread, which stalls a
+        // frame each time. Only a lost stream (above) reopens the output there.
+        if cfg!(target_os = "android") {
+            return false;
+        }
         self.device_ticks += 1;
         if self._stream.is_none() || self.device_ticks < 20 {
             return false;

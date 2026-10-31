@@ -218,8 +218,10 @@ impl Default for Settings {
             gamma: 0.5,
             // Vanilla's default, as for an options.txt without the key: a
             // capped frame rate leaves the cores idle when VSync is off.
-            max_fps: 120,
-            vsync: true,
+            // A phone starts uncapped with VSync off: the frame rate the
+            // performance preset is about.
+            max_fps: if cfg!(target_os = "android") { 260 } else { 120 },
+            vsync: !cfg!(target_os = "android"),
             fullscreen: false,
             smooth_lighting: true,
             clouds: "true".into(),
