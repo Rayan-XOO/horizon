@@ -472,6 +472,12 @@ pub struct Renderer {
     cull_on: bool,
     /// Solid quads facing away from the eye are left out (`mesher::Sides`).
     sides_on: bool,
+    /// Whether opaque terrain draws apart from cutout terrain (`fs_opaque`).
+    split_on: bool,
+    solid_opaque: wgpu::RenderPipeline,
+    cutout_draws: Vec<[u32; 5]>,
+    cutout_pages: Vec<(u32, Option<u32>)>,
+    cutout_spans: Vec<(u64, u32, usize, usize)>,
     sky: wgpu::RenderPipeline,
     dark_disc: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
@@ -1602,6 +1608,17 @@ impl Renderer {
             "Terrain solid",
             "vs_terrain",
             "fs_solid",
+            &terrain_buffers,
+            tri,
+            Some(wgpu::Face::Back),
+            true,
+            true,
+            None,
+        );
+        let solid_opaque = pipeline(
+            "Terrain opaque",
+            "vs_terrain",
+            "fs_opaque",
             &terrain_buffers,
             tri,
             Some(wgpu::Face::Back),
@@ -2851,6 +2868,11 @@ impl Renderer {
             flat_on: flat.is_some(),
             cull_on: cull.is_some(),
             sides_on: true,
+            split_on: true,
+            solid_opaque,
+            cutout_draws: Vec::new(),
+            cutout_pages: Vec::new(),
+            cutout_spans: Vec::new(),
             cull,
             flat,
             sky,
@@ -3191,6 +3213,15 @@ impl Renderer {
     /// Whether solid quads facing away from the eye are left out.
     pub fn section_sides(&self) -> bool {
         self.sides_on
+    }
+    /// Whether opaque terrain draws first, apart from cutout terrain.
+    pub fn opaque_split(&self) -> bool {
+        self.split_on
+    }
+    /// Switches drawing opaque terrain apart, with a pipeline that never
+    /// discards, before cutout terrain.
+    pub fn set_opaque_split(&mut self, on: bool) {
+        self.split_on = on;
     }
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {
@@ -4475,6 +4506,21 @@ impl Renderer {
         self.phase2_pages.clear();
         self.solid_runs.clear();
         self.phase2_runs.clear();
+        // Opaque quads of whole sections draw first with a pipeline that never
+        // discards, the cutout rest after them; occlusion culling and a pack's
+        // own terrain pipelines keep the one list.
+        let split = self.split_on
+            && cull.is_none()
+            && !pack_terrain
+            && self
+                .native
+                .as_ref()
+                .filter(|_| !frame.title)
+                .and_then(|n| n.material.as_ref())
+                .is_none();
+        self.cutout_draws.clear();
+        self.cutout_pages.clear();
+        self.cutout_spans.clear();
         for (i, v) in visible.iter().enumerate() {
             let s = self.sections.get(v.slot);
             let first_phase = cull.as_ref().is_none_or(|c| c.first(v.slot));
@@ -4486,12 +4532,32 @@ impl Renderer {
             let start = draws.len();
             let instances = u32::from(first_phase);
             let mut indices = 0;
-            facing_runs(&s.sides, eye, v.origin, |first, quads| {
-                indices += quads * 6;
-                let base = s.start as u32 + first * 4;
-                draws.push([quads * 6, instances, 0, base, i as u32]);
-                pages.push((s.page, None));
-            });
+            if split {
+                let whole = self.origins[i][3] >= 0.0;
+                let cut_start = self.cutout_draws.len();
+                let (cut, cut_pages) = (&mut self.cutout_draws, &mut self.cutout_pages);
+                split_runs(&s.sides, eye, v.origin, |first, quads, cutout| {
+                    indices += quads * 6;
+                    let base = s.start as u32 + first * 4;
+                    let draw = [quads * 6, instances, 0, base, i as u32];
+                    if cutout || !whole {
+                        cut.push(draw);
+                        cut_pages.push((s.page, None));
+                    } else {
+                        draws.push(draw);
+                        pages.push((s.page, None));
+                    }
+                });
+                self.cutout_spans
+                    .push((v.distance, s.page, cut_start, self.cutout_draws.len() - cut_start));
+            } else {
+                facing_runs(&s.sides, eye, v.origin, |first, quads| {
+                    indices += quads * 6;
+                    let base = s.start as u32 + first * 4;
+                    draws.push([quads * 6, instances, 0, base, i as u32]);
+                    pages.push((s.page, None));
+                });
+            }
             let runs = if first_phase {
                 &mut self.solid_runs
             } else {
@@ -4529,16 +4595,50 @@ impl Renderer {
             let s = self.lods[&v.key].drawn();
             let start = self.draws.len();
             let instance = (visible.len() + i) as u32;
-            facing_runs(&s.sides, eye, v.origin, |first, quads| {
-                let base = s.start as u32 + first * 4;
-                self.draws.push([quads * 6, 1, 0, base, instance]);
-                self.draw_pages.push((s.page, None));
-            });
+            if split {
+                let whole = self.origins[instance as usize][3] >= 0.0;
+                let cut_start = self.cutout_draws.len();
+                let (draws, pages) = (&mut self.draws, &mut self.draw_pages);
+                let (cut, cut_pages) = (&mut self.cutout_draws, &mut self.cutout_pages);
+                split_runs(&s.sides, eye, v.origin, |first, quads, cutout| {
+                    let base = s.start as u32 + first * 4;
+                    let draw = [quads * 6, 1, 0, base, instance];
+                    if cutout || !whole {
+                        cut.push(draw);
+                        cut_pages.push((s.page, None));
+                    } else {
+                        draws.push(draw);
+                        pages.push((s.page, None));
+                    }
+                });
+                self.cutout_spans
+                    .push((v.distance, s.page, cut_start, self.cutout_draws.len() - cut_start));
+            } else {
+                facing_runs(&s.sides, eye, v.origin, |first, quads| {
+                    let base = s.start as u32 + first * 4;
+                    self.draws.push([quads * 6, 1, 0, base, instance]);
+                    self.draw_pages.push((s.page, None));
+                });
+            }
             self.solid_runs
                 .push(v.distance, s.page, start, self.draws.len() - start, [0; 3]);
         }
         self.solid_runs
             .regroup(&mut self.draws, &mut self.draw_pages, tiles);
+        // The cutout draws (and whole fading sections) after every opaque one.
+        let opaque_draws = if split { self.draws.len() as u32 } else { 0 };
+        if split {
+            let cut_base = self.draws.len();
+            self.solid_runs.clear();
+            for &(distance, page, start, len) in &self.cutout_spans {
+                self.solid_runs
+                    .push(distance, page, cut_base + start, len, [0; 3]);
+            }
+            self.draws.extend_from_slice(&self.cutout_draws);
+            self.draw_pages.extend_from_slice(&self.cutout_pages);
+            self.solid_runs
+                .regroup(&mut self.draws, &mut self.draw_pages, cut_base);
+        }
         let phase1_draws = self.draws.len() as u32;
         self.draws.extend_from_slice(&self.phase2_draws);
         self.draw_pages.extend_from_slice(&self.phase2_pages);
@@ -4740,6 +4840,7 @@ impl Renderer {
             (0..self.section_draws)
                 .filter(|&i| {
                     i == 0
+                        || i == opaque_draws as usize
                         || i == phase1_draws as usize
                         || i == solid_draws as usize
                         || self.draw_pages[i] != self.draw_pages[i - 1]
@@ -5427,7 +5528,22 @@ impl Renderer {
                                 solid_draws - phase1_draws,
                             );
                         }
-                        None => self.draw_sections(&mut pass, &self.indirect, 0, 0, solid_draws),
+                        None => {
+                            // Only Horizon's own terrain pipeline splits.
+                            let opaque = if material.is_none() { opaque_draws } else { 0 };
+                            if opaque > 0 {
+                                pass.set_pipeline(&self.solid_opaque);
+                                self.draw_sections(&mut pass, &self.indirect, 0, 0, opaque);
+                                pass.set_pipeline(solid_pipeline);
+                            }
+                            self.draw_sections(
+                                &mut pass,
+                                &self.indirect,
+                                0,
+                                opaque,
+                                solid_draws - opaque,
+                            );
+                        }
                     }
                 }
             }
@@ -6462,6 +6578,27 @@ fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], mut draw: imp
         Some(eye) => sides.visible((eye - Vec3::from(origin)).to_array(), draw),
         None if sides.quads() > 0 => draw(0, sides.quads()),
         None => {}
+    }
+}
+/// As `facing_runs`, with the opaque and cutout halves of the mesh in runs
+/// of their own: `draw(first, quads, cutout)`.
+fn split_runs(
+    sides: &Sides,
+    eye: Option<Vec3>,
+    origin: [f32; 3],
+    mut draw: impl FnMut(u32, u32, bool),
+) {
+    match eye {
+        Some(eye) => sides.visible_split((eye - Vec3::from(origin)).to_array(), draw),
+        None => {
+            let (opaque, all) = (sides.opaque_quads(), sides.quads());
+            if opaque > 0 {
+                draw(0, opaque, false);
+            }
+            if all > opaque {
+                draw(opaque, all - opaque, true);
+            }
+        }
     }
 }
 fn frustum(m: Mat4) -> [Vec4; 6] {

@@ -13390,6 +13390,9 @@ impl Game<'_> {
             camera.y.floor() as i32,
             camera.z.floor() as i32,
         ];
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_opaque_split(self.settings.horizon.opaque_split);
+        }
         // The camera inside an opaque block sees nothing through it: disable.
         let cave_culling = self.settings.horizon.cave_culling
             && !self

@@ -319,6 +319,15 @@ fn apply_fog(color: vec4<f32>, spherical: f32, cylindrical: f32) -> vec4<f32> {
     let emissive = select(1.0, 0.7 * f32(4u - min(in.emission, 4u)) / 4.0, in.emission > 0u);
     return apply_fog(vec4(color.rgb, emissive), in.spherical, in.cylindrical);
 }
+// fs_solid for quads marked opaque in sections not fading in or out: no
+// discard, so the GPU keeps its early depth test (and on tilers, the
+// low-resolution depth pass) for the bulk of the terrain.
+@fragment fn fs_opaque(in: TerrainOut) -> @location(0) vec4<f32> {
+    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
+    let emissive = select(1.0, 0.7 * f32(4u - min(in.emission, 4u)) / 4.0, in.emission > 0u);
+    return apply_fog(vec4(color.rgb, emissive), in.spherical, in.cylindrical);
+}
 // Water, glass and other see-through faces draw whole as they fade in, the
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
