@@ -401,7 +401,8 @@ pub struct Graphics {
     pub battery: bool,
     /// Opaque terrain drawn apart from cutout terrain (leaves, grass), first
     /// and with a shader that never discards, so the GPU's early depth test
-    /// stays on. On by default; it changes only how fast terrain draws.
+    /// stays on. Off by default (0.3.5 had it on under `opaqueSplit`, which is
+    /// now ignored); it changes only how fast terrain draws.
     pub opaque_split: bool,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
@@ -439,7 +440,7 @@ impl Default for Graphics {
             hdr_ui_brightness: 100,
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
-            opaque_split: true,
+            opaque_split: false,
             api: GraphicsApi::Auto,
             shader_pack: String::new(),
         }
@@ -519,7 +520,7 @@ impl Graphics {
                 }
                 "hdrKey" if value.starts_with("key.") => g.hdr_key = value.to_owned(),
                 "batteryMode" => g.battery = flag(g.battery),
-                "opaqueSplit" => g.opaque_split = flag(g.opaque_split),
+                "fastOpaquePass" => g.opaque_split = flag(g.opaque_split),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
@@ -536,7 +537,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nopaqueSplit:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\nfastOpaquePass:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -715,7 +716,7 @@ mod tests {
             hdr_ui_brightness: 60,
             hdr_key: "key.keyboard.h".into(),
             battery: true,
-            opaque_split: false,
+            opaque_split: true,
             api: GraphicsApi::Dx12,
             shader_pack: "Golden Hour".into(),
         };

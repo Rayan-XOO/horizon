@@ -20,6 +20,17 @@
 //! never discard a fragment, then for the cutout rest. The renderer can draw
 //! the opaque half with a pipeline that keeps the GPU's early depth test.
 use super::{OPAQUE_LAYER, TerrainVertex};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether meshes are sorted into opaque and cutout halves. Off, every quad
+/// goes to the cutout half and the buckets are as before the split, so the
+/// unsplit draw lists have no extra runs. Meshes sorted either way draw
+/// correctly either way: an empty opaque half just draws nothing apart.
+static SPLIT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_split(on: bool) {
+    SPLIT.store(on, Ordering::Relaxed);
+}
 
 /// The buckets in mesh order: +X, +Z, other, +Y, -Z, -X, -Y. Seen from
 /// above (+Y, the commonest case), each pair of horizontal sides with a
@@ -161,10 +172,11 @@ fn bucket(quad: &[TerrainVertex; 4]) -> usize {
 pub fn sort(solid: &mut Vec<TerrainVertex>) -> Sides {
     let (quads, rest) = solid.as_chunks::<4>();
     debug_assert!(rest.is_empty(), "solid vertices come in quads");
+    let split = SPLIT.load(Ordering::Relaxed) || cfg!(test);
     let buckets: Vec<u8> = quads
         .iter()
         .map(|q| {
-            let cutout = if q[0].layer & OPAQUE_LAYER == 0 { CUTOUT } else { 0 };
+            let cutout = if !split || q[0].layer & OPAQUE_LAYER == 0 { CUTOUT } else { 0 };
             (bucket(q) + cutout) as u8
         })
         .collect();

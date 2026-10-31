@@ -2868,7 +2868,7 @@ impl Renderer {
             flat_on: flat.is_some(),
             cull_on: cull.is_some(),
             sides_on: true,
-            split_on: true,
+            split_on: false,
             solid_opaque,
             cutout_draws: Vec::new(),
             cutout_pages: Vec::new(),
@@ -3222,6 +3222,7 @@ impl Renderer {
     /// discards, before cutout terrain.
     pub fn set_opaque_split(&mut self, on: bool) {
         self.split_on = on;
+        crate::mesher::sides::set_split(on);
     }
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {

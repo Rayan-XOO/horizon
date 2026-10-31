@@ -129,7 +129,21 @@ pub fn rows(level: Level) -> Vec<Row> {
         "Sets the options below together. Changing one makes it Custom.",
     );
     let mut rows = match level {
-        Level::Simple => vec![preset, render, lod, far, fov, fps, vsync, gui],
+        Level::Simple => vec![
+            preset,
+            render,
+            lod,
+            far,
+            fov,
+            fps,
+            vsync,
+            h(
+                H::OpaqueSplit,
+                None,
+                "Draws solid blocks before leaves and grass: faster terrain.",
+            ),
+            gui,
+        ],
         Level::Hdr => vec![
             Row::Header("HDR"),
             h(

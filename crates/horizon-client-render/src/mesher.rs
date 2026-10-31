@@ -5,7 +5,7 @@
 //! follow `FluidRenderer` (see `fluid`).
 mod fluid;
 mod lighting;
-mod sides;
+pub(crate) mod sides;
 use crate::{
     assets::{Assets, RenderAssets},
     biome::Biomes,
