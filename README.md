@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://github.com/Rayan-XOO/horizon/releases/latest"><img src="https://img.shields.io/github/v/release/Rayan-XOO/horizon?label=release" alt="Latest release"></a>
   <a href="https://github.com/Rayan-XOO/horizon/releases"><img src="https://img.shields.io/github/downloads/Rayan-XOO/horizon/total" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/version-0.3.0-2EA043" alt="Version 0.3.0">
   <img src="https://img.shields.io/badge/Android-8.0%2B%20arm64-3DDC84?logo=android&logoColor=white" alt="Android 8.0+">
   <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Rayan-XOO/horizon" alt="License"></a>
@@ -43,7 +44,10 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 
 - Нативная игра на Rust, без Java и эмуляции; рендер через Vulkan (запасной вариант GLES 3).
 - Сенсорное управление: джойстик, кнопки, бег, удар с поворотом камеры одним пальцем.
-- Редактор раскладки кнопок (положение, размер, прозрачность).
+- Три раскладки: «Стандарт», «Как в Bedrock» и своя; редактор кнопок (положение, размер, прозрачность)
+  и выбор, крутят ли кнопки камеру.
+- Вход в Microsoft по коду для лицензионных серверов (нужен свой одобренный Azure client ID), вход обновляется сам.
+- Игра замирает, когда свёрнута, и не тратит батарею.
 - Экранная клавиатура в чате, табличках и полях поиска.
 - Файлы игры скачиваются в самом приложении, с докачкой после обрыва.
 - Папка игры видна в «Файлах»: ресурспаки, шейдеры и миры без провода.
@@ -70,6 +74,8 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 1. Скачай `horizon.apk` со страницы [Releases](https://github.com/Rayan-XOO/horizon/releases).
 2. Открой его на телефоне (разреши «установку из неизвестных источников») или `adb install -r horizon.apk`.
 3. Нужен Android 8.0+ и arm64.
+
+**Обновление на 0.3.0.** С 0.2.1–0.2.5 обновление ставится поверх, данные остаются. Сборка 0.2.8 была подписана другим ключом: её нужно сначала удалить (сохрани папку `saves`, см. ниже), затем установить 0.3.0.
 
 **Обновление с 0.2.0 и старше.** С версии 0.2.1 приложение подписано новым ключом, поэтому поверх старой версии оно не встанет. Старую придётся один раз удалить, а при удалении Android стирает данные игры. Перед этим скопируй миры из `Android/data/dev.horizonlab.horizon/files/saves` куда-нибудь в другое место, а после установки верни обратно.
 
@@ -183,7 +189,10 @@ The original README lives in [README.upstream.md](README.upstream.md).
 
 - Native Rust game, no Java VM or emulation; Vulkan rendering with a GLES 3 fallback.
 - Touch controls: joystick, buttons, sprint toggle, attack while turning the camera with one finger.
-- Button layout editor (position, size, opacity).
+- Three layouts: Standard, Bedrock-style and your own; a button editor (position, size, opacity)
+  and a switch for whether buttons also turn the camera.
+- Microsoft sign-in by code for licensed servers (needs your own approved Azure client ID); it renews by itself.
+- The game freezes while it's in the background, so it doesn't drain the battery.
 - On-screen keyboard for chat, signs and search fields.
 - Game files are downloaded inside the app and resume after interruptions.
 - Game folder shows up in the Files app: resource packs, shaders and worlds without a cable.
@@ -210,6 +219,8 @@ Screenshots from the original Horizon on PC; the phone build renders the same ga
 1. Grab `horizon.apk` from [Releases](https://github.com/Rayan-XOO/horizon/releases).
 2. Open it on your phone (allow "install unknown apps") or run `adb install -r horizon.apk`.
 3. Needs Android 8.0+ and an arm64 device.
+
+**Upgrading to 0.3.0.** From 0.2.1–0.2.5 it installs over the top and keeps your data. The 0.2.8 build was signed with a different key: uninstall it first (back up `saves`, see below), then install 0.3.0.
 
 **Upgrading from 0.2.0 or older.** Starting with 0.2.1 the app is signed with a new key, so it won't install over the old one. Uninstall the old version once; Android wipes the game data when you do. Copy your worlds from `Android/data/dev.horizonlab.horizon/files/saves` somewhere safe first and put them back after installing.
 
