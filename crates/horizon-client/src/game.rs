@@ -190,6 +190,8 @@ mod packs;
 mod pad;
 #[cfg(target_os = "android")]
 mod android_ime;
+#[cfg(target_os = "android")]
+mod android_thermal;
 mod touch;
 mod pad_menu;
 mod paintings;

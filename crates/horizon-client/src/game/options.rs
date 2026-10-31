@@ -459,6 +459,13 @@ impl Game<'_> {
             has_overlay: false,
         };
         let limit = framerate_limit(self.settings.max_fps as i32, context);
+        // A hot phone: a lower cap (260 is "Unlimited", which the limiter skips).
+        #[cfg(target_os = "android")]
+        let limit = match super::android_thermal::frame_cap() {
+            i32::MAX => limit,
+            cap if limit >= 260 || limit > cap => cap,
+            _ => limit,
+        };
         self.settings
             .horizon
             .battery_limit(limit, self.title.is_none(), self.focused)
