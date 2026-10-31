@@ -583,7 +583,13 @@ impl super::Instance {
             // The system loader ignores VK_DRIVER_FILES, so the game opens the file itself.
             #[cfg(all(target_os = "android", not(target_env = "ohos")))]
             let loaded = match std::env::var("HORIZON_VULKAN_LIB") {
-                Ok(path) if !path.is_empty() => ash::Entry::load_from(path),
+                Ok(path) if !path.is_empty() => match load_icd(&path) {
+                    Ok(entry) => Ok(entry),
+                    Err(e) => {
+                        log::warn!("custom Vulkan driver {path} not used ({e}); system driver");
+                        ash::Entry::load()
+                    }
+                },
                 _ => ash::Entry::load(),
             };
             #[cfg(not(any(target_env = "ohos", target_os = "android")))]
@@ -1054,5 +1060,28 @@ impl crate::Surface for super::Surface {
                 .discard_texture(texture)
                 .unwrap()
         };
+    }
+}
+
+/// A Vulkan driver `.so` opened directly, not through the system loader (Turnip on Adreno).
+/// Drivers export `vk_icdGetInstanceProcAddr` (the loader interface) and often also
+/// `vkGetInstanceProcAddr`; the library is opened with local symbols so it can't replace
+/// anything the process already uses, and it is never closed.
+#[cfg(all(target_os = "android", not(target_env = "ohos")))]
+unsafe fn load_icd(path: &str) -> Result<ash::Entry, String> {
+    let lib = unsafe { libloading::os::unix::Library::open(Some(path), 2 /* RTLD_NOW, RTLD_LOCAL is 0 on bionic */) }
+        .map_err(|e| alloc::format!("{e}"))?;
+    let gipa: vk::PFN_vkGetInstanceProcAddr = unsafe {
+        lib.get::<ash::vk::PFN_vkGetInstanceProcAddr>(b"vk_icdGetInstanceProcAddr\0")
+            .or_else(|_| lib.get::<ash::vk::PFN_vkGetInstanceProcAddr>(b"vkGetInstanceProcAddr\0"))
+            .map(|f| *f)
+    }
+    .map_err(|e| alloc::format!("{e}"))?;
+    core::mem::forget(lib);
+    let entry = unsafe { ash::Entry::from_static_fn(ash::StaticFn { get_instance_proc_addr: gipa }) };
+    // A driver that can't even say its version is no use.
+    match unsafe { entry.try_enumerate_instance_version() } {
+        Ok(_) => Ok(entry),
+        Err(e) => Err(format!("vkEnumerateInstanceVersion: {e}")),
     }
 }
