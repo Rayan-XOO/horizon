@@ -50,8 +50,8 @@ enum Finger {
         moved: bool,
         attacking: bool,
     },
-    /// Holding a controller button.
-    Press(Button),
+    /// Holding a controller button; with pass-through on, moving it turns the view.
+    Press(Button, [f64; 2]),
     /// Holding a trigger (0 = use, 1 = attack) from its button; moving the
     /// same finger turns the view like `Look`, and the trigger stays held
     /// until it lifts, wherever it slides.
@@ -113,16 +113,73 @@ struct Spec {
     visible: bool,
 }
 
+/// Which set of controls: the classic one with attack and use buttons, Bedrock
+/// Edition's (tap and hold on the screen, auto-sprint on the stick), or the
+/// player's own from the editor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Preset {
+    #[default]
+    Standard,
+    Bedrock,
+    Custom,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct TouchLayout {
     /// Multiplies every control's opacity.
     opacity: f32,
     controls: HashMap<Id, Spec>,
+    #[serde(default)]
+    preset: Preset,
+    /// A finger that went down on a button also turns the view when it moves.
+    /// Off: buttons keep their finger to themselves.
+    #[serde(default = "yes")]
+    pass_through: bool,
 }
 
 impl Default for TouchLayout {
-    /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
     fn default() -> Self {
+        Self::standard()
+    }
+}
+
+impl TouchLayout {
+    /// Bedrock Edition's touch layout: no attack or use buttons (tap to use or hit,
+    /// hold to break), jump and sneak bottom right, pause and chat top centre,
+    /// the camera switch top right; pushing the stick all the way forward sprints.
+    fn bedrock() -> Self {
+        let (w, h) = (560.0f32, 270.0f32);
+        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true };
+        let off = |x: f32, y: f32, size: f32| Spec { visible: false, ..at(x, y, size) };
+        let bar = (w / 2.0 - 91.0).floor() + 182.0;
+        let controls = HashMap::from([
+            (Id::Stick, at(52.0, h - 56.0, 36.0)),
+            (Id::Jump, at(w - 40.0, h - 50.0, 21.0)),
+            (Id::Sneak, at(w - 86.0, h - 24.0, 14.0)),
+            (Id::Sprint, off(104.0, h - 96.0, 11.0)),
+            (Id::Attack, off(w - 34.0, h - 110.0, 15.0)),
+            (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
+            (Id::Chat, at(w / 2.0 - 12.0, 11.0, 9.0)),
+            (Id::Pause, at(w / 2.0 + 12.0, 11.0, 9.0)),
+            (Id::Keyboard, off(w / 2.0 + 36.0, 11.0, 9.0)),
+            (Id::Inventory, at(bar + 13.0, h - 11.0, 10.0)),
+            (Id::Drop, off(bar + 13.0, h - 34.0, 10.0)),
+            (Id::F1, off(12.0, 12.0, 8.0)),
+            (Id::F2, off(31.0, 12.0, 8.0)),
+            (Id::F3, off(50.0, 12.0, 8.0)),
+            (Id::F5, at(w - 14.0, 12.0, 9.0)),
+            (Id::Edit, at(w - 36.0, 12.0, 8.0)),
+        ]);
+        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true }
+    }
+
+    /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
+    fn standard() -> Self {
         let (w, h) = (560.0f32, 270.0f32);
         let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true };
         let bar = (w / 2.0 - 91.0).floor() + 182.0;
@@ -145,18 +202,31 @@ impl Default for TouchLayout {
             (Id::F5, at(69.0, 12.0, 8.0)),
             (Id::Edit, at(90.0, 12.0, 8.0)),
         ]);
-        Self { opacity: 0.85, controls }
+        Self { opacity: 0.85, controls, preset: Preset::Standard, pass_through: true }
     }
-}
 
-impl TouchLayout {
+    fn of(preset: Preset) -> Self {
+        match preset {
+            Preset::Bedrock => Self::bedrock(),
+            _ => Self::standard(),
+        }
+    }
+
     fn load() -> Self {
         let mut layout = Self::default();
         if let Ok(text) = std::fs::read_to_string(LAYOUT_FILE)
             && let Ok(saved) = serde_json::from_str::<TouchLayout>(&text)
         {
+            // A file from before presets has only controls: it is the player's own.
+            let preset = if text.contains("\"preset\"") { saved.preset } else { Preset::Custom };
+            if preset != Preset::Custom {
+                layout = Self::of(preset);
+            } else {
+                layout.controls.extend(saved.controls);
+            }
+            layout.preset = preset;
             layout.opacity = saved.opacity.clamp(0.1, 1.0);
-            layout.controls.extend(saved.controls);
+            layout.pass_through = saved.pass_through;
         }
         layout
     }
@@ -187,7 +257,19 @@ enum EditAction {
     Toggle,
     Reset,
     Save,
+    Standard,
+    Bedrock,
+    Custom,
+    PassThrough,
 }
+
+/// The second row: the layout and how buttons share fingers with the camera.
+const PRESET_ACTIONS: [(EditAction, &str); 4] = [
+    (EditAction::Standard, "Standard"),
+    (EditAction::Bedrock, "Bedrock"),
+    (EditAction::Custom, "Custom"),
+    (EditAction::PassThrough, "Look: on"),
+];
 
 const EDIT_ACTIONS: [(EditAction, &str); 9] = [
     (EditAction::SizeDown, "Size-"),
@@ -215,6 +297,10 @@ pub(super) struct Touches {
     /// The layout editor is open; the selected control.
     editing: bool,
     selected: Option<Id>,
+    /// The editor changed a control since it opened (saving makes it Custom).
+    dirty: bool,
+    /// Where the finger now going down on a button is (for pass-through).
+    press_at: [f64; 2],
     /// The soft keyboard was asked for.
     ime_shown: bool,
     /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
@@ -232,6 +318,8 @@ impl Default for Touches {
             layout: if cfg!(target_os = "android") { TouchLayout::load() } else { TouchLayout::default() },
             editing: false,
             selected: None,
+            dirty: false,
+            press_at: [0.0; 2],
             ime_shown: false,
             ime_retap: false,
         }
@@ -293,10 +381,19 @@ impl Gui {
         let total = EDIT_ACTIONS.len() as f32 * (bw + gap) - gap;
         let x0 = ((self.w - total) / 2.0).floor();
         let y = (self.h * 0.32).floor();
+        let pw = 66.0f32;
+        let ptotal = PRESET_ACTIONS.len() as f32 * (pw + gap) - gap;
+        let px0 = ((self.w - ptotal) / 2.0).floor();
         EDIT_ACTIONS
             .into_iter()
             .enumerate()
             .map(move |(i, (a, l))| (a, l, [x0 + i as f32 * (bw + gap), y, bw, 16.0]))
+            .chain(
+                PRESET_ACTIONS
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(i, (a, l))| (a, l, [px0 + i as f32 * (pw + gap), y + 19.0, pw, 16.0])),
+            )
     }
     fn panel_hit(&self, p: [f32; 2]) -> Option<EditAction> {
         self.panel()
@@ -558,7 +655,11 @@ impl Game<'_> {
                         layout.opacity * 100.0
                     )
                 }
-                None => format!("Drag a control; tap one to pick it | all {:.0}%", layout.opacity * 100.0),
+                None => format!(
+                    "Drag a control; tap one to pick it | all {:.0}% | Look: buttons {} the camera",
+                    layout.opacity * 100.0,
+                    if layout.pass_through { "also turn" } else { "don't turn" }
+                ),
             };
             let y = (gui.h * 0.32).floor() - 12.0;
             let tw = HudBatch::text_width(atlas, &title);
@@ -570,7 +671,17 @@ impl Game<'_> {
                 {
                     label = "Show";
                 }
-                batch.fill(atlas, r[0], r[1], r[2], r[3], rgba(30, 30, 30, 220));
+                if action == EditAction::PassThrough && !layout.pass_through {
+                    label = "Look: off";
+                }
+                let current = matches!(
+                    (action, layout.preset),
+                    (EditAction::Standard, Preset::Standard)
+                        | (EditAction::Bedrock, Preset::Bedrock)
+                        | (EditAction::Custom, Preset::Custom)
+                );
+                let fill = if current { rgba(40, 110, 48, 230) } else { rgba(30, 30, 30, 220) };
+                batch.fill(atlas, r[0], r[1], r[2], r[3], fill);
                 batch.fill(atlas, r[0], r[1] + r[3] - 1.0, r[2], 1.0, rgba(255, 255, 255, 120));
                 let tw = HudBatch::text_width(atlas, label);
                 batch.text(atlas, label, (r[0] + (r[2] - tw) / 2.0).floor(), r[1] + 4.0, 0xFFFF_FFFF, true);
@@ -650,6 +761,12 @@ impl Game<'_> {
         if let Some(id) = t.selected
             && let Some(spec) = t.layout.controls.get_mut(&id)
         {
+            if matches!(
+                action,
+                EditAction::SizeDown | EditAction::SizeUp | EditAction::FadeDown | EditAction::FadeUp | EditAction::Toggle
+            ) {
+                t.dirty = true;
+            }
             match action {
                 EditAction::SizeDown => spec.size = (spec.size - 1.0).max(5.0),
                 EditAction::SizeUp => spec.size = (spec.size + 1.0).min(60.0),
@@ -663,10 +780,35 @@ impl Game<'_> {
             EditAction::AllFadeDown => t.layout.opacity = (t.layout.opacity - 0.1).max(0.1),
             EditAction::AllFadeUp => t.layout.opacity = (t.layout.opacity + 0.1).min(1.0),
             EditAction::Reset => {
-                t.layout = TouchLayout::default();
+                let keep = (t.layout.opacity, t.layout.pass_through);
+                t.layout = TouchLayout::of(t.layout.preset);
+                (t.layout.opacity, t.layout.pass_through) = keep;
+                t.selected = None;
+                t.dirty = false;
+            }
+            EditAction::Standard | EditAction::Bedrock => {
+                let keep = (t.layout.opacity, t.layout.pass_through);
+                t.layout = TouchLayout::of(if action == EditAction::Bedrock { Preset::Bedrock } else { Preset::Standard });
+                (t.layout.opacity, t.layout.pass_through) = keep;
+                t.selected = None;
+                t.dirty = false;
+            }
+            EditAction::Custom => {
+                // The player's own: start from the saved one, if there is one.
+                let saved = TouchLayout::load();
+                if saved.preset == Preset::Custom {
+                    t.layout = saved;
+                } else {
+                    t.layout.preset = Preset::Custom;
+                }
                 t.selected = None;
             }
+            EditAction::PassThrough => t.layout.pass_through = !t.layout.pass_through,
             EditAction::Save => {
+                if t.dirty {
+                    t.layout.preset = Preset::Custom;
+                }
+                t.dirty = false;
                 t.layout.save();
                 t.editing = false;
                 t.selected = None;
@@ -679,7 +821,7 @@ impl Game<'_> {
     fn touch_press(&mut self, id: Id) -> Finger {
         let pad = |game: &mut Self, button: Button| {
             game.pad.injected.set(button, true);
-            Finger::Press(button)
+            Finger::Press(button, game.touch.press_at)
         };
         match id {
             Id::Stick => Finger::Stick,
@@ -730,6 +872,7 @@ impl Game<'_> {
             }
             Id::Edit => {
                 self.touch.editing = true;
+                self.touch.dirty = false;
                 self.touch.selected = None;
                 Finger::Done
             }
@@ -763,6 +906,11 @@ impl Game<'_> {
                 } else if self.touch_close_shown() && gui.close_hit(p) {
                     self.touch_back();
                     Finger::Done
+                } else if !self.touch_controls_shown()
+                    && self.touch.fingers.values().any(|f| matches!(f, Finger::Pointer))
+                {
+                    // One finger is the mouse; a second one would click twice.
+                    Finger::Done
                 } else if !self.touch_controls_shown() {
                     send(self, cursor(device_id, pos));
                     send(self, click(device_id, ElementState::Pressed));
@@ -788,6 +936,7 @@ impl Game<'_> {
                     let i = if control == Id::Attack { 1 } else { 0 };
                     Finger::Trigger { i, last: pos, since: Instant::now() }
                 } else if let Some(control) = gui.hit(&self.touch.layout, p, false) {
+                    self.touch.press_at = pos;
                     let finger = self.touch_press(control);
                     if matches!(finger, Finger::Stick) {
                         self.touch_stick(&gui, p);
@@ -805,6 +954,7 @@ impl Game<'_> {
                 Some(Finger::Pointer) => send(self, cursor(device_id, pos)),
                 Some(Finger::Stick) => self.touch_stick(&gui, p),
                 Some(Finger::Drag(control, off)) => {
+                    self.touch.dirty = true;
                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
                         spec.x = ((p[0] + off[0]) / gui.w).clamp(0.0, 1.0);
                         spec.y = ((p[1] + off[1]) / gui.h).clamp(0.0, 1.0);
@@ -823,6 +973,14 @@ impl Game<'_> {
                     // The attack (or use) button's finger turns the view too.
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
                     self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since });
+                    if self.touch.layout.pass_through {
+                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+                        self.last_input = Instant::now();
+                    }
+                }
+                Some(Finger::Press(button, last)) if self.touch.layout.pass_through => {
+                    let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
+                    self.touch.fingers.insert(id, Finger::Press(button, pos));
                     self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
                     self.last_input = Instant::now();
                 }
@@ -830,14 +988,16 @@ impl Game<'_> {
             },
             TouchPhase::Ended | TouchPhase::Cancelled => match self.touch.fingers.remove(&id) {
                 Some(Finger::Pointer) => {
-                    send(self, cursor(device_id, pos));
+                    // A cancelled touch (a system gesture took it) lets go off screen: no click.
+                    let at = if touch.phase == TouchPhase::Cancelled { [-1.0, -1.0] } else { pos };
+                    send(self, cursor(device_id, at));
                     send(self, click(device_id, ElementState::Released));
                 }
                 Some(Finger::Stick) => {
                     self.touch.knob = [0.0, 0.0];
                     self.pad.injected.left = [0.0, 0.0];
                 }
-                Some(Finger::Press(button)) => self.pad.injected.set(button, false),
+                Some(Finger::Press(button, _)) => self.pad.injected.set(button, false),
                 Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < HOLD_MS => {
                     // A short tap: keep it down a few frames so a tick sees
                     // one hit (or one use).
@@ -865,6 +1025,11 @@ impl Game<'_> {
         }
         self.touch.knob = v;
         self.pad.injected.left = v;
+        // Bedrock: the stick pushed all the way forward sprints.
+        if self.touch.layout.preset == Preset::Bedrock && v[1] > 0.93 && v[0].abs() < 0.4 && !self.touch.sprinting {
+            self.touch.sprinting = true;
+            self.pad.injected.set(Button::LeftStick, true);
+        }
     }
 }
 

@@ -17524,6 +17524,8 @@ struct Loading {
     shown: bool,
     menu: startup_menu::StartupMenu,
     error: Option<Box<dyn std::error::Error>>,
+    /// The one finger acting as the mouse; others are ignored (no double clicks).
+    touch_finger: Option<u64>,
 }
 impl Loading {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -17602,7 +17604,17 @@ impl Loading {
         // the title is on screen and dead until the world renderer swap.
         if let WindowEvent::Touch(touch) = event {
             let device_id = touch.device_id;
-            let position = touch.location;
+            let mut position = touch.location;
+            match touch.phase {
+                TouchPhase::Started if self.touch_finger.is_none() => self.touch_finger = Some(touch.id),
+                _ if self.touch_finger != Some(touch.id) => return,
+                TouchPhase::Ended | TouchPhase::Cancelled => self.touch_finger = None,
+                _ => {}
+            }
+            // A cancelled touch (a system gesture took it) lets go off screen: no click.
+            if touch.phase == TouchPhase::Cancelled {
+                position = winit::dpi::PhysicalPosition::new(-1.0, -1.0);
+            }
             if let Err(error) = self.menu_event(
                 event_loop,
                 WindowEvent::CursorMoved {
@@ -17935,6 +17947,7 @@ fn run_loading(
         shown: false,
         menu,
         error: None,
+        touch_finger: None,
     };
     let mut app = App::Loading(Box::new(loading));
     let result = new_event_loop()?.run_app(&mut app);
