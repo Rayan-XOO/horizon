@@ -11,5 +11,7 @@
   "horizon.options.look_deadzone": "Мертва зона огляду",
   "horizon.options.button_glyphs": "Значки кнопок",
   "horizon.options.menu_navigation": "Навігація в меню",
-  "horizon.options.on_screen_keyboard": "Екранна клавіатура"
+  "horizon.options.on_screen_keyboard": "Екранна клавіатура",
+  "horizon.mods.not_built_phone": " (лише ПК)",
+  "horizon.mods.not_built_phone.tip": "Нативний мод (.hnmod) збирається в гру лаунчером на ПК, тому на телефоні він не запуститься. Візьміть .hmod-версію мода, якщо вона є, або грайте з ним на ПК."
 }

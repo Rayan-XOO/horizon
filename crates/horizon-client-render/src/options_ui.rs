@@ -2001,7 +2001,11 @@ impl OptionsUi {
                         let mut label = Text::literal(format!("{}: ", installed.title))
                             .append(on_off(s.mods.is_on(i)));
                         if installed.problem.as_deref() == Some(crate::mod_list::NOT_BUILT) {
-                            label = label.append(tr("horizon.mods.not_built"));
+                            label = label.append(tr(if cfg!(target_os = "android") {
+                                "horizon.mods.not_built_phone"
+                            } else {
+                                "horizon.mods.not_built"
+                            }));
                         } else if installed.problem.is_some() {
                             label = label.append(tr("horizon.mods.stopped"));
                         } else if installed.dev {
@@ -2717,10 +2721,14 @@ impl OptionsUi {
                         .problem
                         .as_deref()
                         .unwrap_or(&installed.description);
-                    tooltip = Some(atlas.font.split(
-                        &Text::literal(format!("{}\n{description}", installed.title)),
-                        170.0,
-                    ));
+                    let text = if cfg!(target_os = "android")
+                        && installed.problem.as_deref() == Some(crate::mod_list::NOT_BUILT)
+                    {
+                        Text::literal(format!("{}\n", installed.title)).append(tr("horizon.mods.not_built_phone.tip"))
+                    } else {
+                        Text::literal(format!("{}\n{description}", installed.title))
+                    };
+                    tooltip = Some(atlas.font.split(&text, 170.0));
                 }
             }
             match &wd.kind {

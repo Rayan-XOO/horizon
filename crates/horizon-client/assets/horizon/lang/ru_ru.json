@@ -195,5 +195,7 @@
   "Threads that generate, light and mesh chunks. Next start.": "Потоки, которые генерируют, освещают и строят чанки. Со следующего запуска.",
   "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.": "Vulkan, при сбое — DirectX 12 (Windows) или OpenGL (Linux). Со следующего запуска.",
   "Mesh data sent to the GPU per frame. Lower is smoother while loading.": "Данных меша в видеокарту за кадр. Меньше — плавнее во время загрузки.",
-  "Frame rate and frame times over the game, with a graph.": "Частота кадров и их время поверх игры, с графиком."
+  "Frame rate and frame times over the game, with a graph.": "Частота кадров и их время поверх игры, с графиком.",
+  "horizon.mods.not_built_phone": " (только ПК)",
+  "horizon.mods.not_built_phone.tip": "Нативный мод (.hnmod) собирается в игру лаунчером на ПК, поэтому на телефоне он не запустится. Возьмите .hmod-версию мода, если она есть, или играйте с ним на ПК."
 }

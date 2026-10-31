@@ -196,5 +196,7 @@
   "Threads that generate, light and mesh chunks. Next start.": "Threads that generate, light and mesh chunks. Next start.",
   "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.": "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.",
   "Mesh data sent to the GPU per frame. Lower is smoother while loading.": "Mesh data sent to the GPU per frame. Lower is smoother while loading.",
-  "Frame rate and frame times over the game, with a graph.": "Frame rate and frame times over the game, with a graph."
+  "Frame rate and frame times over the game, with a graph.": "Frame rate and frame times over the game, with a graph.",
+  "horizon.mods.not_built_phone": " (PC only)",
+  "horizon.mods.not_built_phone.tip": "A native mod (.hnmod) is compiled into the game by the PC launcher, so a phone can't run it. Use the mod's .hmod file if it has one, or play it on a PC."
 }
