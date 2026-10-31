@@ -4,7 +4,7 @@ use super::Game;
 use horizon_client::{
     blocks::Fluid,
     music::{BackgroundMusic, Music, MusicFrequency, Situation},
-    sound_engine::TickContext,
+    sound_engine::{SoundEngine, SoundInstance, Sounds, TickContext},
 };
 
 impl Game<'_> {
@@ -20,6 +20,102 @@ impl Game<'_> {
         let loading = self.title.is_none() && self.player.is_none() && self.win.is_none();
         self.music
             .tick(music.as_ref(), volume, loading, &mut self.audio);
+        // Options.musicToast's listener: ToastManager.setMusicToastDisplayState.
+        let state = self.settings.file.int("musicToast").clamp(0, 2) as u8;
+        if state != self.music_toast_state {
+            self.music_toast_state = state;
+            self.set_music_toast_state(state);
+        }
+        // MusicManager's showNowPlayingToast and hideNowPlayingToast calls.
+        let multiplier = f64::from(self.settings.notification_display_time);
+        for show in std::mem::take(&mut self.music.toast_requests) {
+            if let Some(toast) = &mut self.now_playing {
+                if show {
+                    toast.show(multiplier);
+                } else {
+                    toast.hide();
+                }
+            }
+        }
+    }
+    /// `Options.getFinalSoundSourceVolume(SoundSource.MUSIC)`.
+    fn final_music_volume(&self) -> f32 {
+        self.settings.master_volume * self.settings.volumes[1]
+    }
+    /// `ToastManager.setMusicToastDisplayState`: Pause and Pause and Toast make
+    /// the toast (the second one shows it at once while music is audible),
+    /// Never drops it.
+    fn set_music_toast_state(&mut self, state: u8) {
+        self.now_playing = match state {
+            0 => None,
+            _ => {
+                let mut toast = horizon_client::toasts::NowPlayingToast::default();
+                if state == 2 && self.final_music_volume() > 0.0 {
+                    toast.show(f64::from(self.settings.notification_display_time));
+                }
+                Some(toast)
+            }
+        };
+    }
+    /// `NowPlayingToast.getNowPlayingString` of the song the music manager
+    /// plays: its file's short language key, slashes as dots.
+    fn now_playing_song(&self) -> Option<String> {
+        let id = self.music.current_instance()?;
+        let location = self
+            .audio
+            .engine
+            .instance(id)?
+            .sound
+            .as_ref()?
+            .location
+            .as_str();
+        let (namespace, path) = location.split_once(':').unwrap_or(("minecraft", location));
+        // Identifier.toShortLanguageKey.
+        let key = if namespace == "minecraft" {
+            path.to_owned()
+        } else {
+            format!("{namespace}.{path}")
+        }
+        .replace('/', ".");
+        Some(horizon_client::lang::get_or(&key, &key))
+    }
+    /// `ToastManager.update` (it plays no toast sound for this toast) and
+    /// `extractRenderState` for the Now Playing toast, which slides in at the
+    /// top left over every screen but the pause screen, and
+    /// `PauseScreen.extractRenderState` with its `tick`, which draws the song
+    /// name on the pause menu under the Pause and Pause and Toast settings
+    /// while music is audible. `hidden` (F1) keeps the toast
+    /// timing out without drawing it.
+    pub(super) fn draw_music_toast(
+        &mut self,
+        batch: &mut horizon_client::hud::HudBatch,
+        hidden: bool,
+    ) {
+        let song = self.now_playing_song();
+        let Some(toast) = self.now_playing.as_mut() else {
+            return;
+        };
+        toast.update(song.is_some(), &mut self.music_notes);
+        let Some(song) = song else {
+            return;
+        };
+        if self.screen == super::Screen::Paused {
+            if self.pause_menu && self.final_music_volume() > 0.0 {
+                self.music_notes.tick();
+                horizon_client::toasts::draw_now_playing(
+                    &self.gui.atlas,
+                    batch,
+                    0.0,
+                    &song,
+                    self.music_notes.color,
+                );
+            }
+        } else if !hidden
+            && self.music_toast_state == 2
+            && let Some(toast) = &self.now_playing
+        {
+            toast.draw(&self.gui.atlas, batch, &song, &self.music_notes);
+        }
     }
     /// `Minecraft.tick` -> `SoundManager.tick(pause)`, after the music, with
     /// `pauseAllExcept(MUSIC, UI)` when the game pauses and `resume` when it
@@ -35,6 +131,23 @@ impl Game<'_> {
         }
         let (vehicle, carts) = self.start_cart_sounds();
         let mobs = self.start_mob_sounds();
+        let ridden = self.start_riding_sound();
+        let (player_position, player_speed_sqr, player_fall_flying) =
+            self.player.as_ref().map_or(([0.0; 3], 0.0, false), |p| {
+                let at = p.position;
+                (
+                    [at.x, at.y, at.z],
+                    p.velocity.length_squared(),
+                    p.fall_flying,
+                )
+            });
+        // LocalPlayer.onSyncedDataUpdated: starting to glide starts the
+        // elytra's flying sound.
+        if player_fall_flying && !self.was_fall_flying {
+            let instance = SoundInstance::elytra(player_position, SoundEngine::unseeded());
+            self.audio.play_instance(instance, false);
+        }
+        self.was_fall_flying = player_fall_flying;
         let ctx = TickContext {
             player_underwater: self.ambience.was_underwater(),
             player_removed: self.player.is_none(),
@@ -42,17 +155,35 @@ impl Game<'_> {
             carts,
             mobs,
             frozen: !self.clock.runs_normally(),
+            player_position,
+            player_speed_sqr,
+            player_fall_flying,
+            ridden,
         };
         self.audio.tick(self.pause, &ctx);
     }
+    /// `Minecraft.setLevel` -> `updateLevelInEngines`: `SoundManager.stop()`.
+    /// The music manager keeps its stopped track and, on its next tick, waits
+    /// the level's music delay before the next one.
+    pub(super) fn stop_sounds_for_new_level(&mut self) {
+        self.ambience.clear(&mut self.audio);
+        self.audio.stop_all();
+    }
     /// `getSituationalMusic` and `getMusicVolume`.
-    fn situational_music(&self) -> (Option<Music>, f32) {
+    pub(super) fn situational_music(&self) -> (Option<Music>, f32) {
         let empty = BackgroundMusic::default();
         // The title screen has no player (and no level for the camera probe).
+        // A server's client has its player from handleLogin on, before the
+        // first teleport makes it here: the camera is still at the origin.
         let eye = if self.title.is_some() {
             None
         } else {
-            self.eye_position()
+            self.eye_position().or_else(|| {
+                self.remote
+                    .as_ref()
+                    .is_some_and(|r| r.logged_in)
+                    .then_some([0.0; 3])
+            })
         };
         let (background, probe_volume) = match eye {
             Some(eye) => {

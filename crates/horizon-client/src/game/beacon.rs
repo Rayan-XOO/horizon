@@ -14,6 +14,7 @@ use horizon_client::{
     items::ItemStack,
     mesher::Vertex,
     mobs::render::{DYE, DYE_NAMES},
+    test_instance_block::Status,
 };
 use horizon_protocol::packets::play::{self, Serverbound as S};
 
@@ -84,6 +85,30 @@ fn average(a: u32, b: u32) -> u32 {
         .fold(0, |acc, &s| acc | ((ch(a, s) + ch(b, s)) / 2) << s)
 }
 impl Game<'_> {
+    /// `TestInstanceBlockEntity.getBeamSections`: grey while running, green
+    /// for a pass, red for a failed required test and orange for an optional
+    /// one; each section is one block tall and the last runs to the sky.
+    fn test_instance_beam(&self, e: &BlockEntity) -> Option<Vec<(u32, i32)>> {
+        let BlockEntity::TestInstanceBlock(b) = e else {
+            return None;
+        };
+        let color = match b.data.status {
+            Status::Cleared => return None,
+            Status::Running => 0x80_8080,
+            Status::Finished if b.data.error_message.is_none() => 0x00_FF00,
+            Status::Finished => {
+                let required = b
+                    .data
+                    .test
+                    .as_deref()
+                    .and_then(|key| self.test_def(key))
+                    .is_none_or(|t| t.required);
+                if required { 0xFF_0000 } else { 0xFF_8000 }
+            }
+        };
+        Some(vec![(color, 1)])
+    }
+
     /// The beam color of a `BeaconBeamBlock` (stained glass and panes, the beacon).
     fn beam_color(&self, name: &str) -> Option<u32> {
         if name == "minecraft:beacon" {
@@ -105,10 +130,28 @@ impl Game<'_> {
         let Some(BlockEntity::Beacon(mut b)) = self.world.block_entities.take(&key) else {
             return;
         };
-        self.tick_beacon(key, &mut b);
+        self.tick_beacon(key, &mut b, false);
         self.world.block_entities.put(key, BlockEntity::Beacon(b));
     }
-    fn tick_beacon(&mut self, (x, y, z): (i32, i32, i32), b: &mut Beacon) {
+    /// `ClientLevel.tickBlockEntities` for beacons: a server's chunk data
+    /// carries no beam sections, so the client builds them too; effects,
+    /// sounds and the advancement stay with the server.
+    pub(super) fn client_tick_beacons(&mut self) {
+        let keys: Vec<_> = self
+            .world
+            .block_entities
+            .iter()
+            .filter_map(|(k, e)| matches!(e, BlockEntity::Beacon(_)).then_some(*k))
+            .collect();
+        for key in keys {
+            let Some(BlockEntity::Beacon(mut b)) = self.world.block_entities.take(&key) else {
+                continue;
+            };
+            self.tick_beacon(key, &mut b, true);
+            self.world.block_entities.put(key, BlockEntity::Beacon(b));
+        }
+    }
+    fn tick_beacon(&mut self, (x, y, z): (i32, i32, i32), b: &mut Beacon, client: bool) {
         let mut check = if b.last_check_y < y {
             b.checking.clear();
             b.last_check_y = y - 1;
@@ -153,20 +196,22 @@ impl Game<'_> {
             if !b.sections.is_empty() {
                 b.levels = self.beacon_base(x, y, z);
             }
-            if b.levels > 0 && !b.sections.is_empty() {
+            if !client && b.levels > 0 && !b.sections.is_empty() {
                 self.beacon_effects([x, y, z], b);
                 self.beacon_sound([x, y, z], "minecraft:block.beacon.ambient");
             }
         }
         if b.last_check_y >= surface {
-            b.last_check_y = super::MIN_Y - 1;
+            b.last_check_y = self.world.bottom_y() - 1;
             b.sections = std::mem::take(&mut b.checking);
             let (was, is) = (previous > 0, b.levels > 0);
             if !was && is {
-                self.beacon_sound([x, y, z], "minecraft:block.beacon.activate");
-                let levels = b.levels;
-                self.for_each_player(|g| g.beacon_constructed([x, y, z], levels));
-            } else if was && !is {
+                if !client {
+                    self.beacon_sound([x, y, z], "minecraft:block.beacon.activate");
+                    let levels = b.levels;
+                    self.for_each_player(|g| g.beacon_constructed([x, y, z], levels));
+                }
+            } else if was && !is && !client {
                 self.beacon_sound([x, y, z], "minecraft:block.beacon.deactivate");
             }
         }
@@ -211,7 +256,7 @@ impl Game<'_> {
         let mut levels = 0;
         for step in 1..=4 {
             let ly = y - step;
-            if ly < super::MIN_Y {
+            if ly < self.world.bottom_y() {
                 break;
             }
             let ok = (x - step..=x + step).all(|lx| {
@@ -517,27 +562,23 @@ impl Game<'_> {
             "gui/sprites/container/beacon/cancel",
         );
         let slots: Vec<usize> = (0..36).chain([INPUT]).collect();
+        self.draw_hovered_slot_highlight(batch, false, ox, oy);
         for i in slots {
             let (sx, sy) = self.slot_position(i);
             if let Some(stack) = self.slot_mut(i).clone() {
                 self.draw_item(batch, &stack, ox + sx, oy + sy);
             }
         }
+        self.draw_hovered_slot_highlight(batch, true, ox, oy);
         let mut stack_tip = None;
         if let Some(slot) = self.slot_at(batch, self.cursor.0, self.cursor.1) {
-            let (sx, sy) = self.slot_position(slot);
-            batch.fill(
-                &self.gui.atlas,
-                ox + sx,
-                oy + sy,
-                16.0,
-                16.0,
-                rgba(255, 255, 255, 128),
-            );
             stack_tip = self.slot_mut(slot).clone();
         }
         if self.carried.is_some() {
             self.draw_carried(batch);
+            if let Some(stack) = stack_tip.filter(|s| self.tooltip_with_carried(s)) {
+                self.draw_stack_tooltip(batch, &stack, self.cursor.0, self.cursor.1);
+            }
         } else if let Some(stack) = stack_tip {
             self.draw_stack_tooltip(batch, &stack, self.cursor.0, self.cursor.1);
         } else if let Some(key) = tooltip {
@@ -551,7 +592,12 @@ impl Game<'_> {
         }
     }
     /// `BeaconRenderer`: each section's rotating solid beam and its glow.
-    pub(super) fn beacon_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
+    pub(super) fn beacon_geometry(
+        &mut self,
+        camera: glam::DVec3,
+        alpha: f64,
+        out: &mut Vec<Vertex>,
+    ) {
         let Some(s) = self
             .gui
             .atlas
@@ -563,13 +609,45 @@ impl Game<'_> {
         };
         let time = (self.world.game_time.rem_euclid(40)) as f32 + alpha as f32;
         let scoping = self.scoping();
-        for (k, e) in &self.world.block_entities {
-            let BlockEntity::Beacon(b) = e else { continue };
-            if b.levels == 0 || b.sections.is_empty() {
+        // `BeaconRenderer.shouldRender` culls at the render distance; far
+        // terrain extends that to its own distance.
+        let view = f64::from(self.terrain_distance() * 16);
+        let world = &self.world;
+        if self.lod.is_some() {
+            // The beam stays after its chunk unloads; once the chunk is back,
+            // its block entity decides whether the beam is still there.
+            self.far_beacons.retain(|&pos, _| {
+                let (x, _, z) = pos;
+                !world.chunks.contains_key(&(x >> 4, z >> 4))
+                    || world
+                        .block_entities
+                        .get(&pos)
+                        .is_some_and(|e| beam(e).is_some() || is_test_instance_beam(e))
+            });
+        } else {
+            self.far_beacons.clear();
+        }
+        let test_beams: Vec<_> = world
+            .block_entities
+            .iter()
+            .filter_map(|(k, e)| Some((*k, self.test_instance_beam(e)?)))
+            .collect();
+        for (k, e) in &world.block_entities {
+            if let Some(sections) = beam(e) {
+                self.far_beacons.insert(*k, sections.to_vec());
+            }
+        }
+        for (k, sections) in test_beams {
+            self.far_beacons.insert(k, sections);
+        }
+        for (k, sections) in &self.far_beacons {
+            let base = glam::DVec3::new(f64::from(k.0) + 0.5, f64::from(k.1), f64::from(k.2) + 0.5);
+            let offset = base - camera;
+            let horizontal = glam::DVec2::new(offset.x, offset.z).length();
+            if horizontal >= view {
                 continue;
             }
-            let base = glam::DVec3::new(f64::from(k.0) + 0.5, f64::from(k.1), f64::from(k.2) + 0.5);
-            let distance = (base - camera).truncate().length() as f32;
+            let distance = horizontal as f32;
             let scale = if scoping {
                 1.0
             } else {
@@ -578,14 +656,34 @@ impl Game<'_> {
             let origin = (glam::DVec3::new(f64::from(k.0), f64::from(k.1), f64::from(k.2))
                 - camera)
                 .as_vec3();
-            horizon_client::block_entity_render::beacon_beam(
-                origin,
-                &b.sections,
-                time,
-                scale,
-                s,
-                out,
-            );
+            horizon_client::block_entity_render::beacon_beam(origin, sections, time, scale, s, out);
         }
+    }
+}
+/// Whether a test instance block shows a beam (`getBeamSections` not empty).
+fn is_test_instance_beam(e: &BlockEntity) -> bool {
+    matches!(e, BlockEntity::TestInstanceBlock(b) if b.data.status != Status::Cleared)
+}
+/// The beam sections of an active beacon (`BeaconRenderer` draws no beam for
+/// a beacon without a pyramid or with all sections cleared).
+fn beam(e: &BlockEntity) -> Option<&[(u32, i32)]> {
+    match e {
+        BlockEntity::Beacon(b) if b.levels > 0 && !b.sections.is_empty() => Some(&b.sections),
+        _ => None,
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_active_beacons_have_beams() {
+        let mut b = Beacon::default();
+        assert!(beam(&BlockEntity::Beacon(Box::new(b.clone()))).is_none());
+        b.levels = 1;
+        b.sections.push((0xFFFFFF, 10));
+        assert_eq!(
+            beam(&BlockEntity::Beacon(Box::new(b))),
+            Some(&[(0xFFFFFF, 10)][..])
+        );
     }
 }

@@ -62,7 +62,7 @@ impl Game<'_> {
         let Some(location) = self.local_skin.location.clone() else {
             return;
         };
-        if !self.show_skin(&location) {
+        if !(self.skin_slots.contains(&location) && self.gui.atlas.sprites.contains_key(&location)) {
             let rgba = self.local_skin.rgba.clone();
             self.store_skin(location.clone(), rgba);
         }

@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import json
 import unittest
 from unittest import mock
@@ -9,7 +10,7 @@ PACKAGES = {"horizon-core": "crates/horizon-core", "horizon-client": "crates/hor
             "horizon-theme": "crates/horizon-theme", "xtask": "xtask"}
 LIBRARIES = set(PACKAGES) - {"xtask"}
 DEPENDENCIES = {"horizon-client": {"horizon-core"}}
-MODS = " --features horizon-client/mods,horizon-mods/pack"
+MODS = ""
 CLIPPY = pr_ready.CI_CLIPPY + " && " + pr_ready.CI_CLIPPY_SERVER
 
 
@@ -52,7 +53,7 @@ class PrReadyTests(unittest.TestCase):
         by_name = {step.name: step for step in steps}
         self.assertEqual(by_name["clippy"].command, CLIPPY)
         self.assertEqual(by_name["tests: horizon-client"].command,
-                         "cargo test --locked -p horizon-client --features horizon-client/mods --tests")
+                         "cargo test --locked -p horizon-client --tests")
         self.assertEqual(by_name["doc tests"].command, "cargo test --locked -p horizon-client --doc")
         self.assertIsNone(by_name["doc tests"].status)
 
@@ -81,9 +82,9 @@ class PrReadyTests(unittest.TestCase):
 
     def test_tests_get_the_features_ci_s_workspace_run_gives_them(self):
         self.assertEqual(pr_ready.mod_features(["horizon-world"]), "")
-        self.assertEqual(pr_ready.mod_features(["horizon-client"]), " --features horizon-client/mods")
+        self.assertEqual(pr_ready.mod_features(["horizon-client"]), "")
         self.assertEqual(pr_ready.mod_features(["horizon-mods"]),
-                         " --features horizon-mods/runtime,horizon-mods/pack,horizon-mods/index")
+                         " --features horizon-mods/index")
         self.assertEqual(pr_ready.mod_features(None), MODS)
 
     def test_python_tests_always_run(self):
@@ -225,6 +226,32 @@ class PrReadyTests(unittest.TestCase):
             steps = pr_ready.plan(args(host="macmini"), "origin/main", changed, {"horizon-world": "crates/horizon-world"}, {"horizon-world"}, {})
         self.assertIn("--changed-files", steps[-1].command)
         self.assertIn("crates/horizon-world/src/food.rs", steps[-1].command)
+
+    def test_ci_s_rust_follows_the_six_week_train(self):
+        self.assertEqual(pr_ready.ci_rust(datetime.date(2025, 2, 20)), 85)
+        self.assertEqual(pr_ready.ci_rust(datetime.date(2025, 6, 26)), 88)
+        self.assertEqual(pr_ready.ci_rust(datetime.date(2026, 10, 31)), 99)
+        self.assertEqual(pr_ready.ci_rust(datetime.date(2026, 11, 12)), 100)
+
+    def test_an_older_rust_warns_without_failing(self):
+        today = datetime.date(2026, 10, 31)
+        self.assertIsNone(pr_ready.old_rust((1, 99, 1), today))
+        self.assertIsNone(pr_ready.old_rust(None, today))
+        warning = pr_ready.old_rust((1, 97, 0), today)
+        self.assertIn("1.97.0 is older than CI's stable (1.99)", warning)
+        self.assertIn("`rustup update`", warning)
+        steps = pr_ready.plan(args(quick=True), "origin/main", {"crates/horizon-core/src/jmath.rs"}, PACKAGES, LIBRARIES,
+                              DEPENDENCIES)
+        by_name = {step.name: step for step in steps}
+        by_name["clippy"].status, by_name["clippy"].detail = "fail", "failed"
+        pr_ready.mark_old_rust(steps, warning)
+        names = [step.name for step in steps]
+        self.assertEqual(names.index("Rust") + 1, names.index("clippy"))
+        self.assertEqual(steps[names.index("Rust")].status, "warn")
+        self.assertEqual(by_name["clippy"].detail, "failed; likely the old Rust above")
+        steps = pr_ready.plan(args(quick=True), "origin/main", {"README.md"}, PACKAGES, LIBRARIES, DEPENDENCIES)
+        pr_ready.mark_old_rust(steps, warning)
+        self.assertNotIn("Rust", [step.name for step in steps])
 
     def test_summaries_of_check_output(self):
         output = "test result: ok. 3 passed; 0 failed;\ntest result: FAILED. 4 passed; 1 failed;\n"

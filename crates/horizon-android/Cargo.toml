@@ -1,6 +1,6 @@
 [package]
 name = "horizon-android"
-version = "0.1.0"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 rust-version = "1.90"
@@ -19,6 +19,7 @@ horizon-prepare = { path = "../horizon-prepare" }
 horizon-assets = { path = "../horizon-assets" }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-client-input = { path = "../horizon-client-input" }
+horizon-client-render = { path = "../horizon-client-render" }
 horizon-command = { path = "../horizon-command" }
 horizon-items = { path = "../horizon-items" }
 horizon-core = { path = "../horizon-core" }
@@ -29,6 +30,8 @@ horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
+# The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
+horizon-anticheat = { path = "../horizon-anticheat" }
 # Shader packs: reading them and turning their GLSL into naga modules.
 horizon-shaders = { path = "../horizon-shaders" }
 # Horizon's own shader packs: the format, the stages and the check (docs/shaders.md).
@@ -51,9 +54,6 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 # hlsl-out: the gfx.rs tests translate every shader as wgpu's DirectX 12 backend does. A normal feature,
 # not a dev-dependency's, so builds, tests and examples share one build of naga, wgpu and this crate.
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out"] }
-# Sound (ALSA on Linux); the `audio` feature.
-cpal = { version = "0.16", optional = true }
-symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis"] }
 miniz_oxide = "0.8"
 ab_glyph = "0.2.32"
 log = "0.4"
@@ -68,26 +68,30 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # HTTPS to the Minecraft services (online-mode session join).
 ureq = { version = "2", default-features = false, features = ["tls"] }
 unicode-bidi = "0.3.18"
+# `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+# Sound: AAudio through cpal (the `audio` feature of horizon-client-render).
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["std", "time"] }
+rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30.13", features = ["android-native-activity"] }
-# The soft keyboard bridge (HorizonActivity.java, game/touch.rs).
+# The soft keyboard bridge and the activity calls (HorizonActivity.java, game/android_ime.rs).
 jni = "0.21"
+libc = "0.2"
 
 [features]
-default = ["audio", "mods"]
-# AAudio through cpal.
-audio = ["dep:cpal", "horizon-client/audio"]
-# No `controllers`: gilrs has no Android backend; the touch controls drive the virtual pad.
-mods = ["horizon-mods/runtime", "horizon-client/mods"]
+default = ["audio"]
+audio = ["horizon-client/audio"]
 # Never on (gilrs has no Android backend); declared so the shared game code's cfg checks know it.
 controllers = []
+rng-trace = []
+windows-mimalloc = []
+windows-segment-heap = []
 
 [package.metadata.android]
 package = "dev.horizonlab.horizon"

@@ -959,6 +959,7 @@ impl Game<'_> {
         };
         let ctrl = self.keys.contains(&winit::keyboard::KeyCode::ControlLeft);
         let shortcut = self.edit_shortcut(event);
+        let types_text = self.types_text();
         let Some(o) = self.world_options.as_mut() else {
             return;
         };
@@ -970,7 +971,7 @@ impl Game<'_> {
                 None => {
                     let mut handled = false;
                     rules.edit(|b| handled = b.key(key, ctrl, false));
-                    if !handled && !ctrl {
+                    if !handled && types_text {
                         self.world_options_text(event.text.as_deref());
                     }
                 }
@@ -984,9 +985,16 @@ impl Game<'_> {
             o.port.shortcut(shortcut, &mut self.clipboard);
             return;
         }
-        if !o.port.key(key, ctrl, false) && !ctrl {
+        if !o.port.key(key, ctrl, false) && types_text {
             self.world_options_text(event.text.as_deref());
         }
+    }
+    /// Whether a World Options text box has focus (the port or a game rule box).
+    pub(super) fn world_options_typing(&self) -> bool {
+        self.world_options.as_ref().is_some_and(|o| {
+            o.rules.as_ref().is_some_and(|r| r.typing())
+                || (o.port.focused && o.view == View::Options)
+        })
     }
     /// Digits typed into the port field (the keyboard, or a controller's
     /// on-screen keyboard), and its backspace.

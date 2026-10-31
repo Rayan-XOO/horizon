@@ -9,12 +9,12 @@ A comment by Ludovic or by a login in .github/trusted-reviewers.txt, on any issu
     /nightly 2640 2642     the set becomes these pull requests, merged onto main in this order; builds now
     /nightly add 2650      adds one, or takes its newest head again; builds now
     /nightly remove 2640   drops one; builds now. Ludovic's remove also keeps reviewers from adding it back
-    /nightly clear         empties the set: the Nightly is the proven union or main again; builds now
+    /nightly clear         empties the set: the Nightly is main alone again; builds now
     /nightly status        what the set holds
     /nightly dry-run 2640  builds main + these and signs with a throwaway key; publishes nothing, the set stays
 
 The set (set.json on the nightly-state branch) keeps each pull request at the head it had when someone asked for
-it; the scheduled nightly takes their newest heads and drops the merged and closed ones (nightly.py pick).
+it; the scheduled nightly builds them at those heads and drops the merged and closed ones (nightly.py pick).
 builds.jsonl there records every build's set, for the stats. Nothing here runs a pull request's code: its commits
 are fetched and merged with `git merge-tree --write-tree`, which writes git objects and never a working tree, so no
 file of theirs reaches the disk and no hook, filter or script of theirs runs.
@@ -43,7 +43,7 @@ ALWAYS_GUARDED = ["/.github/", "/tools/ci/", "/crates/horizon-release-sign/", "/
 STATE_BRANCH = "nightly-state"
 BUILD_PREFIX = "nightly/build-"
 MAX_PRS = 30
-MAX_BUILDS_PER_DAY = 6
+MAX_BUILDS_PER_DAY = 12
 BOT = ("github-actions[bot]", "41898283+github-actions[bot]@users.noreply.github.com")
 # Git never runs anything of the merged commits; these make sure nothing of the runner's either.
 SAFE_GIT = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "merge.renormalize=false"]
@@ -160,7 +160,9 @@ class PullRequest:
 
 
 def check(pr: PullRequest | None, number: int, patterns: list[str]) -> str | None:
-    """Why `pr` can't go in a Nightly, or None."""
+    """Why `pr` can't go in a Nightly, or None. No review is needed (Ludovic, 2026-10-30, at the Team's request; it
+    needed an approving review at its head from 2026-10-28): a trusted reviewer or Ludovic picks any open pull
+    request to main, unreviewed or not, as long as it leaves the files CODEOWNERS guards alone."""
     if pr is None:
         return f"#{number} isn't a pull request here"
     if pr.state != "open":
@@ -194,7 +196,7 @@ def plain(text: str) -> str:
 
 def describe(prs: list[dict], heading: str = "The set") -> str:
     if not prs:
-        return "The set is empty: the Nightly is the newest proven union, or main."
+        return "The set is empty: the Nightly is main alone."
     lines = [f"{heading} ({len(prs)}), merged onto main in this order:"]
     lines += [f"- #{e['number']} {plain(e['title'])} (by {e['author']}, at {e['head'][:7]}, asked by "
               f"{e['asked_by']})" for e in prs]
@@ -499,7 +501,7 @@ def command() -> None:
         results: list[Result] = []
 
         def change(state: dict, builds: str):
-            result = apply(state, cmd, login, now, lookup(repo), patterns)
+            result = apply(state, cmd, login, now, lookup(repo), patterns, read_reviewers(reviewers).logins)
             results.append(result)
             if result.state is state:  # status, dry run: nothing to save
                 return None

@@ -24,6 +24,31 @@ def run(state, text, login="kacpherek", *prs):
     return ns.apply(state, ns.parse(text), login, NOW, lookup(*prs), PATTERNS)
 
 
+class NoReviewNeededTests(unittest.TestCase):
+    """Ludovic, 2026-10-30, at the Team's request: a Nightly takes any open pull request to main, reviewed or not."""
+
+    def test_an_unreviewed_pull_request_is_accepted(self):
+        for text in ("/nightly add 1", "/nightly 1", "/nightly dry-run 1"):
+            result = run({}, text, "kacpherek", pr(1))
+            self.assertTrue(result.build, text)
+        self.assertEqual(run({}, "/nightly add 1", "kacpherek", pr(1)).state["prs"][0]["head"], "h1")
+
+    def test_a_guarded_file_is_still_refused(self):
+        for text in ("/nightly add 1", "/nightly dry-run 1"):
+            with self.assertRaisesRegex(ns.Refused, "only Ludovic merges"):
+                run({}, text, "kacpherek", pr(1, files=["crates/horizon-world/src/lib.rs", ".github/CODEOWNERS"]))
+
+    def test_the_other_guards_stay(self):
+        with self.assertRaisesRegex(ns.Refused, "not main"):
+            run({}, "/nightly add 1", "kacpherek", pr(1, base="release"))
+        with self.assertRaisesRegex(ns.Refused, "is closed"):
+            run({}, "/nightly add 1", "kacpherek", pr(1, state="closed"))
+        with self.assertRaises(ns.Refused):  # who may ask is checked before the set changes (command())
+            ns.authorize("someone", ns.read_reviewers("kacpherek\n"))
+        with self.assertRaises(ns.Refused):
+            ns.authorize("kacpherek", ns.read_reviewers("kacpherek\npaused\n"))
+
+
 class ParseTests(unittest.TestCase):
     def test_commands(self):
         self.assertEqual(ns.parse("/nightly 2640 #2642, 2640"), ns.Command("set", [2640, 2642]))
@@ -73,7 +98,7 @@ class AllowTests(unittest.TestCase):
 
     def test_the_repos_list_names_the_three_reviewers(self):
         reviewers = ns.read_reviewers((ROOT / ns.REVIEWERS).read_text())
-        self.assertEqual(reviewers.logins, {"kacpherek", "rdbtcvs", "online5277"})
+        self.assertEqual(reviewers.logins, {"kacpherek", "rdbtcvs", "online5277", "levzzz5154"})
         self.assertFalse(reviewers.paused)
 
 class RefusalTests(unittest.TestCase):

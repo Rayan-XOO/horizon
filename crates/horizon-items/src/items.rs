@@ -3,6 +3,7 @@
 //! for the condition, entry and modifier types used by block drops).
 use crate::{Result, blocks::BlockFacts};
 use horizon_core::random::RandomSource;
+use horizon_world::loot::PackOverlay;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use serde_json::Value;
 use std::{
@@ -107,6 +108,11 @@ pub struct ItemInfo {
     pub weapon_damage: Option<u32>,
     /// `use_effects.speed_multiplier` (UseEffects.DEFAULT: 0.2).
     pub use_speed: f32,
+    /// `use_effects.can_sprint` (default false): sprinting may start while the
+    /// item is in use.
+    pub can_sprint: bool,
+    /// `use_effects.interact_vibrations` (default true).
+    pub interact_vibrations: bool,
     /// `glider` (elytra).
     pub glider: bool,
     /// `equippable.swappable` and `equip_sound`.
@@ -143,6 +149,9 @@ pub const CRAFT_REMAINDERS: [(&str, &str); 5] = [
     ("minecraft:dragon_breath", "minecraft:glass_bottle"),
     ("minecraft:honey_bottle", "minecraft:glass_bottle"),
 ];
+/// In a root built by `mod_content::build`: the content mods' items' crafting
+/// remainders, by item. Other roots have none.
+pub const MOD_CRAFT_REMAINDERS: &str = "horizon-mod-craft-remainders.json";
 /// A reduction of `blocks_attacks.damage_reductions`.
 #[derive(Clone, Debug)]
 pub struct BlockReduction {
@@ -260,6 +269,8 @@ pub struct Items {
     loot: HashMap<String, Value>,
     /// The `jukebox_song` registry.
     pub songs: HashMap<String, Song>,
+    /// The `instrument` registry (goat horns).
+    pub instruments: HashMap<String, Instrument>,
     /// The enchantment registry: loot functions enchant the items they roll
     /// (`EnchantWithLevelsFunction`, `EnchantRandomlyFunction`), and the
     /// station menus share this copy.
@@ -278,6 +289,76 @@ impl Song {
     pub fn finished(&self, ticks: i64) -> bool {
         ticks >= self.length_ticks + 20
     }
+}
+/// An `Instrument`: what a goat horn plays.
+#[derive(Clone, Debug)]
+pub struct Instrument {
+    pub sound: String,
+    /// Seconds the horn stays up, and its cooldown.
+    pub use_duration: f32,
+    /// How far it carries, in blocks (`range / 16` is its volume).
+    pub range: f32,
+}
+impl Instrument {
+    /// `InstrumentItem.getUseDuration`: `Mth.floor(useDuration * 20)`.
+    pub fn use_ticks(&self) -> i32 {
+        (self.use_duration * 20.0).floor() as i32
+    }
+}
+/// The id of a goat horn's instrument (`InstrumentItem.getInstrument`): the
+/// stack's own `instrument` component, else the item's `ponder_goat_horn`.
+/// None for an inline instrument (see `inline_instrument`).
+pub fn instrument_id(stack: &ItemStack) -> Option<String> {
+    if &*stack.item != "minecraft:goat_horn" {
+        return None;
+    }
+    match stack.data().and_then(|d| d.other("minecraft:instrument")) {
+        Some(horizon_world::nbt::Tag::String(id)) => Some(id.to_string_lossy()),
+        Some(horizon_world::nbt::Tag::Compound(_)) => None,
+        _ => Some("minecraft:ponder_goat_horn".to_owned()),
+    }
+}
+/// A goat horn's inline `instrument` component (`Instrument.CODEC` also
+/// takes the instrument itself instead of a registry id).
+pub fn inline_instrument(stack: &ItemStack) -> Option<&horizon_world::nbt::Tag> {
+    if &*stack.item != "minecraft:goat_horn" {
+        return None;
+    }
+    match stack.data().and_then(|d| d.other("minecraft:instrument")) {
+        Some(tag @ horizon_world::nbt::Tag::Compound(_)) => Some(tag),
+        _ => None,
+    }
+}
+/// `Instrument.DIRECT_CODEC`: a `sound_event` that is an id or `{sound_id}`,
+/// `use_duration` and `range`.
+fn parse_instrument(v: &Value) -> Instrument {
+    let sound = match &v["sound_event"] {
+        Value::String(s) => s.clone(),
+        other => other["sound_id"].as_str().unwrap_or("").to_owned(),
+    };
+    Instrument {
+        sound,
+        use_duration: v["use_duration"].as_f64().unwrap_or(0.0) as f32,
+        range: v["range"].as_f64().unwrap_or(0.0) as f32,
+    }
+}
+fn load_instruments(root: &Path) -> HashMap<String, Instrument> {
+    let mut instruments = HashMap::new();
+    let Ok(dir) = fs::read_dir(root.join("data/minecraft/instrument")) else {
+        return instruments;
+    };
+    for entry in dir.flatten() {
+        let path = entry.path();
+        let (Some(stem), Ok(bytes)) = (path.file_stem().and_then(|s| s.to_str()), fs::read(&path))
+        else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        instruments.insert(format!("minecraft:{stem}"), parse_instrument(&v));
+    }
+    instruments
 }
 fn load_songs(root: &Path) -> HashMap<String, Song> {
     let mut songs = HashMap::new();
@@ -310,14 +391,23 @@ fn load_songs(root: &Path) -> HashMap<String, Song> {
     }
     songs
 }
-pub fn load_tags(root: &Path, kind: &str) -> Result<HashMap<String, HashSet<String>>> {
-    Ok(load_tag_lists(root, kind)?
+pub fn load_tags(
+    root: &Path,
+    kind: &str,
+    overlay: &PackOverlay,
+) -> Result<HashMap<String, HashSet<String>>> {
+    Ok(load_tag_lists(root, kind, overlay)?
         .into_iter()
         .map(|(k, v)| (k, v.into_iter().collect()))
         .collect())
 }
 /// Every tag's contents in `TagLoader.tryBuildTag` order (a `LinkedHashSet`).
-pub(crate) fn load_tag_lists(root: &Path, kind: &str) -> Result<HashMap<String, Vec<String>>> {
+/// `overlay` adds a world's data packs over the game's own tag files.
+pub(crate) fn load_tag_lists(
+    root: &Path,
+    kind: &str,
+    overlay: &PackOverlay,
+) -> Result<HashMap<String, Vec<String>>> {
     let mut raw: HashMap<String, Vec<String>> = HashMap::new();
     fn walk(
         dir: &Path,
@@ -354,6 +444,27 @@ pub(crate) fn load_tag_lists(root: &Path, kind: &str) -> Result<HashMap<String, 
         let dir = root.join(format!("data/{namespace}/tags/{kind}"));
         if dir.exists() {
             walk(&dir, &dir, &namespace, &mut raw)?;
+        }
+    }
+    // The packs' entries join the game's own, in pack order; a `replace`
+    // file drops what the lower sources put in (`TagLoader.load` walks the
+    // resource stack the same way).
+    for (id, files) in overlay.kind(&format!("tags/{kind}")) {
+        let slot = raw.entry(id.to_owned()).or_default();
+        for bytes in files {
+            let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+                continue;
+            };
+            if v["replace"].as_bool() == Some(true) {
+                slot.clear();
+            }
+            slot.extend(
+                v["values"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.as_str().or_else(|| e["id"].as_str()).map(str::to_owned)),
+            );
         }
     }
     fn resolve(name: &str, raw: &HashMap<String, Vec<String>>, out: &mut Vec<String>, depth: u32) {
@@ -435,7 +546,12 @@ impl Items {
         }
     }
 
-    pub fn load(root: &Path, registry: &BlockRegistry, facts: &BlockFacts) -> Result<Self> {
+    pub fn load(
+        root: &Path,
+        registry: &BlockRegistry,
+        facts: &BlockFacts,
+        overlay: &PackOverlay,
+    ) -> Result<Self> {
         let mut block_for_item: HashMap<&str, BlockStateId> = HashMap::new();
         for (i, s) in facts.states.iter().enumerate() {
             let default = registry.default_state(&s.name);
@@ -445,17 +561,29 @@ impl Items {
                     .or_insert(BlockStateId(i as u32));
             }
         }
-        Self::load_with(root, &block_for_item)
+        Self::load_with(root, &block_for_item, overlay)
     }
     /// Every item's default components and the tags, without the block <->
     /// item mapping (for headless tools that never place blocks).
-    pub fn catalog(root: &Path) -> Result<Self> {
-        Self::load_with(root, &HashMap::new())
+    pub fn catalog(root: &Path, overlay: &PackOverlay) -> Result<Self> {
+        Self::load_with(root, &HashMap::new(), overlay)
     }
-    fn load_with(root: &Path, block_for_item: &HashMap<&str, BlockStateId>) -> Result<Self> {
+    fn load_with(
+        root: &Path,
+        block_for_item: &HashMap<&str, BlockStateId>,
+        overlay: &PackOverlay,
+    ) -> Result<Self> {
         let raw: BTreeMap<String, Value> =
             serde_json::from_slice(&fs::read(root.join("items.json"))?)?;
-        let entity_tags = load_tags(root, "entity_type")?;
+        let entity_tags = load_tags(root, "entity_type", overlay)?;
+        let path = root.join(MOD_CRAFT_REMAINDERS);
+        let mod_remainders: HashMap<String, String> = match fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(format!("{}: {e}", path.display()).into()),
+        };
         let mut items = HashMap::new();
         let mut order = Vec::new();
         for (name, c) in &raw {
@@ -659,10 +787,17 @@ impl Items {
                     crafting_remainder: CRAFT_REMAINDERS
                         .iter()
                         .find(|(item, _)| *item == name)
-                        .map(|(_, rest)| (*rest).to_owned()),
+                        .map(|(_, rest)| (*rest).to_owned())
+                        .or_else(|| mod_remainders.get(name).cloned()),
                     use_speed: c["minecraft:use_effects"]["speed_multiplier"]
                         .as_f64()
                         .unwrap_or(0.2) as f32,
+                    can_sprint: c["minecraft:use_effects"]["can_sprint"]
+                        .as_bool()
+                        .unwrap_or(false),
+                    interact_vibrations: c["minecraft:use_effects"]["interact_vibrations"]
+                        .as_bool()
+                        .unwrap_or(true),
                     blocks_attacks: BlocksAttacks::parse(&c["minecraft:blocks_attacks"]),
                     disable_blocking_seconds: c["minecraft:weapon"]["disable_blocking_for_seconds"]
                         .as_f64()
@@ -746,35 +881,56 @@ impl Items {
                 walk_loot(&dir, &dir, &namespace, &mut loot)?;
             }
         }
+        // The packs' tables over the game's own: the top pack's file for
+        // each id (`SimpleJsonResourceReloadListener` sees one resource per
+        // id, the resource stack's top).
+        for (id, files) in overlay.kind("loot_table") {
+            let Ok(v) = serde_json::from_slice::<Value>(PackOverlay::top(files)) else {
+                continue;
+            };
+            loot.insert(id.to_owned(), v);
+        }
         let registry_order = registry_order(root, &order);
         Ok(Self {
             items,
             order,
             registry_order,
-            block_tags: load_tags(root, "block")?,
-            item_tags: load_tags(root, "item")?,
-            item_tag_order: load_tag_lists(root, "item")?,
+            block_tags: load_tags(root, "block", overlay)?,
+            item_tags: load_tags(root, "item", overlay)?,
+            item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot,
             songs: load_songs(root),
+            instruments: load_instruments(root),
             enchantments: Arc::new(crate::enchant::Enchantments::load(root)),
         })
     }
     pub fn get(&self, id: &str) -> Option<&ItemInfo> {
         self.items.get(id)
     }
+    /// The instrument a goat horn plays: its `instrument` component's
+    /// registry entry or inline instrument.
+    pub fn instrument(&self, stack: &ItemStack) -> Option<Instrument> {
+        if let Some(tag) = inline_instrument(stack) {
+            return Some(parse_instrument(
+                &horizon_client_core::scoreboard::tag_to_json(tag),
+            ));
+        }
+        self.instruments.get(&instrument_id(stack)?).cloned()
+    }
     /// Only the block and item tags (and the enchantment registry, which the
     /// station rules and loot functions are built from), for tools that need
     /// tag membership.
-    pub fn tags_only(root: &Path) -> Result<Self> {
+    pub fn tags_only(root: &Path, overlay: &PackOverlay) -> Result<Self> {
         Ok(Self {
             items: HashMap::new(),
             order: Vec::new(),
             registry_order: Vec::new(),
-            block_tags: load_tags(root, "block")?,
-            item_tags: load_tags(root, "item")?,
-            item_tag_order: load_tag_lists(root, "item")?,
+            block_tags: load_tags(root, "block", overlay)?,
+            item_tags: load_tags(root, "item", overlay)?,
+            item_tag_order: load_tag_lists(root, "item", overlay)?,
             loot: HashMap::new(),
             songs: HashMap::new(),
+            instruments: HashMap::new(),
             enchantments: Arc::new(crate::enchant::Enchantments::load(root)),
         })
     }
@@ -793,6 +949,7 @@ impl Items {
             item_tags,
             loot: HashMap::new(),
             songs: HashMap::new(),
+            instruments: HashMap::new(),
             enchantments: Arc::new(crate::enchant::Enchantments::default()),
         }
     }
@@ -800,9 +957,13 @@ impl Items {
     pub fn block_in_tag(&self, tag: &str, block: &str) -> bool {
         self.block_tags.get(tag).is_some_and(|s| s.contains(block))
     }
+    /// Whether an item belongs to a loaded item tag.
+    pub fn item_in_tag(&self, tag: &str, item: &str) -> bool {
+        self.item_tags.get(tag).is_some_and(|s| s.contains(item))
+    }
     fn block_matches(&self, spec: &str, block: &str) -> bool {
         match spec.strip_prefix('#') {
-            Some(tag) => self.block_tags.get(tag).is_some_and(|s| s.contains(block)),
+            Some(tag) => self.block_in_tag(tag, block),
             None => spec == block,
         }
     }
@@ -1227,9 +1388,10 @@ impl LootContext<'_> {
                     let p = Self::number(o.get("p").unwrap_or(&Value::Null), random);
                     (0..n).filter(|_| random.next_float() < p).count() as f32
                 }
-                _ => 1.0,
+                // An unknown type gives 0, as in loot.rs `int` and `float`.
+                _ => 0.0,
             },
-            _ => 1.0,
+            _ => 0.0,
         }
     }
     fn int_number<R: RandomSource>(v: &Value, random: &mut R) -> i32 {
@@ -1251,9 +1413,11 @@ impl LootContext<'_> {
     }
     fn condition<R: RandomSource>(&self, c: &Value, random: &mut R) -> bool {
         let (kind, c) = match c {
+            Value::Null => return true,
+            Value::Array(list) => return list.iter().all(|c| self.condition(c, random)),
             Value::String(s) => (s.as_str(), &Value::Null),
             Value::Object(o) => (o.get("type").and_then(Value::as_str).unwrap_or(""), c),
-            _ => return true,
+            _ => return false,
         };
         match kind {
             // ExplosionCondition: 1 / radius under a decaying explosion.
@@ -1367,7 +1531,11 @@ impl LootContext<'_> {
             // Entity flags, equipment and damage-source predicates: none hold
             // for an unenchanted player kill without fire or lightning.
             "minecraft:entity_properties" | "minecraft:damage_source_properties" => false,
-            _ => true,
+            // LocationCheck reads the world at its offset, which this engine
+            // does not have: held true (a double plant's other half is taken
+            // as there). Unknown types fail, as in loot.rs.
+            "minecraft:location_check" => true,
+            _ => false,
         }
     }
     fn conditions<R: RandomSource>(&self, o: &Value, random: &mut R) -> bool {
@@ -1767,7 +1935,7 @@ pub(crate) fn prepared_items() -> Option<Items> {
         BlockRegistry::from_facts_json_with_flags(fs::File::open(root.join("facts.json")).ok()?)
             .ok()?;
     let facts = BlockFacts::load(&root, &registry).ok()?;
-    Items::load(&root, &registry, &facts).ok()
+    Items::load(&root, &registry, &facts, &PackOverlay::NONE).ok()
 }
 
 #[cfg(test)]
@@ -1775,6 +1943,24 @@ mod tests {
     use super::*;
     use horizon_core::random::LegacyRandom;
     use serde_json::json;
+
+    #[test]
+    fn loaded_block_and_item_tags_answer_membership() {
+        let mut items = super::Items::for_tests(std::collections::HashMap::from([(
+            "test:items".into(),
+            ["test:apple".into()].into_iter().collect(),
+        )]));
+        items.block_tags.insert(
+            "test:blocks".into(),
+            ["test:stone".into()].into_iter().collect(),
+        );
+        assert!(items.block_in_tag("test:blocks", "test:stone"));
+        assert!(!items.block_in_tag("test:blocks", "test:dirt"));
+        assert!(!items.block_in_tag("test:missing", "test:stone"));
+        assert!(items.item_in_tag("test:items", "test:apple"));
+        assert!(!items.item_in_tag("test:items", "test:stone"));
+        assert!(!items.item_in_tag("test:missing", "test:apple"));
+    }
 
     fn ctx<'a>(
         items: &'a Items,
@@ -1961,6 +2147,37 @@ mod tests {
         );
         // 46 is vanilla's count for this seed; an extra level draw gives 28.
         assert_eq!(drops[0].count, 46);
+    }
+
+    /// A content root's remainders reach the mods' items; vanilla's stay its own.
+    #[test]
+    fn mod_items_take_their_crafting_remainders() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-craft-remainders-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        let items = r#"{"minecraft:bowl": {}, "minecraft:milk_bucket": {}, "ruby:stew": {}}"#;
+        fs::write(root.join("items.json"), items).unwrap();
+        let catalog = |root: &Path| Items::catalog(root, &PackOverlay::NONE).unwrap();
+        let remainder = |items: &Items, id: &str| items.items[id].crafting_remainder.clone();
+        let vanilla = catalog(&root);
+        assert_eq!(remainder(&vanilla, "ruby:stew"), None);
+        fs::write(
+            root.join(MOD_CRAFT_REMAINDERS),
+            r#"{"ruby:stew": "minecraft:bowl"}"#,
+        )
+        .unwrap();
+        let modded = catalog(&root);
+        assert_eq!(
+            remainder(&modded, "ruby:stew").as_deref(),
+            Some("minecraft:bowl")
+        );
+        assert_eq!(
+            remainder(&modded, "minecraft:milk_bucket").as_deref(),
+            Some("minecraft:bucket")
+        );
+        assert_eq!(remainder(&modded, "minecraft:bowl"), None);
+        fs::remove_dir_all(&root).unwrap();
     }
 }
 

@@ -76,12 +76,20 @@ impl StartupMenu {
                 &self.root,
             );
             title.last_server = settings.file.string("lastServer");
+            title.skip_multiplayer_warning = settings.file.bool("skipMultiplayerWarning");
+            // Gui.addInitialScreens: the accessibility onboarding comes first.
+            if settings.file.bool("onboardAccessibility") {
+                title.start_onboarding();
+            }
             self.title = Some(title);
         }
     }
 
     pub(super) fn handoff(&mut self, game: &mut Game<'_>) {
-        game.title = self.title.take();
+        game.title = self
+            .title
+            .take()
+            .map(|title| title.with_user(|| game.options.player_name()));
         game.pending_entry = self.pending.take();
         game.cursor = self.cursor;
         game.modifiers = self.modifiers;
@@ -148,9 +156,12 @@ impl StartupMenu {
         )
     }
 
-    fn title_key(&mut self, event: &KeyEvent) {
+    /// `Screen.keyPressed` on the title screens: the action a key starts (Enter confirms, see `confirm_key` in title.rs).
+    fn title_key(&mut self, event: &KeyEvent) -> Action {
         let shortcut = self.shortcut(event);
-        let Some(title) = &mut self.title else { return };
+        let Some(title) = &mut self.title else {
+            return Action::None;
+        };
         if let Some(shortcut) = shortcut {
             if title.has_caret_field() {
                 title.field_shortcut(shortcut, &mut self.clipboard);
@@ -163,12 +174,16 @@ impl StartupMenu {
             {
                 title.search_changed();
             }
-            return;
+            return Action::None;
         }
         match event.physical_key {
             PhysicalKey::Code(KeyCode::Escape) => title.escape(),
+            PhysicalKey::Code(KeyCode::F5) => title.refresh_servers(),
             PhysicalKey::Code(KeyCode::Tab) => title.tab(),
-            PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => title.confirm_edit(),
+            PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) => return title.confirm_key(),
+            PhysicalKey::Code(KeyCode::Space) if title.list_focused() => {
+                return title.confirm_key();
+            }
             PhysicalKey::Code(
                 key @ (KeyCode::Backspace
                 | KeyCode::Delete
@@ -200,7 +215,17 @@ impl StartupMenu {
                 }
             }
         }
+        Action::None
     }
+}
+
+/// A panic's message: its `&str` or `String` payload.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("Box<dyn Any>")
 }
 
 /// Each generation has its own channel and progress. Pack changes wait for the
@@ -216,6 +241,7 @@ pub(super) fn spawn_loader(
     let settings = settings.clone();
     let vanilla_root = vanilla_root.to_path_buf();
     let dev_mods = options.dev_mods.clone();
+    let world = launch_world(options).map(str::to_owned);
     let progress = progress.clone();
     let handle = std::thread::Builder::new()
         .name("resource-loader".into())
@@ -229,10 +255,12 @@ pub(super) fn spawn_loader(
             let root = mods::content_root(&root, &settings.mods.enabled, &dev_mods);
             let result = load_resources(
                 root,
+                world.as_deref(),
                 &vanilla_root,
                 &settings,
                 started,
                 true,
+                false,
                 &progress,
                 &mut |gui, root| {
                     let _ = sender.send(LoaderMsg::Ui(gui, root.to_path_buf()));
@@ -250,20 +278,28 @@ pub(super) fn spawn_loader(
 
 impl Loading {
     pub(super) fn poll_menu_resources(&mut self) -> Result<()> {
-        if self.loaded.is_none() {
+        // Once `Done` arrived the generation is over: the caller may have taken
+        // its result, and the finished loader's channel is closed.
+        if self.loaded.is_none() && !self.delivered {
             loop {
                 match self.receiver.try_recv() {
                     Ok(LoaderMsg::Ui(gui, root)) => self.set_ui(gui, root),
                     Ok(LoaderMsg::Done(result)) => {
                         self.loaded = Some(result);
+                        self.delivered = true;
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
-                        if let Some(handle) = self.handle.take() {
-                            let _ = handle.join();
-                        }
-                        return Err("resource loader stopped before finishing".into());
+                        // The loader sends `Done` before it returns: it panicked.
+                        let reason = match self.handle.take().map(JoinHandle::join) {
+                            Some(Err(payload)) => panic_text(payload.as_ref()).to_owned(),
+                            Some(Ok(())) => "it returned without a result".into(),
+                            None => "no loader thread was running".into(),
+                        };
+                        return Err(
+                            format!("resource loader stopped before finishing: {reason}").into(),
+                        );
                     }
                 }
             }
@@ -280,10 +316,26 @@ impl Loading {
             gui.atlas.font.uniform = self.settings.force_unicode;
             gui.atlas.font.japanese = self.settings.japanese_glyphs;
         }
-        if let Some(window) = &self.window
-            && let Some(want) = self.fullscreen.request(self.settings.fullscreen)
-        {
-            window.set_fullscreen(want.then_some(winit::window::Fullscreen::Borderless(None)));
+        if let Some(window) = self.window.clone() {
+            let modes = window
+                .current_monitor()
+                .or_else(|| window.primary_monitor())
+                .map(|m| horizon_client::window::monitor_video_modes(&m))
+                .unwrap_or_default();
+            let preferred = self
+                .settings
+                .file
+                .fullscreen_resolution
+                .as_deref()
+                .and_then(horizon_client::window::VideoMode::read);
+            self.fullscreen.apply(
+                &window,
+                self.settings.fullscreen,
+                self.settings.file.bool("exclusiveFullscreen"),
+                preferred,
+                false,
+            );
+            self.settings.video_modes = modes;
         }
         self.update_menu_cursor();
     }
@@ -303,12 +355,11 @@ impl Loading {
     }
 
     fn save_menu_address(&mut self) {
-        if self
-            .menu
-            .title
-            .as_ref()
-            .is_some_and(|title| title.last_server != self.settings.file.string("lastServer"))
-        {
+        if self.menu.title.as_ref().is_some_and(|title| {
+            title.last_server != self.settings.file.string("lastServer")
+                || title.skip_multiplayer_warning
+                    != self.settings.file.bool("skipMultiplayerWarning")
+        }) {
             self.save_menu_settings();
         }
     }
@@ -318,6 +369,10 @@ impl Loading {
             self.settings.file.set(
                 "lastServer",
                 horizon_client::options_file::V::Str(title.last_server.clone()),
+            );
+            self.settings.file.set(
+                "skipMultiplayerWarning",
+                horizon_client::options_file::V::Bool(title.skip_multiplayer_warning),
             );
         }
         self.settings.save(&Game::options_path());
@@ -339,6 +394,9 @@ impl Loading {
                     self.save_menu_settings();
                     self.apply_menu_settings();
                 }
+                Event::SliderDrag => {
+                    self.apply_menu_settings();
+                }
                 Event::Close if self.menu.options.resource_error.is_some() => {}
                 Event::Close => {
                     self.menu.options_open = false;
@@ -358,6 +416,15 @@ impl Loading {
                 }
                 Event::OpenPackFolder => {
                     let dir = packs::packs_dir();
+                    let _ = std::fs::create_dir_all(&dir);
+                    packs::open_folder(&dir);
+                }
+                Event::DataPacks(ids) => {
+                    if let Some(title) = &mut self.menu.title {
+                        title.set_data_packs(ids);
+                    }
+                }
+                Event::OpenDataPackFolder(dir) => {
                     let _ = std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
@@ -392,9 +459,10 @@ impl Loading {
                     }
                 }
                 // Mods' settings pages open only in a running game.
-                Event::ModSettings(_) => {}
-                // The startup menu runs before the game opens a control socket.
-                Event::ButtonClick | Event::CopyAgentDetails => {}
+                Event::NativeSettings(_) | Event::NativeButton(..) => {}
+                // The startup menu runs before the game opens a control socket,
+                // and before its sound engine (no clicks, no volume previews).
+                Event::ButtonClick | Event::CopyAgentDetails | Event::Volume(..) => {}
             }
         }
     }
@@ -422,6 +490,18 @@ impl Loading {
             Action::Options => self.open_menu_options(Page::Main),
             Action::Accessibility => self.open_menu_options(Page::Accessibility),
             Action::Language => self.open_menu_options(Page::Language),
+            Action::Sounds => self.open_menu_options(Page::Sound),
+            Action::Credits => self.open_menu_options(Page::Credits),
+            Action::OpenUri(uri) => super::packs::open_uri(&uri),
+            Action::CopyText(text) => {
+                use horizon_client::clipboard::Clipboard;
+                self.menu.clipboard.set(&text);
+            }
+            Action::DataPacks { dir, selected } => {
+                let resources = self.vanilla_root.clone();
+                self.menu.options.open_data_packs(dir, selected, resources);
+                self.menu.options_open = true;
+            }
             action => {
                 let name = self
                     .options
@@ -449,6 +529,14 @@ impl Loading {
         }
         match event {
             WindowEvent::CloseRequested => {
+                if !self.settings.quit_shortcuts
+                    && horizon_client::input::is_quit_shortcut_down(
+                        self.menu.modifiers,
+                        &self.menu.physical_keys,
+                    )
+                {
+                    return Ok(());
+                }
                 self.save_menu_settings();
                 event_loop.exit();
             }
@@ -565,14 +653,17 @@ impl Loading {
                 } else {
                     raw
                 } * self.settings.mouse_wheel_sensitivity;
-                let batch = HudBatch::new(self.menu_size());
+                let size = self.menu_size();
+                let batch = HudBatch::new(size);
                 if self.menu.options_open {
-                    self.menu.options.scroll_at(
-                        &self.settings,
+                    let events = self.menu.options.wheel(
+                        &mut self.settings,
                         (batch.width, batch.height),
                         self.menu.cursor,
+                        [size[0] as i32, size[1] as i32],
                         amount,
                     );
+                    self.menu_option_events(events);
                 } else if let Some(title) = &mut self.menu.title {
                     title.scroll_worlds(amount, self.menu.cursor, (batch.width, batch.height));
                 }
@@ -600,8 +691,8 @@ impl Loading {
                         self.menu_option_events(events);
                     }
                 } else {
-                    self.menu.title_key(&event);
-                    self.save_menu_address();
+                    let action = self.menu.title_key(&event);
+                    self.menu_action(event_loop, action);
                 }
             }
             _ => {}
@@ -612,11 +703,12 @@ impl Loading {
     pub(super) fn draw_menu(&mut self, batch: &mut HudBatch) {
         let Some(gui) = &self.gui else { return };
         if self.menu.pending.is_some() {
-            horizon_client::level_loading::draw_progress(
+            horizon_client::level_loading::draw_loading_overlay(
                 batch,
                 &gui.atlas,
                 self.progress.line(),
                 self.progress.fraction(),
+                self.settings.file.bool("darkMojangStudiosBackground"),
             );
         } else if let Some((win, frame)) = &mut self.menu.win {
             let now = Instant::now();
@@ -633,6 +725,14 @@ impl Loading {
                 .draw(&self.settings, batch, &gui.atlas, self.menu.cursor);
         } else if let Some(title) = &mut self.menu.title {
             title.poll_backup();
+            if std::mem::take(&mut title.onboarding_finished) {
+                // Options.onboardingAccessibilityFinished.
+                self.settings.file.set(
+                    "onboardAccessibility",
+                    horizon_client::options_file::V::Bool(false),
+                );
+                self.settings.save(&Game::options_path());
+            }
             let _ = title.update_toast(self.settings.notification_display_time);
             title.draw(
                 &gui.atlas,
@@ -660,8 +760,11 @@ impl Loading {
             }
         }
         self.loaded = None;
+        self.delivered = false;
         if let Some(handle) = self.handle.take() {
-            handle.join().map_err(|_| "resource loader panicked")?;
+            handle.join().map_err(|payload| {
+                format!("resource loader panicked: {}", panic_text(payload.as_ref()))
+            })?;
         }
         self.progress = Progress::new();
         let options = self.options.as_ref().ok_or("loading already finished")?;
@@ -708,6 +811,7 @@ mod tests {
             progress: Progress::new(),
             receiver,
             loaded: None,
+            delivered: false,
             handle: None,
             shown: false,
             menu: StartupMenu::default(),
@@ -786,13 +890,54 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_generation_keeps_its_error_after_the_loader_ends() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(LoaderMsg::Done(Err("missing facts.json".into())))
+                .unwrap();
+        });
+        let mut loading = loading(receiver);
+        loading.handle = Some(worker);
+        while loading.loaded.is_none() {
+            loading.poll_menu_resources().unwrap();
+        }
+        // App::about_to_wait takes the result to report it; the loop may poll
+        // once more before it exits, with the loader gone.
+        assert!(matches!(loading.loaded.take(), Some(Err(e)) if e == "missing facts.json"));
+        while !loading.handle.as_ref().is_none_or(JoinHandle::is_finished) {
+            std::thread::yield_now();
+        }
+        loading.poll_menu_resources().unwrap();
+        assert!(loading.loaded.is_none());
+    }
+
+    #[test]
+    fn a_panicking_loader_reports_its_panic() {
+        let (sender, receiver) = std::sync::mpsc::channel::<LoaderMsg>();
+        let worker = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("atlas has no fonts");
+        });
+        while !worker.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut loading = loading(receiver);
+        loading.handle = Some(worker);
+        assert_eq!(
+            loading.poll_menu_resources().unwrap_err().to_string(),
+            "resource loader stopped before finishing: atlas has no fonts"
+        );
+    }
+
+    #[test]
     fn disconnected_core_worker_is_reported_instead_of_waiting_forever() {
         let (sender, receiver) = std::sync::mpsc::channel();
         drop(sender);
         let mut loading = loading(receiver);
         assert_eq!(
             loading.poll_menu_resources().unwrap_err().to_string(),
-            "resource loader stopped before finishing"
+            "resource loader stopped before finishing: no loader thread was running"
         );
     }
 }

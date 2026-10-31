@@ -1,7 +1,7 @@
 //! Offline skins and capes: a PNG the player picks for an offline name, kept in the launcher's
 //! `skins/` folder, with its model (classic arms or slim). The game gets them in
 //! `HORIZON_OFFLINE_SKIN`, `HORIZON_OFFLINE_SKIN_MODEL` and `HORIZON_OFFLINE_CAPE` when that
-//! name plays; a game that doesn't read them yet draws the default skin, as before.
+//! name plays, and draws them on the local player (`skins::offline_skin`, `skins::offline_cape`).
 //!
 //! Skins are the layout every Java Edition skin uses: 64×64, or the older 64×32 (whose left arm
 //! and leg are the right ones mirrored). Capes are 64×32 (or the older 22×17).
@@ -155,6 +155,13 @@ pub fn keep(dir: &Path, name: &str, file: &Path, cape: bool) -> Result<(), Strin
     let (skin, cape_file) = files(dir, name);
     let to = if cape { cape_file } else { skin };
     std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))
+}
+
+/// Drops a forgotten name's files (`Accounts::remove_offline`); missing files are fine.
+pub fn forget(dir: &Path, name: &str) {
+    let (skin, cape) = files(dir, name);
+    let _ = std::fs::remove_file(skin);
+    let _ = std::fs::remove_file(cape);
 }
 
 /// The variables the game gets for `name`'s look.

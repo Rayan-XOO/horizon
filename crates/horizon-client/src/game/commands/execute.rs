@@ -32,6 +32,8 @@ pub(in crate::game) struct Source {
     /// The command block whose output this source is
     /// (`BaseCommandBlock.CloseableCommandBlockSource`).
     pub block: Option<(i32, i32, i32)>,
+    /// The command block minecart whose output this source is.
+    pub cart: Option<u32>,
 }
 
 /// Where `execute store` writes.
@@ -64,6 +66,17 @@ pub(in crate::game) struct ExecState {
     pub function_depth: u32,
 }
 
+/// A modifier that brings the sources to `max_command_forks` ends the chain
+/// (`BuildContexts.ERROR_FORK_LIMIT_REACHED`); the error is only shown when
+/// no fork came before it (`CommandSourceStack.handleError`).
+fn fork_limit_reached(forked: bool, limit: usize) -> R<i32> {
+    if forked {
+        Ok(0)
+    } else {
+        Err(err("command.forkLimit", &[&limit]))
+    }
+}
+
 /// Java's `(int)`/`(short)`/`(byte)` narrowing of a double.
 fn java_int(v: f64) -> i32 {
     v as i32
@@ -83,6 +96,7 @@ impl Game<'_> {
             dimension: self.dim,
             level: None,
             block: None,
+            cart: None,
         }
     }
     /// The server as a source (function ticks and schedules): the world spawn.
@@ -97,9 +111,10 @@ impl Game<'_> {
             dimension: self.dim,
             level: None,
             block: None,
+            cart: None,
         }
     }
-    pub(super) fn target_rotation(&self, t: Target) -> [f32; 2] {
+    pub(in crate::game) fn target_rotation(&self, t: Target) -> [f32; 2] {
         match t {
             Target::Player => [self.yaw, self.pitch],
             Target::Guest(conn) => self
@@ -303,6 +318,8 @@ impl Game<'_> {
 
     /// ExecuteCommand: `ctx` is the context holding the `execute` literal.
     pub(in crate::game) fn run_execute(&mut self, ctx: &Context) -> R<i32> {
+        // BuildContexts: a modifier may not bring the sources to this many.
+        let fork_limit = self.ui.rules.int("max_command_forks") as usize;
         let mut sources = vec![self.command_source.unwrap_or_else(|| self.player_source())];
         let mut c = ctx;
         // A fork modifier (as, at, positioned as, rotated as, facing entity,
@@ -354,6 +371,9 @@ impl Game<'_> {
                     let mut kept = Vec::new();
                     for s in sources {
                         let (keep, _) = self.with_source(s, |g| g.condition(c, want))?;
+                        if kept.len() + usize::from(keep) >= fork_limit {
+                            return fork_limit_reached(forked, fork_limit);
+                        }
                         if keep {
                             kept.push(s);
                         }
@@ -369,7 +389,11 @@ impl Game<'_> {
                     };
                     let mut next = Vec::new();
                     for s in sources {
-                        next.extend(self.with_source(s, |g| g.modify(word, c, s))?);
+                        let new = self.with_source(s, |g| g.modify(word, c, s))?;
+                        if next.len() + new.len() >= fork_limit {
+                            return fork_limit_reached(forked, fork_limit);
+                        }
+                        next.extend(new);
                     }
                     sources = next;
                 }
@@ -654,7 +678,8 @@ impl Game<'_> {
                             self.target_by_uuid(horizon_client::lan::playerdata::ints_uuid(uuid))
                         }
                         horizon_client::mobs::leash::Holder::Mob(i) => Some(Target::Mob(i)),
-                        horizon_client::mobs::leash::Holder::Knot(_) => None,
+                        horizon_client::mobs::leash::Holder::Boat(_)
+                        | horizon_client::mobs::leash::Holder::Knot(_) => None,
                     })
                     .into_iter()
                     .collect(),
@@ -765,8 +790,8 @@ impl Game<'_> {
     }
     /// The highest block of a heightmap type at a column (`Level.getHeight`).
     fn heightmap_at(&self, kind: &str, x: i32, z: i32) -> i32 {
-        let top = horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT;
-        for y in (horizon_client::chunk::MIN_Y..top).rev() {
+        let top = self.world.top_y();
+        for y in (self.world.bottom_y()..top).rev() {
             let state = self.world.block(x, y, z);
             if state == self.world.air {
                 continue;
@@ -789,7 +814,7 @@ impl Game<'_> {
                 return y + 1;
             }
         }
-        horizon_client::chunk::MIN_Y
+        self.world.bottom_y()
     }
     /// A `store` modifier: a new callback in the source's chain.
     fn store_source(&mut self, c: &Context, s: Source) -> R<Source> {

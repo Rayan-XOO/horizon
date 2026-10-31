@@ -8,10 +8,12 @@ use horizon_client::{
     Result,
     clipboard::EditShortcut,
     confirm_screen::Confirm,
-    dialog::{AfterAction, Click, Control, Dialog, InputValue},
-    dialog_screen::{BOX, Layout, Part, WARNING_SPRITES, waiting_button},
+    dialog::{AfterAction, Body, Click, Control, Dialog, InputValue, Kind},
+    dialog_screen::{BOX, Layout, Part, WARNING_SPRITES, text_height, waiting_button},
+    font::Font,
     hud::{HudBatch, rgba},
-    text::Text,
+    multiline_edit::MultiLineEdit,
+    text::{ClickEvent, Text},
     ui,
 };
 use horizon_world::nbt::Tag;
@@ -23,9 +25,54 @@ struct Open {
     dialog: Dialog,
     values: Vec<InputValue>,
     /// The box of each text input.
-    fields: Vec<Option<ui::EditBox>>,
+    fields: Vec<Option<Field>>,
     focus: Option<usize>,
     scroll: ui::Scroll,
+    /// The number range input whose slider is held.
+    dragging: Option<usize>,
+    /// The multiline input the pointer is selecting in.
+    selecting: Option<usize>,
+}
+
+/// A text input's control: `EditBox`, or `MultiLineEditBox` for a multiline one.
+enum Field {
+    Line(ui::EditBox),
+    Multi(Box<MultiLineEdit>),
+}
+impl Field {
+    fn value(&self) -> String {
+        match self {
+            Self::Line(edit) => edit.value.clone(),
+            Self::Multi(edit) => edit.value(),
+        }
+    }
+    fn insert_text(&mut self, font: &Font, text: &str) {
+        match self {
+            Self::Line(edit) => edit.insert_text(text),
+            Self::Multi(edit) => edit.insert_text(font, text),
+        }
+    }
+    fn key(&mut self, font: &Font, key: KeyCode, ctrl: bool, shift: bool) -> bool {
+        match self {
+            Self::Line(edit) => edit.key(key, ctrl, shift),
+            Self::Multi(edit) => edit.key(font, key, ctrl, shift),
+        }
+    }
+    fn shortcut(
+        &mut self,
+        font: &Font,
+        shortcut: EditShortcut,
+        clipboard: &mut dyn horizon_client::clipboard::Clipboard,
+    ) {
+        match self {
+            Self::Line(edit) => {
+                edit.shortcut(shortcut, clipboard);
+            }
+            Self::Multi(edit) => {
+                edit.shortcut(font, shortcut, clipboard);
+            }
+        }
+    }
 }
 
 /// The dialog screens a server can open.
@@ -36,6 +83,17 @@ pub(super) struct DialogState {
     waiting: Option<Instant>,
     /// `DialogScreen.WarningScreen`, over the dialog.
     warning: bool,
+}
+
+/// `CycleButton.cycleValue`: the next option (`delta` 1) or the one before
+/// it, wrapping.
+fn cycle(open: &mut Open, input: usize, delta: i32) {
+    let Control::SingleOption { options, .. } = &open.dialog.inputs[input].control else {
+        return;
+    };
+    if let Some(InputValue::Option(i)) = open.values.get_mut(input) {
+        *i = (*i as i32 + delta).rem_euclid(options.len().max(1) as i32) as usize;
+    }
 }
 
 fn warning_texts() -> (Text, Text, [Text; 2]) {
@@ -57,15 +115,65 @@ impl Game<'_> {
     /// `showDialog`: the dialog replaces an open one (and a waiting screen);
     /// under the warning screen, it is what Back returns to.
     pub(super) fn show_dialog(&mut self, tag: &Tag) {
-        let Some(dialog) = Dialog::parse(tag) else {
+        let Some(mut dialog) = Dialog::parse(tag) else {
             log::warn!("Horizon: failed to show dialog for data {tag:?}");
             return;
         };
+        if let Kind::DialogList { dialogs, .. } = &dialog.kind {
+            let entries = self.remote.as_ref().map(|r| {
+                let list = r.registries.registries.get("minecraft:dialog");
+                let by_id = |id: &str| {
+                    let name = if id.contains(':') {
+                        id.to_owned()
+                    } else {
+                        format!("minecraft:{id}")
+                    };
+                    list?.iter().find(|(n, _)| *n == name)?.1.clone()
+                };
+                let by_tag = |name: &str| {
+                    let name = if name.contains(':') {
+                        name.to_owned()
+                    } else {
+                        format!("minecraft:{name}")
+                    };
+                    let ids = r.registries.dialog_tags.get(&name).into_iter().flatten();
+                    ids.filter_map(|&i| list?.get(usize::try_from(i).ok()?)?.1.clone())
+                        .collect()
+                };
+                Dialog::list_entries(dialogs, &by_tag, &by_id)
+            });
+            dialog.set_list(&entries.unwrap_or_default());
+        }
         let values = dialog.inputs.iter().map(|i| i.control.initial()).collect();
+        let font = &self.gui.atlas.font;
         let fields = dialog
             .inputs
             .iter()
             .map(|i| match &i.control {
+                Control::Text {
+                    width,
+                    initial,
+                    max_length,
+                    multiline: Some((max_lines, _)),
+                    ..
+                } => {
+                    // TextInputHandler: the `MultiLineEditBox` with its limits.
+                    let height = text_height(Some((*max_lines, None)));
+                    let height = match &i.control {
+                        Control::Text {
+                            multiline: Some((_, Some(h))),
+                            ..
+                        } => *h as f32,
+                        _ => height,
+                    };
+                    let mut edit = MultiLineEdit::new(font, 0.0, 0.0, *width as f32, height);
+                    edit.set_character_limit((*max_length).max(0) as usize);
+                    if let Some(lines) = max_lines {
+                        edit.set_line_limit((*lines).max(0) as usize);
+                    }
+                    edit.set_value(font, initial);
+                    Some(Field::Multi(Box::new(edit)))
+                }
                 Control::Text {
                     width,
                     initial,
@@ -76,7 +184,7 @@ impl Game<'_> {
                     edit.max_length = (*max_length).max(1) as usize;
                     edit.set_value(initial);
                     edit.focused = false;
-                    Some(edit)
+                    Some(Field::Line(edit))
                 }
                 _ => None,
             })
@@ -87,6 +195,8 @@ impl Game<'_> {
             fields,
             focus: None,
             scroll: ui::Scroll::default(),
+            dragging: None,
+            selecting: None,
         });
         self.dialogs.waiting = None;
         self.capture(false);
@@ -115,7 +225,7 @@ impl Game<'_> {
     fn dialog_values(open: &mut Open) {
         for (value, field) in open.values.iter_mut().zip(&open.fields) {
             if let Some(f) = field {
-                *value = InputValue::Text(f.value.clone());
+                *value = InputValue::Text(f.value());
             }
         }
     }
@@ -123,6 +233,17 @@ impl Game<'_> {
     /// `DialogScreen.runAction`: the click event, then the screen the dialog's
     /// `after_action` leaves.
     fn run_dialog_action(&mut self, click: Option<Click>, after: AfterAction) -> Result<()> {
+        // defaultHandleClickEvent: an open_url never sets the screen itself, so
+        // the dialog stays unless the confirmation takes over (Web Links off,
+        // or Prompt on Links off, opens nothing or the browser behind it).
+        if let Some(Click::OpenUrl(url)) = &click
+            && !(self.settings.chat_links && self.settings.chat_links_prompt)
+        {
+            if self.settings.chat_links {
+                super::packs::open_uri(url);
+            }
+            return Ok(());
+        }
         match after {
             AfterAction::None => {}
             AfterAction::Close => self.dialogs.open = None,
@@ -153,7 +274,23 @@ impl Game<'_> {
                 use horizon_client::clipboard::Clipboard;
                 self.clipboard.set(&value);
             }
-            Some(other) => log::info!("Horizon: dialog action {other:?} is not supported yet"),
+            // ConfirmLinkScreen over the screen the dialog leaves.
+            Some(Click::OpenUrl(url)) => self.click_url(url),
+            // defaultHandleClickEvent: `activeScreen.insertText(command, true)`.
+            // Only the chat screen (opened under the dialog) takes text.
+            Some(Click::SuggestCommand(command)) => {
+                if !self.dialog_open() && self.ui.chat_screen.is_some() {
+                    let m = horizon_client::screen_draw::Measure(&self.gui.atlas.font);
+                    let c = horizon_client::chat::Commands {
+                        dispatcher: super::chat::chat_tree(&self.remote),
+                        registries: &self.ui.registries,
+                    };
+                    if let Some(screen) = self.ui.chat_screen.as_mut() {
+                        screen.suggest_command(&m, &c, &command);
+                    }
+                }
+            }
+            Some(other) => log::error!("Don't know how to handle {other:?}"),
             None => {}
         }
         if !self.dialog_open() {
@@ -163,7 +300,7 @@ impl Game<'_> {
     }
 
     /// A `show_dialog` click event's dialog: a registry id or the dialog itself.
-    fn show_dialog_ref(&mut self, dialog: &Tag) {
+    pub(super) fn show_dialog_ref(&mut self, dialog: &Tag) {
         match dialog {
             Tag::String(id) => {
                 let id = id.to_string_lossy();
@@ -262,7 +399,8 @@ impl Game<'_> {
         let Some(layout) = self.dialog_layout() else {
             return;
         };
-        let Some(open) = self.dialogs.open.as_mut() else {
+        // Out of `self` while it draws: an item body draws through `self`.
+        let Some(mut open) = self.dialogs.open.take() else {
             return;
         };
         let atlas = &self.gui.atlas;
@@ -291,6 +429,7 @@ impl Game<'_> {
         let buttons = open.dialog.buttons();
         let in_area = |y: f32| y >= ay && y < ay + ah;
         let mut tooltip = None;
+        let mut item_tip = None;
         let mut start = None;
         for (part, clipped) in layout.placed(open.scroll.amount) {
             if clipped && start.is_none() {
@@ -303,10 +442,19 @@ impl Game<'_> {
                     batch.text_styled(atlas, &text, x, y, u32::MAX, true);
                 }
                 Part::Field { input, rect } => {
-                    if let Some(Some(edit)) = open.fields.get_mut(input) {
-                        [edit.x, edit.y, edit.width, edit.height] = rect;
-                        edit.focused = open.focus == Some(input);
-                        edit.draw(batch, atlas, None);
+                    let focused = open.focus == Some(input);
+                    match open.fields.get_mut(input) {
+                        Some(Some(Field::Line(edit))) => {
+                            [edit.x, edit.y, edit.width, edit.height] = rect;
+                            edit.focused = focused;
+                            edit.draw(batch, atlas, None);
+                        }
+                        Some(Some(Field::Multi(edit))) => {
+                            [edit.x, edit.y, edit.width, edit.height] = rect;
+                            edit.set_focused(focused);
+                            edit.draw(batch, atlas);
+                        }
+                        _ => {}
                     }
                 }
                 Part::Check { input, rect } => {
@@ -332,6 +480,65 @@ impl Game<'_> {
                         rgba(224, 224, 224, 255),
                         true,
                     );
+                }
+                Part::Cycle { input, rect } => {
+                    let [x, y, cw, ch] = rect;
+                    let hover = in_area(cursor.1) && ui::hovered(cursor, x, y, cw, ch);
+                    let Some(label) = open
+                        .values
+                        .get(input)
+                        .and_then(|v| open.dialog.inputs[input].control.message(v))
+                    else {
+                        continue;
+                    };
+                    ui::button(batch, atlas, x, y, cw, ch, &label, true, hover);
+                }
+                Part::Slider { input, rect } => {
+                    let [x, y, sw, sh] = rect;
+                    let hover = in_area(cursor.1) && ui::hovered(cursor, x, y, sw, sh);
+                    let Some((InputValue::Slider(position), Some(label))) = open
+                        .values
+                        .get(input)
+                        .map(|v| (v.clone(), open.dialog.inputs[input].control.message(v)))
+                    else {
+                        continue;
+                    };
+                    let held = open.dragging == Some(input);
+                    ui::slider(
+                        batch,
+                        atlas,
+                        x,
+                        y,
+                        sw,
+                        &label,
+                        position,
+                        hover || held,
+                        true,
+                        held,
+                    );
+                }
+                Part::Item { body, rect } => {
+                    let [x, y, iw, ih] = rect;
+                    let Some(Body::Item {
+                        item,
+                        show_decorations,
+                        show_tooltip,
+                        ..
+                    }) = open.dialog.body.get(body)
+                    else {
+                        continue;
+                    };
+                    let Some(stack) = horizon_items::item_nbt::item_from_nbt(item) else {
+                        continue;
+                    };
+                    // ItemDisplayWidget: the item at its corner, then its decorations.
+                    self.draw_item_model(batch, &stack, x, y);
+                    if *show_decorations {
+                        self.draw_item_decorations(batch, &stack, x, y, None);
+                    }
+                    if *show_tooltip && in_area(cursor.1) && ui::hovered(cursor, x, y, iw, ih) {
+                        item_tip = Some(stack);
+                    }
                 }
                 Part::Button { index, rect } => {
                     let [x, y, bw, bh] = rect;
@@ -370,6 +577,10 @@ impl Game<'_> {
                 .map(|l| l.0)
                 .collect();
             ui::tooltip(batch, atlas, &lines, cursor);
+        }
+        self.dialogs.open = Some(open);
+        if let Some(stack) = item_tip {
+            self.draw_stack_tooltip(batch, &stack, cursor.0, cursor.1);
         }
     }
 
@@ -420,11 +631,13 @@ impl Game<'_> {
             self.dialogs.warning = true;
             return Ok(());
         }
+        let shift = self.modifiers.shift_key();
         let Some(open) = self.dialogs.open.as_mut() else {
             return Ok(());
         };
         let [_, ay, _, ah] = layout.area;
         let mut action = None;
+        let mut text_click: Option<ClickEvent> = None;
         open.focus = None;
         for (part, clipped) in layout.placed(open.scroll.amount) {
             if clipped && !(cursor.1 >= ay && cursor.1 < ay + ah) {
@@ -434,11 +647,32 @@ impl Game<'_> {
                 Part::Field {
                     input,
                     rect: [x, y, w, h],
-                } if ui::hovered(cursor, x, y, w, h) => {
+                } if ui::hovered(
+                    cursor,
+                    x,
+                    y,
+                    // A multiline box answers over its scroll bar too.
+                    w + if matches!(open.fields.get(input), Some(Some(Field::Multi(_)))) {
+                        6.0
+                    } else {
+                        0.0
+                    },
+                    h,
+                ) =>
+                {
                     open.focus = Some(input);
-                    if let Some(Some(edit)) = open.fields.get_mut(input) {
-                        edit.focused = true;
-                        edit.click(&self.gui.atlas, cursor.0, false, false);
+                    match open.fields.get_mut(input) {
+                        Some(Some(Field::Line(edit))) => {
+                            edit.focused = true;
+                            edit.click(&self.gui.atlas, cursor.0, false, false);
+                        }
+                        Some(Some(Field::Multi(edit))) => {
+                            [edit.x, edit.y, edit.width, edit.height] = [x, y, w, h];
+                            edit.set_focused(true);
+                            edit.click(&self.gui.atlas.font, cursor, shift, false);
+                            open.selecting = Some(input);
+                        }
+                        _ => {}
                     }
                 }
                 Part::Check {
@@ -450,17 +684,62 @@ impl Game<'_> {
                     }
                     action = Some(None);
                 }
+                Part::Cycle {
+                    input,
+                    rect: [x, y, w, h],
+                } if ui::hovered(cursor, x, y, w, h) => {
+                    // CycleButton.onPress: Shift goes back.
+                    cycle(open, input, if shift { -1 } else { 1 });
+                    action = Some(None);
+                }
+                Part::Slider {
+                    input,
+                    rect: [x, y, w, h],
+                } if ui::hovered(cursor, x, y, w, h) => {
+                    open.dragging = Some(input);
+                    if let Some(v) = open.values.get_mut(input) {
+                        *v = InputValue::Slider(ui::slider_value(x, w, cursor.0));
+                    }
+                }
                 Part::Button {
                     index,
                     rect: [x, y, w, h],
                 } if ui::hovered(cursor, x, y, w, h) => {
                     action = Some(Some(index));
                 }
+                // AbstractStringWidget.setComponentClickHandler: the click event
+                // of the styled text under a centred message line.
+                Part::Line(line, x, y)
+                    if text_click.is_none()
+                        && cursor.0 >= x
+                        && (0.0..9.0).contains(&(cursor.1 - y)) =>
+                {
+                    let content = line.resolve_legacy();
+                    let mut left = cursor.0 - x;
+                    for (c, style) in content.chars() {
+                        left -= self.gui.atlas.font.advance(c, style);
+                        if left < 0.0 {
+                            text_click = style.click.clone();
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         let Some(action) = action else {
-            return Ok(());
+            // A text click runs its event (DialogScreen.runAction) with no button sound.
+            let click = match text_click {
+                Some(ClickEvent::OpenUrl(url)) => Click::OpenUrl(url),
+                Some(ClickEvent::ChangePage(page)) => Click::ChangePage(page),
+                Some(ClickEvent::SuggestCommand(command)) => Click::SuggestCommand(command),
+                Some(ClickEvent::RunCommand(command)) => Click::RunCommand(command),
+                Some(ClickEvent::CopyToClipboard(value)) => Click::CopyToClipboard(value),
+                Some(ClickEvent::ShowDialog(dialog)) => Click::ShowDialog(dialog),
+                Some(ClickEvent::OpenFile(_)) | None => return Ok(()),
+            };
+            let after = open.dialog.after_action;
+            return self.run_dialog_action(Some(click), after);
         };
         self.audio.play_button_click();
         let Some(index) = action else {
@@ -479,14 +758,99 @@ impl Game<'_> {
         self.run_dialog_action(click, after)
     }
 
-    /// The mouse wheel over a dialog: its body scrolls 10 a step.
+    /// The mouse wheel over a dialog: a cycle button under it takes the
+    /// step, else the body scrolls 10 a step.
     pub(super) fn dialog_scroll(&mut self, delta: f32) {
         let Some(layout) = self.dialog_layout() else {
             return;
         };
+        let cursor = self.cursor;
         if let Some(open) = self.dialogs.open.as_mut() {
             let [_, ay, _, ah] = layout.area;
+            if delta != 0.0 && cursor.1 >= ay && cursor.1 < ay + ah {
+                let hovered = layout
+                    .placed(open.scroll.amount)
+                    .find_map(|(part, _)| match part {
+                        Part::Cycle {
+                            input,
+                            rect: [x, y, w, h],
+                        } if ui::hovered(cursor, x, y, w, h) => Some(input),
+                        _ => None,
+                    });
+                if let Some(input) = hovered {
+                    // CycleButton.mouseScrolled: up goes back.
+                    cycle(open, input, if delta > 0.0 { -1 } else { 1 });
+                    return;
+                }
+                // AbstractScrollArea.mouseScrolled: a multiline box takes the wheel.
+                let text = layout
+                    .placed(open.scroll.amount)
+                    .find_map(|(part, _)| match part {
+                        Part::Field { input, rect } => match open.fields.get(input) {
+                            Some(Some(Field::Multi(_)))
+                                if ui::hovered(
+                                    cursor,
+                                    rect[0],
+                                    rect[1],
+                                    rect[2] + 6.0,
+                                    rect[3],
+                                ) =>
+                            {
+                                Some(input)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(Some(Field::Multi(edit))) = text.and_then(|i| open.fields.get_mut(i)) {
+                    edit.wheel(delta);
+                    return;
+                }
+            }
             open.scroll.wheel(delta, 10.0, ay, ay + ah, layout.content);
+        }
+    }
+
+    /// The pointer moved with a slider held (`AbstractSliderButton.onDrag`).
+    pub(super) fn dialog_drag(&mut self) {
+        let (cursor, shift) = (self.cursor, self.modifiers.shift_key());
+        if let Some(open) = self.dialogs.open.as_mut()
+            && let Some(Some(Field::Multi(edit))) =
+                open.selecting.and_then(|i| open.fields.get_mut(i))
+        {
+            // MultiLineEditBox.onDrag.
+            edit.drag(&self.gui.atlas.font, cursor, shift);
+        }
+        let Some(input) = self.dialogs.open.as_ref().and_then(|o| o.dragging) else {
+            return;
+        };
+        let Some(layout) = self.dialog_layout() else {
+            return;
+        };
+        let x = self.cursor.0;
+        let Some(open) = self.dialogs.open.as_mut() else {
+            return;
+        };
+        let slider = layout.body.iter().find_map(|p| match p {
+            Part::Slider { input: i, rect } if *i == input => Some(*rect),
+            _ => None,
+        });
+        if let (Some([sx, _, sw, _]), Some(value)) = (slider, open.values.get_mut(input)) {
+            *value = InputValue::Slider(ui::slider_value(sx, sw, x));
+        }
+    }
+
+    /// The left button released: a held slider lets go and clicks.
+    pub(super) fn dialog_release(&mut self) {
+        if let Some(open) = self.dialogs.open.as_mut() {
+            if let Some(Some(Field::Multi(edit))) =
+                open.selecting.take().and_then(|i| open.fields.get_mut(i))
+            {
+                edit.release();
+            }
+            if open.dragging.take().is_some() {
+                self.audio.play_button_click();
+            }
         }
     }
 
@@ -551,11 +915,12 @@ impl Game<'_> {
         let Some(Some(edit)) = open.focus.and_then(|f| open.fields.get_mut(f)) else {
             return Ok(());
         };
+        let font = &self.gui.atlas.font;
         if let Some(shortcut) = shortcut {
-            edit.shortcut(shortcut, &mut self.clipboard);
+            edit.shortcut(font, shortcut, &mut self.clipboard);
             return Ok(());
         }
-        if edit.key(key, ctrl, shift) {
+        if edit.key(font, key, ctrl, shift) {
             return Ok(());
         }
         let typed: String = text
@@ -564,9 +929,17 @@ impl Game<'_> {
             .filter(|c| !c.is_control())
             .collect();
         if !typed.is_empty() {
-            edit.insert_text(&typed);
+            edit.insert_text(font, &typed);
         }
         Ok(())
+    }
+
+    /// Whether the open dialog has a text input.
+    pub(super) fn dialog_has_text_field(&self) -> bool {
+        self.dialogs
+            .open
+            .as_ref()
+            .is_some_and(|open| open.fields.iter().any(Option::is_some))
     }
 
     /// `type TEXT` with a dialog open: into the focused text input, or the
@@ -582,7 +955,7 @@ impl Game<'_> {
             return false;
         };
         open.focus = focus;
-        edit.insert_text(text);
+        edit.insert_text(&self.gui.atlas.font, text);
         true
     }
 
@@ -601,7 +974,7 @@ impl Game<'_> {
             let mut values = open.values.clone();
             for (value, field) in values.iter_mut().zip(&open.fields) {
                 if let Some(f) = field {
-                    *value = InputValue::Text(f.value.clone());
+                    *value = InputValue::Text(f.value());
                 }
             }
             open.dialog.json(&values)

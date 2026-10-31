@@ -15,8 +15,10 @@
 //! `level.dat`) are migrated on open.
 use crate::{
     Result,
+    beehive::BeehiveExt,
     biome::Biomes,
-    chunk::{BIOME_STRATEGY, Chunk, Light, MIN_Y, SECTIONS, Section, block_strategy},
+    chunk::{BIOME_STRATEGY, Chunk, ColumnLayout, Light, Section, block_strategy},
+    mobs::{spawner::SpawnerExt, trial_spawner::TrialSpawnerExt},
     streaming::ChunkGenerator,
 };
 use horizon_core::{
@@ -52,10 +54,10 @@ pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
 /// mutating the world. Each map is visited once, retaining its iteration order
 /// within each chunk (including repeated chunk coordinates in the input).
 /// An empty batch skips both maps; one chunk uses the direct filter path.
-pub fn chunks_with_block_entities<'a>(
+pub fn chunks_with_block_entities<'a, N: std::hash::BuildHasher>(
     chunks: impl IntoIterator<Item = &'a Arc<Chunk>>,
     entities: &HashMap<(i32, i32, i32), crate::containers::BlockEntity>,
-    names: &HashMap<(i32, i32, i32), String>,
+    names: &HashMap<(i32, i32, i32), String, N>,
 ) -> Vec<Chunk> {
     let chunks: Vec<_> = chunks.into_iter().collect();
     if chunks.is_empty() {
@@ -153,6 +155,27 @@ impl SessionLock {
         file.flush()?;
         Ok(Self(file))
     }
+    /// `DirectoryLock.isLocked`: another copy holds the world's `session.lock`.
+    /// A world without the file is not locked; one whose file may not be opened
+    /// is.
+    pub fn is_locked(world: &Path) -> bool {
+        let file = match fs::OpenOptions::new()
+            .write(true)
+            .open(world.join("session.lock"))
+        {
+            Ok(file) => file,
+            Err(e) => return e.kind() == std::io::ErrorKind::PermissionDenied,
+        };
+        match file.try_lock() {
+            Err(fs::TryLockError::WouldBlock) => true,
+            Err(_) => false,
+            // Take the probe's own lock back at once, as `SessionLock` does on drop.
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+        }
+    }
 }
 /// Bring a world last saved by an older game version to the current format, as
 /// 26.3 does when it opens one: the file fixes and level.dat first
@@ -161,6 +184,16 @@ impl SessionLock {
 /// the latter as it reads each file; Horizon runs them all on opening, which reads
 /// the same data. Worlds older than the ported fixes (1.17) are refused.
 pub fn upgrade_older_world(world: &Path) -> Result<()> {
+    upgrade_older_world_with(
+        world,
+        &horizon_world::datafix::progress::UpgradeProgress::new(),
+    )
+}
+/// [`upgrade_older_world`] reporting to `progress`, which `FileFixerProgressScreen` reads.
+pub fn upgrade_older_world_with(
+    world: &Path,
+    progress: &horizon_world::datafix::progress::UpgradeProgress,
+) -> Result<()> {
     let Some(root) = read_dat(&world.join("level.dat")) else {
         return Ok(());
     };
@@ -179,9 +212,180 @@ pub fn upgrade_older_world(world: &Path) -> Result<()> {
         )
         .into());
     }
-    horizon_world::datafix::files::upgrade_world(world)
+    horizon_world::datafix::files::upgrade_world_with(world, progress)
         .map_err(|e| format!("upgrading {}: {e}", world.display()))?;
     Ok(())
+}
+/// Whether opening the world runs file fixes, which vanilla asks for a backup
+/// first (`BackupStatus.FILE_FIXING_REQUIRED`). Saves of 1.8 and before have no
+/// DataVersion, read as -1.
+pub fn needs_file_fixes(world: &Path) -> bool {
+    let Some(root) = read_dat(&world.join("level.dat")) else {
+        return false;
+    };
+    let Some(data) = root.get("Data") else {
+        return false;
+    };
+    let version = number(data.get("DataVersion")).unwrap_or(-1);
+    i32::try_from(version).is_ok_and(horizon_world::datafix::files::requires_file_fixing)
+}
+/// `LevelVersion.parse`: the saved game version's name, this build's when the `Version`
+/// compound has no `Name`, and empty without a `Version` (`getWorldVersionName` then
+/// shows `selectWorld.versionUnknown`).
+fn saved_version_name(version: Option<&Tag>) -> String {
+    match version {
+        Some(v) => text(v.get("Name")).unwrap_or_else(|| VERSION_NAME.to_string()),
+        None => String::new(),
+    }
+}
+/// `LevelSummary.isCompatible` (`DataVersion.isCompatible`: the saved series must be
+/// the current `main` one). None when the world opens; otherwise the saved game
+/// version's name, empty when it has none (`getWorldVersionName`).
+pub fn incompatible_version(world: &Path) -> Option<String> {
+    let root = read_dat(&world.join("level.dat"))?;
+    let version = root.get("Data")?.get("Version");
+    let series = text(version.and_then(|v| v.get("Series"))).unwrap_or_else(|| "main".into());
+    if series == "main" {
+        return None;
+    }
+    Some(saved_version_name(version))
+}
+/// `LevelSummary.backupStatus` DOWNGRADE: the saved game version's name (empty when it
+/// has none) when the world's `Version.Id` is newer than this build's `DataVersion`
+/// (`LevelVersion.parse`: no `Version` reads as 0, no `Id` as the current one).
+pub fn downgraded_from(world: &Path) -> Option<String> {
+    let root = read_dat(&world.join("level.dat"))?;
+    let version = root.get("Data")?.get("Version");
+    let id = version.map_or(0, |v| {
+        number(v.get("Id")).unwrap_or_else(|| i64::from(DATA_VERSION))
+    });
+    if id <= i64::from(DATA_VERSION) {
+        return None;
+    }
+    Some(saved_version_name(version))
+}
+/// `LevelStorageAccess.checkForLowDiskSpace`: under 64 MiB usable.
+pub const LOW_DISK_SPACE: u64 = 67_108_864;
+/// `LevelStorageAccess.estimateDiskSpace`: the usable bytes of the disk holding `dir`
+/// (`FileStore.getUsableSpace`), `u64::MAX` when it cannot be asked.
+pub fn estimate_disk_space(dir: &Path) -> u64 {
+    fs4::available_space(dir).unwrap_or(u64::MAX)
+}
+/// `LevelStorageAccess.checkForLowDiskSpace`.
+pub fn low_disk_space(dir: &Path) -> bool {
+    estimate_disk_space(dir) < LOW_DISK_SPACE
+}
+/// `WorldOptions.isOldCustomizedWorld`: the generator settings keep `legacy_custom_options`.
+pub fn is_old_customized_world(world: &Path) -> bool {
+    world_gen_settings(world).is_some_and(|s| text(s.get("legacy_custom_options")).is_some())
+}
+/// A dimension's `LevelStem` field read as a resource location (an inline definition is not one).
+fn stem_id(tag: Option<&Tag>) -> Option<String> {
+    let id = text(tag)?;
+    Some(if id.contains(':') {
+        id
+    } else {
+        format!("minecraft:{id}")
+    })
+}
+/// `WorldDimensions.isVanillaLike`: whether a saved dimension is the stable Overworld, Nether or
+/// End (`isStableOverworld`, `isStableNether`, `isStableEnd`); any other key never is.
+fn dimension_is_vanilla_like(key: &str, dimension: &Tag) -> bool {
+    let kind = stem_id(dimension.get("type"));
+    let generator = dimension.get("generator");
+    let source = generator.and_then(|g| g.get("biome_source"));
+    let source_kind = source.and_then(|s| stem_id(s.get("type")));
+    // MultiNoiseBiomeSource.stable(preset): a reference to the preset, not its parameters.
+    let multi_noise_preset = |preset: &str| {
+        source_kind.as_deref() == Some("minecraft:multi_noise")
+            && stem_id(source.and_then(|s| s.get("preset"))).as_deref() == Some(preset)
+    };
+    // NoiseBasedChunkGenerator.stable(settings): the generator uses the settings by key.
+    let noise_settings = |settings: &str| {
+        generator.is_some_and(|g| stem_id(g.get("type")).as_deref() == Some("minecraft:noise"))
+            && stem_id(generator.and_then(|g| g.get("settings"))).as_deref() == Some(settings)
+    };
+    match key {
+        "minecraft:overworld" => {
+            matches!(
+                kind.as_deref(),
+                Some("minecraft:overworld" | "minecraft:overworld_caves")
+            ) && (source_kind.as_deref() != Some("minecraft:multi_noise")
+                || multi_noise_preset("minecraft:overworld"))
+        }
+        "minecraft:the_nether" => {
+            kind.as_deref() == Some("minecraft:the_nether")
+                && noise_settings("minecraft:nether")
+                && multi_noise_preset("minecraft:nether")
+        }
+        "minecraft:the_end" => {
+            kind.as_deref() == Some("minecraft:the_end")
+                && noise_settings("minecraft:end")
+                && source_kind.as_deref() == Some("minecraft:the_end")
+        }
+        _ => false,
+    }
+}
+/// A data pack's JSON as the NBT `dimension_is_vanilla_like` reads (what a codec gets from
+/// either one is the same data).
+fn json_tag(value: &serde_json::Value) -> Tag {
+    use serde_json::Value;
+    match value {
+        Value::Null => Tag::compound(std::iter::empty::<(&str, Tag)>()),
+        Value::Bool(b) => Tag::Byte(i8::from(*b)),
+        Value::Number(n) => n.as_i64().map_or_else(
+            || Tag::Double(n.as_f64().unwrap_or_default().to_bits()),
+            Tag::Long,
+        ),
+        Value::String(s) => Tag::String(s.as_str().into()),
+        Value::Array(items) => Tag::List(items.iter().map(json_tag).collect()),
+        Value::Object(map) => Tag::compound(map.iter().map(|(k, v)| (k.as_str(), json_tag(v)))),
+    }
+}
+/// The level stems the world's enabled data packs define, as `WorldOpenFlows.loadWorldStem`'s
+/// `datapackDimensions`.
+fn datapack_dimensions(world: &Path) -> Vec<(String, Tag)> {
+    let packs = crate::datapack::discover(world);
+    let enabled = crate::datapack::enabled_ids(world, &packs);
+    let enabled: Vec<&crate::datapack::DataPack> = enabled
+        .iter()
+        .filter_map(|id| packs.iter().find(|p| &p.id == id))
+        .collect();
+    crate::datapack::dimension_stems(&enabled)
+        .into_iter()
+        .map(|(id, json)| (id, json_tag(&json)))
+        .collect()
+}
+/// `data.worldGenSettingsLifecycle() != Lifecycle.stable()` (`WorldDimensions.bake`): the known
+/// dimensions (the saved ones and the enabled data packs', a pack's replacing the saved one of
+/// its id) lack one of the three builtin ones, or have one that is not the vanilla one.
+pub fn world_gen_unstable(world: &Path) -> bool {
+    let saved = world_gen_settings(world)
+        .as_ref()
+        .and_then(|s| s.get("dimensions"))
+        .cloned();
+    let stems = datapack_dimensions(world);
+    if saved.is_none() && stems.is_empty() {
+        return false;
+    }
+    let mut dimensions: std::collections::BTreeMap<String, Tag> = match saved {
+        Some(Tag::Compound(saved)) => saved
+            .into_iter()
+            .map(|(key, dimension)| (key.to_string_lossy(), dimension))
+            .collect(),
+        _ => std::collections::BTreeMap::new(),
+    };
+    // `baseDimensions.getOptional(key).or(saved)`.
+    dimensions.extend(stems);
+    let builtin = [
+        "minecraft:overworld",
+        "minecraft:the_nether",
+        "minecraft:the_end",
+    ];
+    builtin.iter().any(|key| !dimensions.contains_key(*key))
+        || dimensions
+            .iter()
+            .any(|(key, dimension)| !dimension_is_vanilla_like(key, dimension))
 }
 /// Move a world saved by an older Horizon build (pre-26.3 layout with a
 /// DataVersion that keeps vanilla from upgrading it) into the 26.3 layout.
@@ -409,6 +613,17 @@ pub fn encode_block_entity(
     block: &str,
 ) -> Tag {
     use crate::containers::BlockEntity;
+    if let BlockEntity::Mod(m) = e {
+        let mut map = m.nbt.clone();
+        map.insert("id".into(), string(&m.id));
+        if m.items.iter().any(Option::is_some) {
+            map.insert("Items".into(), encode_items(&m.items));
+        }
+        for (key, v) in [("x", p.0), ("y", p.1), ("z", p.2)] {
+            map.insert(key.into(), Tag::Int(v));
+        }
+        return Tag::Compound(map);
+    }
     let components = match e {
         BlockEntity::Banner(b) => b.components.clone(),
         _ => Compound::new(),
@@ -468,6 +683,13 @@ pub fn encode_block_entity(
             }
         }
         BlockEntity::Sculk(s) => entries.extend(s.to_nbt()),
+        BlockEntity::Shelf(shelf) => {
+            entries.push(("Items", encode_items(&shelf.items)));
+            entries.push((
+                "align_items_to_bottom",
+                Tag::Byte(i8::from(shelf.align_to_bottom)),
+            ));
+        }
         // ChiseledBookShelfBlockEntity.saveAdditional.
         BlockEntity::ChiseledBookshelf(b) => {
             entries.push(("Items", encode_items(&b.items)));
@@ -532,7 +754,26 @@ pub fn encode_block_entity(
         BlockEntity::Vault(v) => entries.extend(v.save()),
         BlockEntity::Beehive(h) => entries.extend(h.to_nbt()),
         BlockEntity::CommandBlock(c) => entries.extend(c.save()),
-        BlockEntity::DaylightDetector => {}
+        BlockEntity::StructureBlock(b) => entries.extend(b.save()),
+        BlockEntity::JigsawBlock(b) => entries.extend(b.save()),
+        BlockEntity::TestBlock(b) => entries.extend(b.save()),
+        BlockEntity::TestInstanceBlock(b) => entries.extend(b.save()),
+        BlockEntity::Brushable(b) => {
+            if let Some(table) = &b.loot_table {
+                entries.push(("LootTable", table.clone()));
+                if let Some(seed) = &b.loot_seed {
+                    entries.push(("LootTableSeed", seed.clone()));
+                }
+            } else if let Some(item) = &b.item {
+                entries.push(("item", item_to_nbt(item)));
+            }
+        }
+        // Encoded above.
+        BlockEntity::DaylightDetector | BlockEntity::Mod(_) => {}
+        // PotentSulfurBlockEntity.saveAdditional.
+        BlockEntity::PotentSulfur(sulfur) => {
+            entries.push(("countdown", Tag::Int(sulfur.waiting_countdown)))
+        }
     }
     Tag::compound(entries)
 }
@@ -596,11 +837,46 @@ pub fn decode_end_gateway(tag: &Tag) -> crate::containers::EndGateway {
         exact_teleport: number(tag.get("ExactTeleport")).unwrap_or(0) != 0,
     }
 }
+/// A mod's block entity: its compound without `id` and the position, and
+/// its `Items` as slots (`ContainerHelper.loadAllItems`; the game sizes them
+/// to the block's container when it uses them). `Items` that are not an item
+/// list saved exactly so stay the mod's own.
+fn decode_mod_block_entity(id: String, tag: &Tag) -> Option<crate::containers::ModBlockEntity> {
+    let Tag::Compound(map) = tag else {
+        return None;
+    };
+    let mut nbt = map.clone();
+    for key in ["id", "x", "y", "z"] {
+        nbt.remove(&key.into());
+    }
+    // `Slot` is a byte: 256 slots at most.
+    let mut items = decode_items(nbt.get(&"Items".into()), 256);
+    if nbt.get(&"Items".into()) == Some(&encode_items(&items)) {
+        nbt.remove(&"Items".into());
+        while items.last().is_some_and(Option::is_none) {
+            items.pop();
+        }
+    } else {
+        items.clear();
+    }
+    Some(crate::containers::ModBlockEntity {
+        id,
+        nbt,
+        items,
+        data: Vec::new(),
+    })
+}
 pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::containers::BlockEntity)> {
     use crate::containers::BlockEntity;
     let int = |k: &str| number(tag.get(k)).map(|v| v as i32);
     let id = text(tag.get("id"))?;
     let pos = (int("x")?, int("y")?, int("z")?);
+    if id.contains(':') && !id.starts_with("minecraft:") {
+        return Some((
+            pos,
+            BlockEntity::Mod(Box::new(decode_mod_block_entity(id, tag)?)),
+        ));
+    }
     if id == "minecraft:end_gateway" {
         return Some((pos, BlockEntity::EndGateway(decode_end_gateway(tag))));
     }
@@ -709,8 +985,24 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
                 _ => 1.0,
             };
         }
+        BlockEntity::Brushable(b) => {
+            b.loot_table = tag.get("LootTable").cloned();
+            b.loot_seed = tag.get("LootTableSeed").cloned();
+            b.item = if b.loot_table.is_none() {
+                tag.get("item").and_then(item_from_nbt)
+            } else {
+                None
+            };
+            b.hit_direction = int("hit_direction").filter(|v| (0..=5).contains(v));
+        }
         BlockEntity::Sign(sign) => sign.decode(tag),
         BlockEntity::Sculk(s) => s.load(tag),
+        BlockEntity::Shelf(shelf) => {
+            for (slot, item) in decode_items(tag.get("Items"), 3).into_iter().enumerate() {
+                shelf.items[slot] = item;
+            }
+            shelf.align_to_bottom = int("align_items_to_bottom").unwrap_or(0) != 0;
+        }
         // ChiseledBookShelfBlockEntity.loadAdditional.
         BlockEntity::ChiseledBookshelf(b) => {
             for (slot, item) in decode_items(tag.get("Items"), 6).into_iter().enumerate() {
@@ -745,6 +1037,12 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
             c.state_triggered = None;
             c.crafting_ticks = int("crafting_ticks_remaining").unwrap_or(0);
         }
+        // PotentSulfurBlockEntity.loadAdditional.
+        BlockEntity::PotentSulfur(sulfur) => {
+            if let Some(countdown) = int("countdown") {
+                sulfur.waiting_countdown = countdown;
+            }
+        }
         BlockEntity::Jukebox(_)
         | BlockEntity::Beacon(_)
         | BlockEntity::Lectern(_)
@@ -752,12 +1050,23 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
         | BlockEntity::CreakingHeart(_)
         | BlockEntity::EndGateway(_)
         | BlockEntity::Skull(_)
-        | BlockEntity::DaylightDetector => {}
+        | BlockEntity::DaylightDetector
+        | BlockEntity::Mod(_) => {}
         BlockEntity::Spawner(s) => **s = crate::mobs::spawner::Spawner::load(tag),
         BlockEntity::TrialSpawner(s) => **s = crate::mobs::trial_spawner::TrialSpawner::load(tag),
         BlockEntity::Vault(v) => **v = crate::vault::Vault::load(tag),
         BlockEntity::Beehive(h) => **h = crate::beehive::Beehive::from_nbt(tag),
         BlockEntity::CommandBlock(c) => **c = crate::command_block::CommandBlock::load(tag),
+        BlockEntity::StructureBlock(b) => **b = crate::structure_block::StructureBlock::load(tag),
+        BlockEntity::TestBlock(b) => **b = crate::test_block::TestBlock::load(tag),
+        BlockEntity::TestInstanceBlock(b) => b.load(tag),
+        // The state is not known here; a saved jigsaw always has its joint.
+        BlockEntity::JigsawBlock(b) => {
+            **b = crate::jigsaw_block::JigsawBlock::load(
+                tag,
+                crate::jigsaw_block::JointType::Rollable,
+            )
+        }
     }
     Some((pos, entity))
 }
@@ -774,7 +1083,7 @@ pub fn encode_poi(chunk: &Chunk, tables: &SaveTables) -> Option<NamedTag> {
             continue;
         }
         section.unpack(&mut states);
-        let y = (MIN_Y >> 4) + si as i32;
+        let y = (chunk.min_y() >> 4) + si as i32;
         let records: Vec<Tag> = states
             .iter()
             .enumerate()
@@ -859,56 +1168,13 @@ fn poi_root(sections: Compound) -> NamedTag {
     }
 }
 
-/// What a dimension's saved chunks depend on: skylight and the build height
-/// (`DimensionType.minY` and `height`). `Chunk` always holds the Overworld's
-/// sections; a level saves only the ones inside its own height.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LevelShape {
-    pub sky_light: bool,
-    pub min_y: i32,
-    pub height: i32,
-}
-impl LevelShape {
-    pub const OVERWORLD: Self = Self {
-        sky_light: true,
-        min_y: MIN_Y,
-        height: SECTIONS as i32 * 16,
-    };
-    pub const NETHER: Self = Self {
-        sky_light: false,
-        min_y: 0,
-        height: 256,
-    };
-    pub const END: Self = Self {
-        sky_light: true,
-        min_y: 0,
-        height: 256,
-    };
-    /// The shape of a dimension folder (`dimensions/minecraft/<name>`, or the
-    /// old `DIM-1` and `DIM1`).
-    pub fn for_dir(root: &Path) -> Self {
-        if root.ends_with("the_nether") || root.ends_with("DIM-1") {
-            Self::NETHER
-        } else if root.ends_with("the_end") || root.ends_with("DIM1") {
-            Self::END
-        } else {
-            Self::OVERWORLD
-        }
-    }
-    fn min_section(self) -> i32 {
-        self.min_y >> 4
-    }
-    fn section_count(self) -> usize {
-        (self.height >> 4) as usize
-    }
-    fn has_section(self, y: i32) -> bool {
-        (self.min_section()..self.min_section() + self.section_count() as i32).contains(&y)
-    }
-}
+pub use crate::chunk::LevelShape;
 
 /// A column's sections as `Heightmap.primeHeightmaps` reads them.
 struct HeightmapView<'a> {
     sections: &'a [Arc<Section>],
+    /// The minimum Y of `sections[0]`.
+    column_min_y: i32,
     tables: &'a SaveTables,
     min_y: i32,
     height: i32,
@@ -927,11 +1193,11 @@ impl HeightmapChunk for HeightmapView<'_> {
             .iter()
             .rposition(|s| !s.is_uniform(self.tables.air))
             .unwrap_or(0);
-        MIN_Y + top as i32 * 16
+        self.column_min_y + top as i32 * 16
     }
     fn block_state(&self, x: i32, y: i32, z: i32) -> Self::State {
         // Chunk.get: no block outside the sections.
-        let state = usize::try_from((y - MIN_Y) >> 4)
+        let state = usize::try_from((y - self.column_min_y) >> 4)
             .ok()
             .and_then(|s| self.sections.get(s))
             .map_or(0, |s| s.get(crate::chunk::index(x, y, z)));
@@ -952,6 +1218,7 @@ fn heightmaps(chunk: &Chunk, tables: &SaveTables, shape: LevelShape) -> Tag {
         .collect();
     let view = HeightmapView {
         sections: &chunk.sections,
+        column_min_y: chunk.min_y(),
         tables,
         min_y: shape.min_y,
         height: shape.height,
@@ -967,10 +1234,11 @@ fn heightmaps(chunk: &Chunk, tables: &SaveTables, shape: LevelShape) -> Tag {
         )
     }))
 }
-/// The client heightmaps of a column's sections, in a level from `min_y`,
-/// `height` blocks high.
+/// The client heightmaps of a column's sections (from `column_min_y`), in a
+/// level from `min_y`, `height` blocks high.
 pub fn client_heightmaps_in(
     sections: &[Arc<Section>],
+    column_min_y: i32,
     tables: &SaveTables,
     min_y: i32,
     height: i32,
@@ -986,6 +1254,7 @@ pub fn client_heightmaps_in(
         .collect();
     let view = HeightmapView {
         sections,
+        column_min_y,
         tables,
         min_y,
         height,
@@ -1037,7 +1306,7 @@ pub fn encode_with(
         Light::Full(a) => a.iter().any(|v| v >> 4 != 15),
     });
     for (si, section) in chunk.sections.iter().enumerate() {
-        let y = (MIN_Y >> 4) + si as i32;
+        let y = (chunk.min_y() >> 4) + si as i32;
         if !shape.has_section(y) {
             continue;
         }
@@ -1120,6 +1389,9 @@ pub fn encode_with(
     let mut block_entities: Vec<Tag> = chunk
         .block_entities
         .iter()
+        // A mod block entity a native mod is ticking right now
+        // (`tick_mod_block_entity`): its data is out of the world.
+        .filter(|(_, e)| !matches!(e, crate::containers::BlockEntity::Mod(m) if m.id.is_empty()))
         .map(|(p, e)| {
             let block = block_name(p);
             let mut current = encode_block_entity(*p, e, &block);
@@ -1265,7 +1537,7 @@ const GENERATED_KEYS: [&str; 14] = [
     "CarvingMask",
 ];
 pub fn decode(root: &NamedTag, registry: &BlockRegistry, biomes: &Biomes) -> Option<Chunk> {
-    decode_with(root, registry, biomes, None)
+    decode_with(root, registry, biomes, None, ColumnLayout::VANILLA)
 }
 /// Only full chunks load here; partially generated ones (vanilla's world
 /// border of proto chunks) resume generation through `decode_proto`.
@@ -1274,18 +1546,21 @@ pub fn decode_with(
     registry: &BlockRegistry,
     biomes: &Biomes,
     tables: Option<&SaveTables>,
+    layout: ColumnLayout,
 ) -> Option<Chunk> {
     if text(root.tag.get("Status")).is_some_and(|s| s != "minecraft:full" && s != "full") {
         return None;
     }
-    decode_column(root, registry, biomes, tables)
+    decode_column(root, registry, biomes, tables, layout)
 }
-/// `decode_with` whatever the chunk's status.
+/// `decode_with` whatever the chunk's status, into a chunk of `layout`
+/// (sections outside it are left out).
 fn decode_column(
     root: &NamedTag,
     registry: &BlockRegistry,
     biomes: &Biomes,
     tables: Option<&SaveTables>,
+    layout: ColumnLayout,
 ) -> Option<Chunk> {
     let tag = &root.tag;
     let Tag::Int(x) = tag.get("xPos")? else {
@@ -1294,7 +1569,7 @@ fn decode_column(
     let Tag::Int(z) = tag.get("zPos")? else {
         return None;
     };
-    let mut chunk = Chunk::empty(*x, *z);
+    let mut chunk = Chunk::with_layout(*x, *z, layout);
     // structures.References: structure id -> packed start chunk positions.
     if let Some(Tag::Compound(refs)) = tag.get("structures").and_then(|s| s.get("References")) {
         for (id, v) in refs {
@@ -1317,10 +1592,9 @@ fn decode_column(
         let Some(y) = number(section.get("Y")) else {
             continue;
         };
-        let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        let Some(si) = layout.section_index(y as i32 * 16) else {
             continue;
-        }
+        };
         if let Some(states) = section.get("block_states")
             && let Some(Tag::List(palette)) = states.get("palette")
         {
@@ -1351,7 +1625,7 @@ fn decode_column(
                     })
                 })
                 .collect();
-            let target = Arc::make_mut(&mut chunk.sections[si as usize]);
+            let target = Arc::make_mut(&mut chunk.sections[si]);
             let data = match states.get("data") {
                 Some(Tag::LongArray(data)) => {
                     Some(data.iter().map(|&w| w as u64).collect::<Vec<_>>())
@@ -1381,7 +1655,7 @@ fn decode_column(
                 _ => None,
             };
             let palette: Vec<u32> = ids.iter().map(|&id| u32::from(id)).collect();
-            let target = Arc::make_mut(&mut chunk.sections[si as usize]);
+            let target = Arc::make_mut(&mut chunk.sections[si]);
             if let Ok(container) =
                 PalettedContainer::from_packed(BIOME_STRATEGY, palette.clone(), data.as_deref())
             {
@@ -1478,14 +1752,15 @@ pub fn decode_proto(
     registry: &BlockRegistry,
     biomes: &Biomes,
     tables: Option<&SaveTables>,
+    layout: ColumnLayout,
 ) -> Option<SavedProto> {
     let status = ChunkStatus::parse(&text(root.tag.get("Status"))?).ok()?;
     if !(ChunkStatus::Terrain..ChunkStatus::Full).contains(&status) {
         return None;
     }
-    let mut column = decode_column(root, registry, biomes, tables)?;
+    let mut column = decode_column(root, registry, biomes, tables, layout)?;
     column.block_entities.clear();
-    let base = number(root.tag.get("yPos")).map_or(MIN_Y, |y| y as i32 * 16);
+    let base = number(root.tag.get("yPos")).map_or(column.min_y(), |y| y as i32 * 16);
     if let Some(Tag::List(sections)) = root.tag.get("PostProcessing") {
         for (si, marks) in sections.iter().enumerate() {
             let Tag::List(marks) = marks else {
@@ -1527,20 +1802,19 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
     let Some(Tag::List(sections)) = tag.get("sections") else {
         return;
     };
-    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); SECTIONS];
+    let mut layers: Vec<(Option<&[u8]>, Option<&[u8]>)> = vec![(None, None); chunk.sections.len()];
     for section in sections {
         let Some(y) = number(section.get("Y")) else {
             continue;
         };
-        let si = y as i32 - (MIN_Y >> 4);
-        if !(0..SECTIONS as i32).contains(&si) {
+        let Some(si) = chunk.section_index(y as i32 * 16) else {
             continue;
-        }
+        };
         let layer = |name: &str| match section.get(name) {
             Some(Tag::ByteArray(a)) if a.len() == 2048 => Some(&a[..]),
             _ => None,
         };
-        layers[si as usize] = (layer("SkyLight"), layer("BlockLight"));
+        layers[si] = (layer("SkyLight"), layer("BlockLight"));
     }
     // Uniform saved layers need no expanded allocation. Both nibbles of
     // each byte must match, not merely the bytes across the layer.
@@ -1611,7 +1885,47 @@ pub fn load_light(tag: &Tag, chunk: &mut Chunk, sky_light: bool) {
     chunk.light_loaded = true;
 }
 
-type RegionCache = Mutex<HashMap<(i32, i32), Option<Arc<Mutex<RegionFile>>>>>;
+type RegionCache = Mutex<RegionFiles>;
+/// `RegionFileStorage.MAX_CACHE_SIZE`: the region files of a folder kept
+/// open. Each holds a file descriptor: kept for every region ever visited,
+/// a server whose players travel runs out of them (`Too many open files`).
+const MAX_OPEN_REGIONS: usize = 256;
+/// A folder's region files, and the ones known to be missing, by region,
+/// with when each was last asked for.
+#[derive(Default)]
+struct RegionFiles {
+    regions: HashMap<(i32, i32), (Option<Arc<Mutex<RegionFile>>>, u64)>,
+    clock: u64,
+}
+impl RegionFiles {
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.regions.is_empty()
+    }
+    /// The open region files.
+    #[cfg(test)]
+    fn open(&self) -> usize {
+        self.regions.values().filter(|(r, _)| r.is_some()).count()
+    }
+    /// Close the least recently used regions until there is room for one
+    /// more, as `RegionFileStorage.getRegionFile` does. A region a reader or
+    /// the writer still holds stays: closing it under them would let a
+    /// second handle read a header older than its sectors.
+    fn make_room(&mut self) {
+        while self.regions.len() >= MAX_OPEN_REGIONS {
+            let oldest = self
+                .regions
+                .iter()
+                .filter(|(_, (r, _))| r.as_ref().is_none_or(|r| Arc::strong_count(r) == 1))
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(key, _)| *key);
+            let Some(key) = oldest else {
+                return;
+            };
+            self.regions.remove(&key);
+        }
+    }
+}
 /// The region file at `path` through the cache, which readers and the writer
 /// share, so a read never sees a header older than the sectors it points to.
 /// `create` makes a missing file (for a write); otherwise a missing file is
@@ -1622,13 +1936,16 @@ fn cached_region(
     path: &Path,
     create: bool,
 ) -> Result<Option<Arc<Mutex<RegionFile>>>> {
-    let mut regions = cache.lock().map_err(|_| "region cache poisoned")?;
-    if let Some(Some(region)) = regions.get(&key) {
-        return Ok(Some(region.clone()));
+    let mut cache = cache.lock().map_err(|_| "region cache poisoned")?;
+    cache.clock += 1;
+    let now = cache.clock;
+    if let Some((cached, used)) = cache.regions.get_mut(&key)
+        && (cached.is_some() || !create)
+    {
+        *used = now;
+        return Ok(cached.clone());
     }
-    if !create && regions.contains_key(&key) {
-        return Ok(None);
-    }
+    cache.make_room();
     if create && let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1644,7 +1961,7 @@ fn cached_region(
         Err(_) if !create => None,
         Err(e) => return Err(e.into()),
     };
-    regions.insert(key, region.clone());
+    cache.regions.insert(key, (region.clone(), now));
     Ok(region)
 }
 /// Write `records` into the region files of `folder` in place, as vanilla's
@@ -1712,7 +2029,7 @@ fn compress_records(
     let compress = |record: &Record| {
         record
             .tag()
-            .map(|tag| ChunkRecord::from_nbt(&tag, Compression::Zlib, timestamp, Limits::default()))
+            .map(|tag| ChunkRecord::from_nbt(&tag, Compression::Zlib, timestamp, Limits::saved()))
             .transpose()
     };
     let helpers = std::thread::available_parallelism()
@@ -1721,28 +2038,43 @@ fn compress_records(
     if helpers <= 1 {
         return records.iter().map(|(_, r)| compress(r)).collect();
     }
+    share_out(records.len(), helpers, |i| compress(records[i].1), || true)
+}
+
+/// `job(i)` for every `i` below `count`, in order, shared between this thread
+/// and up to `helpers - 1` scoped threads, each taking the next index as it
+/// finishes one. A helper the system refuses to start (`start` false, or a
+/// container at its limit of threads: EAGAIN) leaves its share to the
+/// others: this thread does all of it at worst, and never panics for it, as
+/// `thread::scope`'s own `spawn` would, which stopped the region writer.
+fn share_out<R: Send>(
+    count: usize,
+    helpers: usize,
+    job: impl Fn(usize) -> R + Sync,
+    mut start: impl FnMut() -> bool,
+) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut done: Vec<(usize, std::io::Result<Option<ChunkRecord>>)> =
-        std::thread::scope(|scope| {
-            let threads: Vec<_> = (0..helpers)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut out = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some((_, record)) = records.get(i) else {
-                                return out;
-                            };
-                            out.push((i, compress(record)));
-                        }
-                    })
-                })
-                .collect();
-            threads
-                .into_iter()
-                .flat_map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                .collect()
-        });
+    let work = || {
+        let mut out = Vec::new();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= count {
+                return out;
+            }
+            out.push((i, job(i)));
+        }
+    };
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (1..helpers)
+            .filter(|_| start())
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        let mut done = work();
+        for t in threads {
+            done.extend(t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
+        }
+        done
+    });
     done.sort_unstable_by_key(|(i, _)| *i);
     done.into_iter().map(|(_, r)| r).collect()
 }
@@ -1829,7 +2161,7 @@ fn read_region_record(
         .map_err(|_| "region file poisoned")?
         .read(ChunkPos::new(x, z))?;
     Ok(match record {
-        Some(r) => Some(r.nbt(Limits::default())?),
+        Some(r) => Some(r.nbt(Limits::saved())?),
         None => None,
     })
 }
@@ -1890,13 +2222,36 @@ pub struct SaveDir {
     pub tables: OnceLock<Arc<SaveTables>>,
     /// The dimension's skylight and height, from its folder name.
     pub shape: LevelShape,
+    /// Which chunks each region file holds, for far terrain (`lod_saved`).
+    lod_regions: Mutex<crate::fast_hash::FxHashMap<(i32, i32), LodRegion>>,
+    /// Saved chunks decoded for far terrain, shared by its sampling threads
+    /// (`lod_surfaces_shared`), oldest first.
+    lod_decoded: Mutex<LodDecoded>,
 }
 fn is_forced_ticket(ticket: &Tag) -> bool {
     matches!(ticket.get("type"), Some(Tag::String(t)) if *t == JavaString::from("minecraft:forced"))
 }
+#[derive(Default)]
+struct LodDecoded {
+    chunks: crate::fast_hash::FxHashMap<(i32, i32), (std::time::Instant, LodSurfaces)>,
+    order: std::collections::VecDeque<(i32, i32)>,
+}
+/// Saved chunks kept decoded for far terrain (each tens of kilobytes), and
+/// for how long: edits saved later show after it.
+const LOD_DECODED: usize = 1024;
+const LOD_DECODED_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// A region file's saved chunks (bit `x + z * 32`), `None` without the file,
+/// as of `checked`.
+struct LodRegion {
+    checked: std::time::Instant,
+    chunks: Option<[u64; 16]>,
+}
+/// How long far terrain trusts a region file's chunk list: chunks saved after
+/// it was read show in the far view this long after.
+const LOD_REGION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 impl SaveDir {
-    pub fn new(root: PathBuf) -> Self {
-        let shape = LevelShape::for_dir(&root);
+    /// The saves of a level of `shape` at `root` (its dimension folder).
+    pub fn new(root: PathBuf, shape: LevelShape) -> Self {
         Self {
             root,
             regions: Default::default(),
@@ -1908,6 +2263,8 @@ impl SaveDir {
             outstanding: Default::default(),
             tables: OnceLock::new(),
             shape,
+            lod_regions: Default::default(),
+            lod_decoded: Default::default(),
         }
     }
     /// 26.3's TicketStorage: persistent tickets live in each dimension's
@@ -1954,6 +2311,40 @@ impl SaveDir {
         put(&mut data, "tickets", Tag::List(tickets));
         write_saved_data(&self.root, "chunk_tickets", data)
     }
+    /// Whether chunk `x z` is in its region file, from a chunk list kept
+    /// `LOD_REGION_TTL`. Far terrain asks for every column of the view: it
+    /// opened the region file each time, also where there is none, which
+    /// held the far view back for minutes.
+    fn lod_saved(&self, x: i32, z: i32) -> bool {
+        let key = (x >> 5, z >> 5);
+        let mut regions = self.lod_regions.lock().unwrap();
+        let fresh = regions
+            .get(&key)
+            .is_some_and(|region| region.checked.elapsed() < LOD_REGION_TTL);
+        if !fresh {
+            let chunks = RegionFile::open(self.region_path("region", key.0, key.1))
+                .ok()
+                .map(|region| {
+                    let mut bits = [0u64; 16];
+                    for (pos, _) in region.chunks() {
+                        let index = ((pos.x & 31) + (pos.z & 31) * 32) as usize;
+                        bits[index / 64] |= 1 << (index % 64);
+                    }
+                    bits
+                });
+            regions.insert(
+                key,
+                LodRegion {
+                    checked: std::time::Instant::now(),
+                    chunks,
+                },
+            );
+        }
+        let index = ((x & 31) + (z & 31) * 32) as usize;
+        regions[&key]
+            .chunks
+            .is_some_and(|bits| bits[index / 64] & (1 << (index % 64)) != 0)
+    }
     fn region_path(&self, folder: &str, rx: i32, rz: i32) -> PathBuf {
         region_path(&self.root, folder, rx, rz)
     }
@@ -1972,14 +2363,58 @@ impl SaveDir {
             Folder::Entities => &self.entity_regions,
             Folder::Poi => &self.poi_regions,
         };
-        read_region_record(&self.root, cache, folder, x, z).ok()?
+        match read_region_record(&self.root, cache, folder, x, z) {
+            Ok(record) => record,
+            Err(e) => {
+                crate::chunk_io::report_load_failure(&self.root, x, z, &e);
+                None
+            }
+        }
     }
     pub fn load(&self, x: i32, z: i32, registry: &BlockRegistry, biomes: &Biomes) -> Option<Chunk> {
         let root = self.read_record("region", x, z)?;
         let tables = self.tables.get().map(|t| &**t);
-        let mut chunk = decode_with(&root, registry, biomes, tables)?;
+        let mut chunk = decode_with(&root, registry, biomes, tables, self.shape.column())?;
         load_light(&root.tag, &mut chunk, self.shape.sky_light);
         Some(chunk)
+    }
+    /// A saved full chunk read for a player's far ring (`lan::far`), as `load` but past the gameplay
+    /// region cache, and only where the region file lists it (no file opened where there is none).
+    pub fn load_far(
+        &self,
+        x: i32,
+        z: i32,
+        registry: &BlockRegistry,
+        biomes: &Biomes,
+    ) -> Option<Chunk> {
+        let pending = self
+            .pending
+            .lock()
+            .ok()?
+            .get(&(Folder::Region, x, z))
+            .map(|(_, record)| record.clone());
+        let root = if let Some(record) = pending {
+            record.tag().map(|tag| (*tag).clone())?
+        } else {
+            if !self.lod_saved(x, z) {
+                return None;
+            }
+            let mut region = RegionFile::open(self.region_path("region", x >> 5, z >> 5)).ok()?;
+            region
+                .read(ChunkPos::new(x, z))
+                .ok()??
+                .nbt(Limits::default())
+                .ok()?
+        };
+        let tables = self.tables.get().map(|t| &**t);
+        let mut chunk = decode_with(&root, registry, biomes, tables, self.shape.column())?;
+        load_light(&root.tag, &mut chunk, self.shape.sky_light);
+        // Without its saved light (`isLightOn`) it would need the light engine: not one for the far ring.
+        chunk.light_loaded.then_some(chunk)
+    }
+    /// Chunks queued for the writer thread and not yet in their region files.
+    pub fn pending_writes(&self) -> usize {
+        self.pending.lock().map_or(0, |p| p.len())
     }
     /// A proto chunk saved before it became final (`decode_proto`).
     pub fn load_proto(
@@ -1990,7 +2425,8 @@ impl SaveDir {
         biomes: &Biomes,
     ) -> Option<SavedProto> {
         let root = self.read_record("region", x, z)?;
-        decode_proto(&root, registry, biomes, self.tables.get().map(|t| &**t))
+        let tables = self.tables.get().map(|t| &**t);
+        decode_proto(&root, registry, biomes, tables, self.shape.column())
     }
     /// Queue proto chunks for the writer thread; loads see them meanwhile.
     pub fn save_protos(
@@ -2110,6 +2546,10 @@ impl SaveDir {
                         let message = format!("failed to write {folder} files: {e}");
                         log::warn!("Horizon: {message}");
                         *outstanding.error.lock().unwrap() = Some(message);
+                        // `reportChunkSaveFailure` for each chunk of the batch.
+                        for (k, _, _) in &batch {
+                            crate::chunk_io::report_save_failure(&root, k.0, k.1, e);
+                        }
                     }
                     // Keep failed snapshots readable; never report them as durable.
                     if result.is_ok()
@@ -2259,12 +2699,117 @@ impl Drop for SaveDir {
 }
 
 pub fn read_dat(path: &Path) -> Option<Tag> {
-    let bytes = fs::read(path).ok()?;
-    let raw = match Compression::Gzip.decode(&bytes, 64 << 20) {
+    try_read_dat(path).ok()
+}
+/// `read_dat`, with why the file did not read.
+fn try_read_dat(path: &Path) -> std::result::Result<Tag, DatIssue> {
+    let bytes = fs::read(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => DatIssue::Missing,
+        _ => DatIssue::Unreadable(e.to_string()),
+    })?;
+    let raw = match Compression::Gzip.decode(&bytes, Limits::saved().max_bytes) {
         Ok(raw) => raw,
         Err(_) => bytes,
     };
-    Some(nbt::read_named(&raw, Limits::default()).ok()?.0.tag)
+    nbt::read_named(&raw, Limits::saved())
+        .map(|(named, _)| named.tag)
+        .map_err(|e| DatIssue::Unreadable(e.to_string()))
+}
+/// What `LevelStorageAccess.collectIssues` finds wrong with a level.dat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DatIssue {
+    /// No such file (`FileNotFoundException`).
+    Missing,
+    /// It exists but does not read as a level: why.
+    Unreadable(String),
+}
+/// `LevelStorageAccess.collectIssues`: why level.dat (level.dat_old with
+/// `old`) can't be read as the world's level data, `None` when it can.
+pub fn level_dat_issue(dir: &Path, old: bool) -> Option<DatIssue> {
+    let file = if old { "level.dat_old" } else { "level.dat" };
+    match try_read_dat(&dir.join(file)) {
+        Ok(root) if matches!(root.get("Data"), Some(Tag::Compound(_))) => None,
+        Ok(_) => Some(DatIssue::Unreadable("Invalid root tag".into())),
+        Err(issue) => Some(issue),
+    }
+}
+/// `WorldOpenFlows.openWorldLoadLevelData`: what keeps `world`'s level data from reading, which
+/// opens RecoverWorldDataScreen instead of the world. A folder with neither level.dat nor
+/// level.dat_old is a world not made yet, not a broken one.
+pub fn level_data_needs_recovery(world: &Path) -> Option<DatIssue> {
+    match level_dat_issue(world, false)? {
+        DatIssue::Missing if !world.join("level.dat_old").exists() => None,
+        issue => Some(issue),
+    }
+}
+/// `LevelStorageAccess.restoreLevelDataFromOld` (`Util.safeReplaceOrMoveFile`):
+/// level.dat moves aside to `level.dat_corrupted_<time>` and level.dat_old
+/// takes its place. Whether it worked. Vanilla passes `noRollback` and reports
+/// success even when level.dat_old could not be moved in; here the broken
+/// level.dat goes back and the failure is reported.
+pub fn restore_level_data_from_old(dir: &Path) -> bool {
+    let (current, latest) = (dir.join("level.dat"), dir.join("level.dat_old"));
+    let backup = dir.join(format!("level.dat_corrupted_{}", backup_stamp()));
+    if current.exists() && fs::rename(&current, &backup).is_err() {
+        return false;
+    }
+    if fs::rename(&latest, &current).is_err() {
+        if backup.exists() {
+            let _ = fs::rename(&backup, &current);
+        }
+        return false;
+    }
+    true
+}
+/// `FileNameDateFormatter`: the time in the names of backed-up unreadable files.
+fn backup_stamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
+}
+/// `LevelStorageAccess.getUnfixedDataTagWithFallback`, which the dedicated server's `Main` calls:
+/// a level.dat that does not read falls back to level.dat_old, which is restored in its place
+/// (`restoreLevelDataFromOld`). Whether it did; `false` leaves the world as it was, for the
+/// caller to refuse (both files broken, or nothing to fall back to).
+pub fn fall_back_to_level_dat_old(world: &Path) -> bool {
+    level_dat_issue(world, false).is_some()
+        && world.join("level.dat_old").exists()
+        && level_dat_issue(world, true).is_none()
+        && restore_level_data_from_old(world)
+}
+/// `LevelStorageSource.readLevelDataTagFixed`: level.dat, else level.dat_old.
+fn read_level_dat(dir: &Path) -> Option<Tag> {
+    read_dat(&dir.join("level.dat")).or_else(|| read_dat(&dir.join("level.dat_old")))
+}
+/// `restoreLevelDataFromOld`: an unreadable level.dat is kept as
+/// `level.dat_corrupted_<time>` and level.dat_old takes its place, so the next
+/// write does not bury either file.
+fn restore_level_dat(dir: &Path) {
+    let path = dir.join("level.dat");
+    if read_dat(&path).is_some() {
+        return;
+    }
+    if path.exists() {
+        let _ = fs::rename(
+            &path,
+            dir.join(format!("level.dat_corrupted_{}", backup_stamp())),
+        );
+    }
+    let old = dir.join("level.dat_old");
+    if read_dat(&old).is_some() {
+        let _ = fs::rename(old, path);
+    }
+}
+/// `PlayerDataStorage.backup`: a player file that fails to load is copied to
+/// `<uuid>_corrupted_<time>.dat` before it is written over.
+fn back_up_unreadable_player(path: &Path) {
+    if path.is_file()
+        && read_dat(path).is_none()
+        && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+    {
+        let _ = fs::copy(
+            path,
+            path.with_file_name(format!("{stem}_corrupted_{}.dat", backup_stamp())),
+        );
+    }
 }
 /// Write a gzip NBT file the way vanilla does (`<name>_new`, keep `_old`).
 pub fn write_dat(path: &Path, tag: Tag) -> Result<()> {
@@ -2276,7 +2821,7 @@ pub fn write_dat(path: &Path, tag: Tag) -> Result<()> {
             name: "".into(),
             tag,
         },
-        Limits::default(),
+        Limits::saved(),
     )
     .map_err(|e| e.to_string())?;
     let compressed = Compression::Gzip.encode(&bytes)?;
@@ -2312,6 +2857,11 @@ fn read_saved_data(world: &Path, name: &str) -> Option<Tag> {
 /// The world's generator settings: world_gen_settings.dat (26.3) or
 /// level.dat's Data.WorldGenSettings.
 pub fn world_gen_settings(world: &Path) -> Option<Tag> {
+    // A world still to be file-fixed has them in level.dat in an older shape: they are read as
+    // the fixes would leave them, so the questions on opening it are the same ones.
+    if let Ok(Some(settings)) = horizon_world::datafix::files::current_world_gen_settings(world) {
+        return Some(settings);
+    }
     read_saved_data(world, "world_gen_settings").or_else(|| {
         read_dat(&world.join("level.dat"))?
             .get("Data")?
@@ -2448,14 +2998,83 @@ const INT_RULES: [&str; 11] = [
     "respawn_radius",
 ];
 
+/// The world presets of 26.3's `worldgen/world_preset` that the create
+/// screen offers, in the order of `WorldPresetTags.NORMAL`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldPreset {
+    Normal,
+    Flat,
+    LargeBiomes,
+    Amplified,
+    SingleBiomeSurface,
+}
+impl WorldPreset {
+    /// The presets, in the order the world-type button cycles through them.
+    pub const ALL: [Self; 5] = [
+        Self::Normal,
+        Self::Flat,
+        Self::LargeBiomes,
+        Self::Amplified,
+        Self::SingleBiomeSurface,
+    ];
+    /// The preset's registry id (`minecraft:normal`).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Normal => "minecraft:normal",
+            Self::Flat => "minecraft:flat",
+            Self::LargeBiomes => "minecraft:large_biomes",
+            Self::Amplified => "minecraft:amplified",
+            Self::SingleBiomeSurface => "minecraft:single_biome_surface",
+        }
+    }
+    /// The preset an id names, if it is one of them.
+    pub fn of_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|preset| preset.id() == id)
+    }
+    /// The language key the world-type button shows
+    /// (`Identifier.toLanguageKey("generator")`).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "generator.minecraft.normal",
+            Self::Flat => "generator.minecraft.flat",
+            Self::LargeBiomes => "generator.minecraft.large_biomes",
+            Self::Amplified => "generator.minecraft.amplified",
+            Self::SingleBiomeSurface => "generator.minecraft.single_biome_surface",
+        }
+    }
+    /// The preset the world-type button cycles to next.
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|preset| *preset == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+    /// The preset a saved overworld generator is: the noise settings name
+    /// the preset, and the single-biome preset shares the overworld's noise
+    /// settings, so its fixed biome source tells the two apart.
+    pub fn of_generator(generator: &Tag) -> Self {
+        if text(generator.get("type")).as_deref() == Some("minecraft:flat") {
+            return Self::Flat;
+        }
+        let source = generator.get("biome_source");
+        let fixed = text(source.and_then(|s| s.get("type"))).as_deref() == Some("minecraft:fixed");
+        match text(generator.get("settings")).as_deref() {
+            Some("minecraft:large_biomes") => Self::LargeBiomes,
+            Some("minecraft:amplified") => Self::Amplified,
+            Some("minecraft:overworld") if fixed => Self::SingleBiomeSurface,
+            _ => Self::Normal,
+        }
+    }
+}
 /// World and player state stored in `level.dat`, the saved-data files and
 /// the player file.
 /// The world options CreateWorldScreen sets (`WorldOptions` and the world
 /// preset) that `world_gen_settings` keeps.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldGen {
-    /// The `minecraft:flat` preset (Superflat) instead of `normal`.
-    pub flat: bool,
+    /// The world preset the world is created with.
+    pub preset: WorldPreset,
     pub structures: bool,
     pub bonus_chest: bool,
 }
@@ -2469,17 +3088,40 @@ impl WorldGen {
             .and_then(|d| d.get("minecraft:overworld"))
             .and_then(|o| o.get("generator"));
         Some(Self {
-            flat: text(generator.and_then(|g| g.get("type")))
-                .is_some_and(|t| t.trim_start_matches("minecraft:") == "flat"),
+            preset: generator.map_or(WorldPreset::Normal, WorldPreset::of_generator),
             structures: flag("generate_structures", true),
             bonus_chest: flag("bonus_chest", false),
         })
+    }
+    /// The bundled world preset a saved world's overworld was generated
+    /// with, from its generator: `minecraft:amplified` and
+    /// `minecraft:large_biomes` by their noise settings, and
+    /// `minecraft:single_biome_surface` by a fixed biome source. Anything
+    /// else (and any world without settings) is `minecraft:normal`.
+    pub fn preset(world: &Path) -> &'static str {
+        let settings = world_gen_settings(world);
+        let generator = settings
+            .as_ref()
+            .and_then(|s| s.get("dimensions"))
+            .and_then(|d| d.get("minecraft:overworld"))
+            .and_then(|o| o.get("generator"));
+        let noise = text(generator.and_then(|g| g.get("settings")));
+        let fixed_biome = generator
+            .and_then(|g| g.get("biome_source"))
+            .and_then(|b| text(b.get("type")))
+            .is_some_and(|t| t == "minecraft:fixed");
+        match noise.as_deref() {
+            Some("minecraft:amplified") => "minecraft:amplified",
+            Some("minecraft:large_biomes") => "minecraft:large_biomes",
+            Some("minecraft:overworld") if fixed_biome => "minecraft:single_biome_surface",
+            _ => "minecraft:normal",
+        }
     }
 }
 impl Default for WorldGen {
     fn default() -> Self {
         Self {
-            flat: false,
+            preset: WorldPreset::Normal,
             structures: true,
             bonus_chest: false,
         }
@@ -2554,6 +3196,34 @@ pub fn write_world_gen_settings_with(
             ("preset", string(p)),
         ])
     };
+    // The overworld generator of worldgen/world_preset/<preset>.json: the
+    // noise settings and the biome source each preset uses.
+    let overworld = match options.preset {
+        WorldPreset::Flat => flat,
+        WorldPreset::LargeBiomes => dimension(
+            "minecraft:overworld",
+            "minecraft:large_biomes",
+            preset("minecraft:overworld"),
+        ),
+        WorldPreset::Amplified => dimension(
+            "minecraft:overworld",
+            "minecraft:amplified",
+            preset("minecraft:overworld"),
+        ),
+        WorldPreset::SingleBiomeSurface => dimension(
+            "minecraft:overworld",
+            "minecraft:overworld",
+            Tag::compound([
+                ("type", string("minecraft:fixed")),
+                ("biome", string("minecraft:plains")),
+            ]),
+        ),
+        WorldPreset::Normal => dimension(
+            "minecraft:overworld",
+            "minecraft:overworld",
+            preset("minecraft:overworld"),
+        ),
+    };
     write_saved_data(
         dir,
         "world_gen_settings",
@@ -2567,18 +3237,7 @@ pub fn write_world_gen_settings_with(
             (
                 "dimensions",
                 Tag::compound([
-                    (
-                        "minecraft:overworld",
-                        if options.flat {
-                            flat
-                        } else {
-                            dimension(
-                                "minecraft:overworld",
-                                "minecraft:overworld",
-                                preset("minecraft:overworld"),
-                            )
-                        },
-                    ),
+                    ("minecraft:overworld", overworld),
                     (
                         "minecraft:the_nether",
                         dimension(
@@ -2608,6 +3267,9 @@ pub struct Level {
     /// The game mode id (0 survival, 1 creative, 2 adventure, 3 spectator);
     /// `creative` wins when the two disagree.
     pub game_mode: i32,
+    /// `previousPlayerGameType`: the mode the player left last (the F3+F4 switcher's
+    /// return mode), when it has one.
+    pub previous_game_mode: Option<i32>,
     pub time: i64,
     pub day_time: i64,
     /// Where the player respawns when it has no bed or anchor: its forced
@@ -2632,6 +3294,8 @@ pub struct Level {
     pub xp_seed: i32,
     /// ServerPlayer.seenCredits: the end poem has been shown.
     pub seen_credits: bool,
+    /// ServerPlayer.postEffects: the `post_effect` chains `/posteffect` set.
+    pub post_effects: Vec<String>,
     /// Player.lastDeathLocation: the dimension and block of the last death.
     pub last_death: Option<(String, [i32; 3])>,
     /// Player.active_effects: (id, duration, amplifier, ambient, show_particles).
@@ -2668,11 +3332,29 @@ pub struct Level {
     pub food_tick_timer: i32,
     /// Abilities.flying: whether creative/spectator flight is active.
     pub flying: bool,
+    /// The vehicle the player rides, by UUID (`ServerPlayer.saveParentVehicle`'s
+    /// "RootVehicle"), so the ride comes back on the next login.
+    pub root_vehicle: Option<[i32; 4]>,
     /// The player compound as loaded, for fields Horizon does not model
     /// (ender chest, effects, abilities, recipe book, attributes, ...).
     pub player_extra: Option<Tag>,
 }
 impl Level {
+    /// `PrimaryLevelData.setDifficulty`: the level data holds the world's
+    /// difficulty, so the game and the file follow each other and a world
+    /// that was set to hard is hard when it is opened again.
+    pub fn set_difficulty(&mut self, difficulty: u8) {
+        self.difficulty = crate::title::DIFFICULTIES[difficulty as usize % 4].to_owned();
+    }
+
+    /// `PrimaryLevelData.getDifficulty`: the id of the level data's
+    /// difficulty (peaceful 0 .. hard 3), normal when it is not one of them.
+    pub fn difficulty_id(&self) -> u8 {
+        crate::title::DIFFICULTIES
+            .iter()
+            .position(|d| *d == self.difficulty)
+            .map_or(2, |i| i as u8)
+    }
     /// Initialize the offline single-player identity before saving or dropping items.
     pub fn ensure_player_uuid(&mut self) -> [i32; 4] {
         *self.player_uuid.get_or_insert_with(|| {
@@ -2701,7 +3383,14 @@ impl Level {
         }
     }
     pub fn read(dir: &Path) -> Option<Self> {
-        let root = read_dat(&dir.join("level.dat"))?;
+        Self::read_root(dir, read_level_dat(dir)?)
+    }
+    /// `read` from level.dat alone, without the level.dat_old fallback: what
+    /// `LevelStorageSource.readLevelSummary` reads for the world list.
+    pub fn read_summary(dir: &Path) -> Option<Self> {
+        Self::read_root(dir, read_dat(&dir.join("level.dat"))?)
+    }
+    fn read_root(dir: &Path, root: Tag) -> Option<Self> {
         let data = root.get("Data")?;
         let n = |t: Option<&Tag>| number(t).unwrap_or(0);
         let mut level = Self {
@@ -2789,7 +3478,12 @@ impl Level {
         // file of a server world, or the legacy Data.Player.
         let uuid = uuid_from_tag(data.get("singleplayer_uuid"));
         let player_dir = dir.join("players").join("data");
-        let owner = uuid.and_then(|u| read_dat(&player_dir.join(format!("{}.dat", uuid_text(u)))));
+        // PlayerDataStorage.load: the player's file, else its .dat_old.
+        let owner = uuid.and_then(|u| {
+            let name = uuid_text(u);
+            read_dat(&player_dir.join(format!("{name}.dat")))
+                .or_else(|| read_dat(&player_dir.join(format!("{name}.dat_old"))))
+        });
         let player = owner
             .or_else(|| {
                 fs::read_dir(&player_dir)
@@ -2834,6 +3528,16 @@ impl Level {
         self.fall_distance = f("fall_distance").unwrap_or(0.0);
         self.on_ground = n("OnGround").unwrap_or(0) != 0;
         self.seen_credits = n("seenCredits").unwrap_or(0) != 0;
+        self.post_effects = match p.get("post_effects") {
+            Some(Tag::List(list)) => list
+                .iter()
+                .filter_map(|t| match t {
+                    Tag::String(s) => Some(s.to_string_lossy()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         self.last_death = p.get("LastDeathLocation").and_then(|d| {
             let Some(Tag::IntArray(pos)) = d.get("pos") else {
                 return None;
@@ -2847,6 +3551,7 @@ impl Level {
             self.creative = mode == 1;
             self.game_mode = mode as i32;
         }
+        self.previous_game_mode = n("previousPlayerGameType").map(|m| m as i32);
         self.flying = p
             .get("abilities")
             .and_then(|a| number(a.get("flying")))
@@ -2929,6 +3634,12 @@ impl Level {
                 .collect(),
             _ => Vec::new(),
         };
+        // ServerPlayer.saveParentVehicle: the vehicle the player rides, by
+        // UUID. Horizon keeps the vehicle in the world, so the file names it
+        // instead of holding a second copy of it.
+        self.root_vehicle = p
+            .get("RootVehicle")
+            .and_then(|r| uuid_from_tag(r.get("Attach")));
     }
     /// The player compound: the loaded one with Horizon's state written over it.
     pub fn player_tag(&self) -> Tag {
@@ -2940,10 +3651,12 @@ impl Level {
                 "EnderItems",
                 "equipment",
                 "active_effects",
+                "post_effects",
                 "Pos",
                 "respawn",
                 "recipeBook",
                 "LastDeathLocation",
+                "previousPlayerGameType",
             ] {
                 map.remove(&JavaString::from(key));
             }
@@ -3070,6 +3783,11 @@ impl Level {
             entries.push(("Pos", doubles(&pos)));
         }
         entries.push(("seenCredits", Tag::Byte(i8::from(self.seen_credits))));
+        // `output.store` writes the list even when it is empty.
+        entries.push((
+            "post_effects",
+            Tag::List(self.post_effects.iter().map(|e| string(e)).collect()),
+        ));
         if let Some((dimension, pos)) = &self.last_death {
             entries.push((
                 "LastDeathLocation",
@@ -3112,6 +3830,10 @@ impl Level {
                 ));
             }
         }
+        // ServerPlayer.storeGameTypes: storeNullable, so absent without one.
+        if let Some(mode) = self.previous_game_mode {
+            entries.push(("previousPlayerGameType", Tag::Int(mode)));
+        }
         for (key, value) in entries {
             put(&mut p, key, value);
         }
@@ -3132,11 +3854,33 @@ impl Level {
                 map.entry(key.into()).or_insert(value);
             }
         }
+        // ServerPlayer.saveParentVehicle: the vehicle the player rides, by
+        // UUID. Horizon keeps the vehicle in the world, so the file names it
+        // instead of holding a second copy of it.
+        if let Some(vehicle) = self.root_vehicle
+            && p.get("RootVehicle").is_none()
+        {
+            put(
+                &mut p,
+                "RootVehicle",
+                Tag::compound([("Attach", uuid_tag(vehicle))]),
+            );
+        }
         p
     }
     /// Write every file; a world without a player UUID gets a random one.
     pub fn write(&mut self, dir: &Path) -> Result<()> {
+        self.write_internal(dir, true)
+    }
+
+    /// Dedicated servers save connected players separately.
+    pub fn write_without_player(&mut self, dir: &Path) -> Result<()> {
+        self.write_internal(dir, false)
+    }
+
+    fn write_internal(&mut self, dir: &Path, write_player: bool) -> Result<()> {
         fs::create_dir_all(dir)?;
+        restore_level_dat(dir);
         let existing = read_dat(&dir.join("level.dat")).and_then(|r| r.get("Data").cloned());
         let legacy = existing
             .as_ref()
@@ -3327,12 +4071,14 @@ impl Level {
             }
             write_saved_data(dir, "game_rules", rules)?;
         }
-        write_dat(
-            &dir.join("players")
+        if write_player {
+            let player_file = dir
+                .join("players")
                 .join("data")
-                .join(format!("{}.dat", uuid_text(uuid))),
-            self.player_tag(),
-        )?;
+                .join(format!("{}.dat", uuid_text(uuid)));
+            back_up_unreadable_player(&player_file);
+            write_dat(&player_file, self.player_tag())?;
+        }
         write_dat(&dir.join("level.dat"), Tag::compound([("Data", data)]))?;
         Ok(())
     }
@@ -3345,11 +4091,21 @@ pub struct Persistent<G> {
     pub biomes: Arc<Biomes>,
 }
 type LodSurfaces = Arc<[crate::lod::Column; 256]>;
+/// The coarsest far tile spacing whose columns read saved chunks: 16 blocks
+/// a column, and 4 with Reduced far detail (`LodSampler::set_approximate`).
+const SAVED_LOD_STRIDE: i32 = 16;
+const SAVED_LOD_STRIDE_REDUCED: i32 = 4;
 struct SavedLodSampler<G: ChunkGenerator> {
     generator: Arc<Persistent<G>>,
     inner: Box<dyn crate::streaming::LodSampler>,
     cache: std::collections::VecDeque<((i32, i32), Option<LodSurfaces>)>,
     details: Vec<crate::streaming::LodDetail>,
+    /// Reduced far detail: saved chunks only in tiles up to
+    /// `SAVED_LOD_STRIDE_REDUCED` blocks a column.
+    approximate: bool,
+    /// Chunks the generator decorated for far terrain alone, kept from
+    /// earlier sessions; saved chunks take precedence over them.
+    generated: Arc<crate::lod::cache::DiskCache>,
 }
 impl<G: ChunkGenerator> SavedLodSampler<G> {
     fn saved_columns(&mut self, key: (i32, i32)) -> Option<LodSurfaces> {
@@ -3357,7 +4113,7 @@ impl<G: ChunkGenerator> SavedLodSampler<G> {
             Some(index) => self.cache.remove(index).unwrap(),
             None => (
                 key,
-                self.generator.save.lod_surfaces(
+                self.generator.save.lod_surfaces_shared(
                     key.0,
                     key.1,
                     &self.generator.registry,
@@ -3378,12 +4134,24 @@ impl<G: ChunkGenerator> crate::streaming::LodSampler for SavedLodSampler<G> {
             inner: self.inner.fork()?,
             cache: Default::default(),
             details: Vec::new(),
+            approximate: self.approximate,
+            generated: self.generated.clone(),
         }))
+    }
+    fn set_approximate(&mut self, approximate: bool) {
+        self.approximate = approximate;
+        self.inner.set_approximate(approximate);
     }
     fn request_detail(&mut self, chunks: &[(i32, i32)], center: [i32; 2]) {
         let mut missing = Vec::new();
         for &key in chunks {
-            if let Some(columns) = self.saved_columns(key) {
+            // Generated chunks from earlier sessions answer only these
+            // requests: reading them for every sampled cell of a coarse tile
+            // slowed sampling more than it saved.
+            if let Some(columns) = self
+                .saved_columns(key)
+                .or_else(|| self.generated.get(key.0, key.1))
+            {
                 self.details.push((key, columns));
             } else {
                 missing.push(key);
@@ -3396,13 +4164,28 @@ impl<G: ChunkGenerator> crate::streaming::LodSampler for SavedLodSampler<G> {
         for (key, generated) in self.inner.drain_details() {
             // A generation batch also returns neighbouring, unrequested chunks.
             // Their saved builds must take precedence too.
-            details.push((key, self.saved_columns(key).unwrap_or(generated)));
+            let columns = self.saved_columns(key).unwrap_or_else(|| {
+                self.generated.put(key.0, key.1, &generated);
+                generated
+            });
+            details.push((key, columns));
         }
         details
     }
     fn grid(&mut self, x: i32, z: i32, stride: i32, side: usize) -> Vec<crate::lod::Column> {
         let mut columns = self.inner.grid(x, z, stride, side);
-        if stride <= 16 {
+        // Saved chunks show in tiles up to 16 blocks a column. With Reduced far
+        // detail only up to 4 (within about a kilometre): coarser tiles keep
+        // the generator's terrain, which saved chunks were made from, since
+        // decoding up to 256 saved chunks for each of them held the whole far
+        // view back for minutes in large saves. Edits that far away show once
+        // their tiles refine on approach.
+        let limit = if self.approximate {
+            SAVED_LOD_STRIDE_REDUCED
+        } else {
+            SAVED_LOD_STRIDE
+        };
+        if stride <= limit {
             for (index, column) in columns.iter_mut().enumerate() {
                 let (wx, wz) = (
                     x + (index % side) as i32 * stride,
@@ -3469,22 +4252,22 @@ fn lod_palette_index(
         & ((1 << bits) - 1)) as usize;
     (value < palette.len()).then_some(value)
 }
-fn lod_light_layers(sections: &[(i32, &Tag)], sky_light: bool) -> Box<[u8]> {
-    let mut layers = [(None, None); SECTIONS];
+fn lod_light_layers(sections: &[(i32, &Tag)], layout: ColumnLayout, sky_light: bool) -> Box<[u8]> {
+    let mut layers = vec![(None, None); layout.sections()];
     for &(y, section) in sections {
         let layer = |name: &str| match section.get(name) {
             Some(Tag::ByteArray(data)) if data.len() == 2048 => Some(&data[..]),
             _ => None,
         };
-        layers[(y - (MIN_Y >> 4)) as usize] = (
+        layers[(y - (layout.min_y() >> 4)) as usize] = (
             if sky_light { layer("SkyLight") } else { None },
             layer("BlockLight"),
         );
     }
-    let mut light = vec![0u8; SECTIONS * 4096].into_boxed_slice();
+    let mut light = vec![0u8; layout.sections() * 4096].into_boxed_slice();
     let mut above = [if sky_light { 15u8 } else { 0 }; 256];
     let nibble = |data: &[u8], index: usize| (data[index / 2] >> ((index & 1) * 4)) & 15;
-    for si in (0..SECTIONS).rev() {
+    for si in (0..layout.sections()).rev() {
         let (sky, block) = layers[si];
         let section = &mut light[si * 4096..(si + 1) * 4096];
         for (index, value) in section.iter_mut().enumerate() {
@@ -3508,7 +4291,7 @@ fn lod_face_light(light: &[u8], x: usize, y: usize, z: usize) -> u16 {
         (z > 0, index.wrapping_sub(16)),
         (z < 15, index + 16),
         (y > 0, index.wrapping_sub(256)),
-        (y + 1 < SECTIONS * 16, index + 256),
+        (index + 256 < light.len(), index + 256),
     ] {
         if valid {
             sky = sky.max(light[index] >> 4);
@@ -3521,17 +4304,20 @@ fn decode_lod_surfaces(
     root: &NamedTag,
     assets: &crate::assets::Assets,
     biomes: &Biomes,
+    layout: ColumnLayout,
     sky_light: bool,
 ) -> Option<LodSurfaces> {
     let Tag::List(sections) = root.tag.get("sections")? else {
         return None;
     };
+    let water_state = assets.registry.default_state("minecraft:water");
     let mut sections: Vec<_> = sections
         .iter()
         .filter_map(|section| {
             let y = number(section.get("Y"))? as i32;
-            (MIN_Y >> 4..(MIN_Y >> 4) + SECTIONS as i32)
-                .contains(&y)
+            layout
+                .section_index(y * 16)
+                .is_some()
                 .then_some((y, section))
         })
         .collect();
@@ -3542,7 +4328,7 @@ fn decode_lod_surfaces(
             spans: Vec::new(),
         }));
     let mut water = [None; 256];
-    let light = lod_light_layers(&sections, sky_light);
+    let light = lod_light_layers(&sections, layout, sky_light);
     let mut states = BTreeMap::new();
     for (section_y, section) in sections {
         if let Some(blocks) = section.get("block_states") {
@@ -3566,7 +4352,20 @@ fn decode_lod_surfaces(
                             descriptor.name.as_str(),
                             "minecraft:water" | "minecraft:lava"
                         );
-                        (state, fluid, properties.blocks_motion_in_heightmap())
+                        // Chorus is thin and non-solid but still far-End detail.
+                        let chorus = matches!(
+                            descriptor.name.as_str(),
+                            "minecraft:chorus_plant" | "minecraft:chorus_flower"
+                        );
+                        let solid = properties.blocks_motion_in_heightmap();
+                        // Kelp and seagrass: the water they hold. Left out, the
+                        // water stopped short where they reach the surface.
+                        match water_state {
+                            Some(water) if !fluid && !solid && properties.has_fluid() => {
+                                (water, true, true)
+                            }
+                            _ => (state, fluid, fluid || solid || chorus),
+                        }
                     }))
                 })
                 .collect::<Option<_>>()?;
@@ -3590,10 +4389,10 @@ fn decode_lod_surfaces(
                     for y in (0..16).rev() {
                         let index = y * 256 + cell;
                         let palette_index = lod_palette_index(blocks, index, 4096, 4)?;
-                        let Some((state, fluid, solid)) = palette[palette_index] else {
+                        let Some((state, fluid, kept)) = palette[palette_index] else {
                             continue;
                         };
-                        if !solid && !fluid {
+                        if !kept {
                             continue;
                         }
                         let biome = section
@@ -3622,7 +4421,8 @@ fn decode_lod_surfaces(
                                 });
                             }
                         }
-                        let light = lod_face_light(&light, x, (height - 1 - MIN_Y) as usize, z);
+                        let light =
+                            lod_face_light(&light, x, (height - 1 - layout.min_y()) as usize, z);
                         let min = (height - 1) as i16;
                         let max = height as i16;
                         if let Some(previous) = column.spans.last_mut()
@@ -3652,6 +4452,33 @@ fn decode_lod_surfaces(
 }
 
 impl SaveDir {
+    /// `lod_surfaces`, decoded once for all far sampling threads: each saved
+    /// chunk lies under far tiles of several levels, sampled on any thread.
+    fn lod_surfaces_shared(
+        &self,
+        x: i32,
+        z: i32,
+        assets: &crate::assets::Assets,
+        biomes: &Biomes,
+    ) -> Option<LodSurfaces> {
+        if let Some((at, columns)) = self.lod_decoded.lock().unwrap().chunks.get(&(x, z))
+            && at.elapsed() < LOD_DECODED_TTL
+        {
+            return Some(columns.clone());
+        }
+        let columns = self.lod_surfaces(x, z, assets, biomes)?;
+        let mut decoded = self.lod_decoded.lock().unwrap();
+        let fresh = (std::time::Instant::now(), columns.clone());
+        if decoded.chunks.insert((x, z), fresh).is_none() {
+            decoded.order.push_back((x, z));
+            while decoded.order.len() > LOD_DECODED {
+                if let Some(old) = decoded.order.pop_front() {
+                    decoded.chunks.remove(&old);
+                }
+            }
+        }
+        Some(columns)
+    }
     fn lod_surfaces(
         &self,
         x: i32,
@@ -3668,6 +4495,9 @@ impl SaveDir {
         let root = if let Some(record) = pending {
             record.tag().map(|tag| (*tag).clone())?
         } else {
+            if !self.lod_saved(x, z) {
+                return None;
+            }
             // Far-only reads must not populate the gameplay region cache across the whole view.
             let mut region = RegionFile::open(self.region_path("region", x >> 5, z >> 5)).ok()?;
             region
@@ -3682,7 +4512,13 @@ impl SaveDir {
         {
             return None;
         }
-        decode_lod_surfaces(&root, assets, biomes, self.shape.sky_light)
+        decode_lod_surfaces(
+            &root,
+            assets,
+            biomes,
+            self.shape.column(),
+            self.shape.sky_light,
+        )
     }
 }
 
@@ -3693,11 +4529,17 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     }
     fn lod_sampler(self: Arc<Self>) -> Box<dyn crate::streaming::LodSampler> {
         let inner = ChunkGenerator::lod_sampler(self.inner.clone());
+        let generated = Arc::new(crate::lod::cache::DiskCache::new(
+            self.save.root.join("data/horizon_far_terrain"),
+            crate::lod::cache::build_key(self.registry.registry.len(), self.biomes.list.len()),
+        ));
         Box::new(SavedLodSampler {
             generator: self,
             inner,
             cache: Default::default(),
             details: Vec::new(),
+            approximate: false,
+            generated,
         })
     }
     fn load(&self, x: i32, z: i32) -> Option<Chunk> {
@@ -3718,6 +4560,9 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     fn prepare_loaded(&self, worker: &mut G::Worker, chunk: &Chunk) {
         self.inner.prepare_loaded(worker, chunk);
     }
+    fn idle(&self, worker: &mut G::Worker) {
+        self.inner.idle(worker);
+    }
     fn proto(&self, worker: &mut G::Worker, x: i32, z: i32) -> crate::streaming::Proto {
         let mut proto = self.inner.proto(worker, x, z);
         if let Some(saved) = self
@@ -3733,6 +4578,12 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     }
     fn light_view(&self, proto: &crate::streaming::Proto) -> Option<Chunk> {
         self.inner.light_view(proto)
+    }
+    fn non_air_sections(
+        &self,
+        proto: &crate::streaming::Proto,
+    ) -> Option<crate::section_mask::SectionMask> {
+        self.inner.non_air_sections(proto)
     }
     fn save_protos(&self, protos: &[&crate::streaming::Proto]) {
         self.save
@@ -3776,6 +4627,43 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
 
 #[cfg(test)]
 mod tests {
+    use crate::mobs::spawner::SpawnDataExt;
+
+    #[test]
+    fn a_server_falls_back_to_level_dat_old_and_restores_it() {
+        let world = std::env::temp_dir().join(format!("horizon-dat-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&world);
+        fs::create_dir_all(&world).unwrap();
+        let level = |name: &str| {
+            Tag::compound([(
+                "Data",
+                Tag::compound([("LevelName", Tag::String(name.into()))]),
+            )])
+        };
+        // Both files broken, or only level.dat_old there: nothing to fall back to.
+        fs::write(world.join("level.dat"), b"cut short").unwrap();
+        assert!(!fall_back_to_level_dat_old(&world));
+        fs::write(world.join("level.dat_old"), b"cut short").unwrap();
+        assert!(!fall_back_to_level_dat_old(&world));
+        // A good level.dat_old: it takes level.dat's place and the broken file is kept.
+        write_dat(&world.join("level.dat_old"), level("old")).unwrap();
+        assert!(fall_back_to_level_dat_old(&world));
+        assert!(level_dat_issue(&world, false).is_none());
+        let kept = fs::read_dir(&world)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("level.dat_corrupted_")
+            })
+            .count();
+        assert_eq!(kept, 1);
+        // A readable level.dat is left alone.
+        assert!(!fall_back_to_level_dat_old(&world));
+        let _ = fs::remove_dir_all(&world);
+    }
+
     #[test]
     fn points_of_interest_save_as_poi_sections() {
         let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
@@ -3849,7 +4737,7 @@ mod tests {
         let bell = assets.registry.default_state("minecraft:bell").unwrap().0;
         let dir = std::env::temp_dir().join(format!("horizon-poi-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone());
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let _ = save.tables.set(Arc::new(SaveTables::new(&assets)));
         let mut chunk = Chunk::empty(0, 0);
         chunk.set(5, 71, 5, bell);
@@ -3865,7 +4753,10 @@ mod tests {
         save.save_later(&[Arc::new(chunk)], assets.registry, &biomes)
             .unwrap();
         save.flush().unwrap();
-        assert_eq!(sections(&SaveDir::new(dir.clone())), Some(0));
+        assert_eq!(
+            sections(&SaveDir::new(dir.clone(), LevelShape::OVERWORLD)),
+            Some(0)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -3983,6 +4874,61 @@ mod tests {
     }
 
     #[test]
+    fn a_tall_level_saves_and_loads_its_whole_height() {
+        let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let assets = crate::assets::Assets::load(&root).expect("assets");
+        let biomes = Biomes::load(&root).expect("biomes");
+        let tables = SaveTables::new(&assets);
+        let stone = assets.registry.default_state("minecraft:stone").unwrap();
+        // To The Max's Overworld: -64..2032, 131 sections.
+        let shape = LevelShape::new(-64, 2096, 2096, true).unwrap();
+        let mut chunk = Chunk::with_layout(0, 0, shape.column());
+        chunk.set(0, -64, 0, stone.0);
+        chunk.set(0, 2000, 0, stone.0);
+        let saved = encode_with(&chunk, assets.registry, &biomes, Some(&tables), shape);
+        assert_eq!(number(saved.tag.get("yPos")), Some(-4));
+        let Some(Tag::List(sections)) = saved.tag.get("sections") else {
+            panic!("no sections");
+        };
+        assert_eq!(sections.len(), 131);
+        // 12-bit heightmap entries: y 2000's top reads 2001 - -64.
+        let Some(Tag::LongArray(surface)) = saved
+            .tag
+            .get("Heightmaps")
+            .and_then(|h| h.get("WORLD_SURFACE"))
+        else {
+            panic!("no WORLD_SURFACE");
+        };
+        assert_eq!(surface[0] & 0xfff, 2065);
+        let back = decode_with(
+            &saved,
+            assets.registry,
+            &biomes,
+            Some(&tables),
+            shape.column(),
+        )
+        .expect("decodes");
+        assert_eq!(back.sections.len(), 131);
+        assert_eq!(back.get(0, 2000, 0), stone.0);
+        assert_eq!(back.get(0, -64, 0), stone.0);
+        // Read into the vanilla column, the sections above it are left out.
+        let short = decode_with(
+            &saved,
+            assets.registry,
+            &biomes,
+            Some(&tables),
+            ColumnLayout::VANILLA,
+        )
+        .expect("decodes");
+        assert_eq!(short.sections.len(), SECTIONS);
+        assert_eq!(short.get(0, 2000, 0), 0);
+        assert_eq!(short.get(0, -64, 0), stone.0);
+    }
+
+    #[test]
     fn nether_and_end_chunks_save_with_their_own_height() {
         let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
@@ -4037,14 +4983,40 @@ mod tests {
             LevelShape::OVERWORLD,
         );
         assert_eq!(number(overworld.tag.get("yPos")), Some(-4));
-        assert_eq!(
-            LevelShape::for_dir(Path::new("w/dimensions/minecraft/the_end")),
-            LevelShape::END
-        );
-        assert_eq!(
-            LevelShape::for_dir(Path::new("w/DIM-1")),
-            LevelShape::NETHER
-        );
+    }
+
+    /// The far ring's reads (`lan::far`): a chunk saved with its light, without the gameplay's region
+    /// cache; none for a chunk not saved, or saved without its light.
+    #[test]
+    fn far_reads_take_saved_lit_chunks_only() {
+        let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let assets = crate::assets::Assets::load(&root).expect("assets");
+        let biomes = Biomes::load(&root).expect("biomes");
+        let stone = assets.registry.default_state("minecraft:stone").unwrap();
+        let mut lit = Chunk::empty(4, -7);
+        lit.set(1, 70, 2, stone.0);
+        let mut dark = lit.clone();
+        dark.x = 5;
+        lit.lit = true;
+        let dir = std::env::temp_dir().join(format!("horizon-far-save-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let records =
+            [&lit, &dark].map(|c| ((c.x, c.z), Some(encode(c, assets.registry, &biomes))));
+        save.write_records("region", records.into(), true).unwrap();
+        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let far = reopened
+            .load_far(4, -7, assets.registry, &biomes)
+            .expect("saved with its light");
+        assert_eq!(far.block(1, 70, 2), stone);
+        assert!(far.lit && far.light_loaded);
+        assert!(reopened.load_far(5, -7, assets.registry, &biomes).is_none());
+        assert!(reopened.load_far(6, -7, assets.registry, &biomes).is_none());
+        assert!(reopened.regions.lock().unwrap().is_empty());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4062,6 +5034,18 @@ mod tests {
         let leaves = assets
             .registry
             .default_state("minecraft:oak_leaves")
+            .unwrap();
+        let end_stone = assets
+            .registry
+            .default_state("minecraft:end_stone")
+            .unwrap();
+        let chorus = assets
+            .registry
+            .default_state("minecraft:chorus_plant")
+            .unwrap();
+        let flower = assets
+            .registry
+            .default_state("minecraft:chorus_flower")
             .unwrap();
         let mut chunk = Chunk::empty(-2, 3);
         chunk.set(0, 109, 0, stone.0);
@@ -4089,6 +5073,10 @@ mod tests {
         for y in 55..64 {
             chunk.set(4, y, 4, water.0);
         }
+        // Chorus is thin and non-solid but still part of the far End.
+        chunk.set(12, 100, 2, end_stone.0);
+        chunk.set(12, 101, 2, chorus.0);
+        chunk.set(12, 102, 2, flower.0);
         let mut saved = encode(&chunk, assets.registry, &biomes);
         put(
             &mut saved.tag,
@@ -4097,10 +5085,10 @@ mod tests {
         );
         let dir = std::env::temp_dir().join(format!("horizon-lod-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let save = SaveDir::new(dir.clone());
+        let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         save.write_records("region", vec![((-2, 3), Some(saved))], true)
             .unwrap();
-        let reopened = SaveDir::new(dir.clone());
+        let reopened = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let surfaces = reopened
             .lod_surfaces(-2, 3, &assets, &biomes)
             .expect("saved summary");
@@ -4146,6 +5134,25 @@ mod tests {
         let underwater = surfaces[4 * 16 + 4].surface.unwrap();
         assert_eq!((underwater.height, underwater.state), (55, sand));
         assert_eq!(underwater.water, Some((64, water)));
+        let chorus_column = &surfaces[2 * 16 + 12];
+        assert_eq!(
+            chorus_column
+                .surface
+                .map(|surface| (surface.height, surface.state)),
+            Some((103, flower))
+        );
+        assert_eq!(
+            chorus_column
+                .spans
+                .iter()
+                .map(|span| (span.min, span.max, span.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (100, 101, end_stone),
+                (101, 102, chorus),
+                (102, 103, flower)
+            ]
+        );
         assert!(surfaces[15].surface.is_none(), "saved void stays empty");
         assert!(
             reopened.regions.lock().unwrap().is_empty(),
@@ -4164,8 +5171,7 @@ mod tests {
             reopened.lod_surfaces(-3, 3, &assets, &biomes).is_none(),
             "unfinished proto saves must not suppress complete decoration"
         );
-        let mut nether = SaveDir::new(dir.clone());
-        nether.shape = LevelShape::NETHER;
+        let nether = SaveDir::new(dir.clone(), LevelShape::NETHER);
         let dark = nether.lod_surfaces(-2, 3, &assets, &biomes).unwrap();
         assert!(
             dark.iter()
@@ -4200,6 +5206,8 @@ mod tests {
             inner: Box::new(SavedOnly(Vec::new())),
             cache: Default::default(),
             details: Vec::new(),
+            approximate: false,
+            generated: Arc::new(crate::lod::cache::DiskCache::new(dir.join("far"), 1)),
         };
         use crate::streaming::LodSampler;
         sampler.request_detail(&[(-2, 3)], [-32, 48]);
@@ -4220,6 +5228,15 @@ mod tests {
             "unrequested batch neighbours must preserve saved builds"
         );
         assert!(Arc::ptr_eq(&details[1].1, &generated));
+        assert!(
+            sampler.generated.get(-2, 3).is_none(),
+            "saved builds are not cached as generated"
+        );
+        assert_eq!(sampler.generated.get(-9, 9).unwrap(), generated);
+        // A later session reads the generated chunk back instead of
+        // generating it again.
+        sampler.request_detail(&[(-9, 9)], [-144, 144]);
+        assert_eq!(sampler.drain_details()[0].1, generated);
         sampler.inner =
             crate::streaming::ChunkGenerator::lod_sampler(sampler.generator.inner.clone());
         let grid = sampler.grid(-32, 48, 2, 16);
@@ -4319,6 +5336,24 @@ mod tests {
     }
 
     #[test]
+    fn work_shared_out_is_all_done_in_order_when_no_helper_can_start() {
+        use super::share_out;
+        let squares = |i: usize| i * i;
+        let want: Vec<usize> = (0..40).map(squares).collect();
+        // Every helper refused (a container at its thread limit): this thread does it all.
+        assert_eq!(share_out(40, 4, squares, || false), want);
+        // Some refused, some started.
+        let mut asked = 0;
+        let some = || {
+            asked += 1;
+            asked % 2 == 0
+        };
+        assert_eq!(share_out(40, 4, squares, some), want);
+        assert_eq!(share_out(40, 4, squares, || true), want);
+        assert_eq!(share_out(0, 4, squares, || true), Vec::<usize>::new());
+    }
+
+    #[test]
     fn records_compressed_on_helpers_match_one_thread_in_order() {
         use super::{Record, compress_records};
         let records: Vec<((i32, i32), Record)> = (0..53i32)
@@ -4379,10 +5414,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
+    fn region_files_kept_open_stay_under_vanillas_cache_size() {
+        let open_fds = || std::fs::read_dir("/dev/fd").map_or(0, |d| d.count());
+        let dir = std::env::temp_dir().join(format!("horizon-save-fds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+        let before = open_fds();
+        let held = super::cached_region(
+            &save.regions,
+            (0, 0),
+            &save.region_path("region", 0, 0),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        for x in 1..=600 {
+            super::cached_region(
+                &save.regions,
+                (x, 0),
+                &save.region_path("region", x, 0),
+                true,
+            )
+            .unwrap()
+            .unwrap();
+        }
+        // Other tests open files at the same time: a margin, far below 600.
+        let grown = open_fds().saturating_sub(before);
+        assert!(
+            grown <= super::MAX_OPEN_REGIONS + 32,
+            "{grown} descriptors more"
+        );
+        let cache = save.regions.lock().unwrap();
+        assert!(
+            cache.open() <= super::MAX_OPEN_REGIONS,
+            "{} open",
+            cache.open()
+        );
+        // The one still held is never closed under its holder.
+        assert!(Arc::ptr_eq(
+            &cache.regions[&(0, 0)].0.clone().unwrap(),
+            &held
+        ));
+        drop(cache);
+        // What was written to regions since closed reads back from the disk.
+        let entity = |x: i32| Tag::compound([("x", Tag::Int(x))]);
+        save.save_entities_later((0..300).map(|i| ((i * 32, 0), vec![entity(i)])).collect())
+            .unwrap();
+        save.flush().unwrap();
+        assert!(save.entity_regions.lock().unwrap().open() <= super::MAX_OPEN_REGIONS);
+        for i in [0, 1, 150, 299] {
+            assert_eq!(save.load_entities(i * 32, 0), vec![entity(i)]);
+        }
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn write_completion_polls_without_waiting_and_keeps_latest_snapshot() {
         let dir = std::env::temp_dir().join(format!("horizon-save-poll-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let save = super::SaveDir::new(dir.clone());
+        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let lock = super::SessionLock::acquire(&dir).unwrap();
         let path = save.region_path("entities", 0, 0);
         let region = super::cached_region(&save.entity_regions, (0, 0), &path, true)
@@ -4401,12 +5491,12 @@ mod tests {
         drop(blocked);
         save.flush().unwrap();
         assert!(save.writes_finished().unwrap());
-        let reopened = super::SaveDir::new(dir.clone());
+        let reopened = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         assert_eq!(reopened.load_entities(1, 2), vec![entity(2)]);
         save.save_entities_later(vec![((1, 2), vec![])]).unwrap();
         save.flush().unwrap();
         assert!(
-            super::SaveDir::new(dir.clone())
+            super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD)
                 .load_entities(1, 2)
                 .is_empty()
         );
@@ -4421,7 +5511,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A file where a directory is needed causes a real writer I/O error.
         std::fs::write(dir.join("entities"), b"blocked").unwrap();
-        let save = super::SaveDir::new(dir.clone());
+        let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let entity = Tag::compound([("version", Tag::Int(3))]);
         save.save_entities_later(vec![((0, 0), vec![entity.clone()])])
             .unwrap();
@@ -4439,11 +5529,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("horizon-lock-{}", std::process::id()));
         let first = super::SessionLock::acquire(&dir).expect("first lock");
         assert!(super::SessionLock::acquire(&dir).is_err());
+        drop(first);
+        // Windows refuses a read through another handle while the file is
+        // locked, so the bytes are read once the lock is released.
         assert_eq!(
             std::fs::read(dir.join("session.lock")).unwrap(),
             [0x26, 0x03]
         );
-        drop(first);
         assert!(super::SessionLock::acquire(&dir).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4531,6 +5623,61 @@ mod tests {
         assert_eq!(again.update_tag(), spawner.update_tag());
     }
     #[test]
+    fn mod_block_entity_round_trips() {
+        let saved = horizon_world::nbt::parse_snbt(
+            r#"{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,progress:7,Items:[{Slot:0b,id:"minecraft:iron_ore",count:3}]}"#,
+        )
+        .unwrap()
+        .0;
+        let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+        assert_eq!(pos, (5, -60, 12));
+        let crate::containers::BlockEntity::Mod(m) = &back else {
+            panic!("not a mod's");
+        };
+        assert_eq!(m.id, "gtmod:macerator");
+        // The mod sees its own fields only.
+        for key in ["id", "x", "y", "z"] {
+            assert!(!m.nbt.contains_key(&key.into()), "{key}");
+        }
+        assert_eq!(m.nbt.get(&"energy".into()), Some(&Tag::Long(1200)));
+        // `Items` are its slots, not the mod's compound.
+        assert!(!m.nbt.contains_key(&"Items".into()));
+        assert_eq!(m.items.len(), 1);
+        assert_eq!(m.items[0].as_ref().map(|s| s.count), Some(3));
+        assert_eq!(encode_block_entity(pos, &back, "gtmod:macerator"), saved);
+        // `Items` that are not an item list stay the mod's, as saved.
+        for items in [
+            r#"Items:{energy:5}"#,
+            r#"Items:[1,2,3]"#,
+            r#"Items:[{Slot:0b,id:"minecraft:air",count:1}]"#,
+            r#"Items:[{Slot:0b,id:"minecraft:stone",count:1,note:"mine"}]"#,
+        ] {
+            let saved = horizon_world::nbt::parse_snbt(&format!(
+                r#"{{id:"gtmod:cable",x:0,y:0,z:0,{items}}}"#
+            ))
+            .unwrap()
+            .0;
+            let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+            let crate::containers::BlockEntity::Mod(m) = &back else {
+                panic!("not a mod's");
+            };
+            assert!(m.items.is_empty(), "{items}");
+            assert_eq!(
+                encode_block_entity(pos, &back, "gtmod:cable"),
+                saved,
+                "{items}"
+            );
+        }
+        // Vanilla's types are never a mod's, modelled or not.
+        let ender = horizon_world::nbt::parse_snbt(r#"{id:"minecraft:ender_chest",x:0,y:0,z:0}"#)
+            .unwrap()
+            .0;
+        assert!(!matches!(
+            decode_block_entity(&ender),
+            Some((_, crate::containers::BlockEntity::Mod(_)))
+        ));
+    }
+    #[test]
     fn banner_block_entity_round_trips() {
         let banner = crate::containers::Banner {
             layers: vec![crate::banner::BannerLayer::new("minecraft:creeper", "lime")],
@@ -4552,6 +5699,7 @@ mod tests {
         assert_eq!(back.components, banner.components);
     }
     use super::*;
+    use crate::chunk::{MIN_Y, SECTIONS};
 
     #[test]
     fn end_gateway_block_entity_round_trips() {
@@ -4916,6 +6064,80 @@ mod tests {
             section(Tag::Byte(0), None, Some(Tag::ByteArray(varied))),
         ]));
     }
+    /// #2571: the difficulty is a property of the world: the level data
+    /// holds it, so a world that was set to hard is hard when it is opened
+    /// again, and a world that was downloaded keeps the difficulty it was
+    /// made with.
+    #[test]
+    fn the_level_data_holds_the_difficulty() {
+        let dir = std::env::temp_dir().join(format!("horizon-difficulty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut level = Level {
+            name: "Test".into(),
+            ..Level::default()
+        };
+        // The world's difficulty is the level data's.
+        level.set_difficulty(3);
+        assert_eq!(level.difficulty, "hard");
+        assert_eq!(level.difficulty_id(), 3);
+        // It survives the save, so the world comes back with it.
+        level.write(&dir).unwrap();
+        let back = Level::read(&dir).unwrap();
+        assert_eq!(back.difficulty, "hard");
+        assert_eq!(back.difficulty_id(), 3);
+        // A world whose difficulty is not one of ours is normal.
+        let other = Level {
+            difficulty: "extreme".into(),
+            ..Level::default()
+        };
+        assert_eq!(other.difficulty_id(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Dedicated world saves must not overwrite separately managed player data.
+    #[test]
+    fn dedicated_world_save_preserves_player_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-dedicated-player-save-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+
+        let mut level = Level {
+            name: "Test".into(),
+            position: Some([12.5, 70.0, -8.25]),
+            inventory: vec![(0, "minecraft:diamond".into(), 7, 0)],
+            ..Level::default()
+        };
+
+        // Create a real player file using the existing singleplayer writer.
+        level.write(&dir).unwrap();
+        let uuid = level.player_uuid.unwrap();
+        let player_file = dir
+            .join("players")
+            .join("data")
+            .join(format!("{}.dat", uuid_text(uuid)));
+
+        let before = fs::read(&player_file).unwrap();
+
+        // Simulate an incomplete world-level player state.
+        level.position = None;
+        level.inventory.clear();
+        level.day_time = 12345;
+
+        // Dedicated saves must update metadata without touching player data.
+        level.write_without_player(&dir).unwrap();
+
+        let after = fs::read(&player_file).unwrap();
+        assert_eq!(before, after, "dedicated save overwrote player data");
+
+        // The world metadata must still be persisted.
+        let reopened = Level::read(&dir).unwrap();
+        assert_eq!(reopened.day_time, 12345);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn level_round_trips_through_the_vanilla_files() {
         let dir = std::env::temp_dir().join(format!("horizon-level-{}", std::process::id()));
@@ -5075,6 +6297,31 @@ mod tests {
         assert_eq!(flying_survival, 0);
     }
 
+    #[test]
+    fn unconsumed_root_vehicle_keeps_the_complete_vanilla_tree() {
+        let entity = Tag::compound([
+            ("id", Tag::String("minecraft:horse".into())),
+            ("UUID", uuid_tag([5, 6, 7, 8])),
+            (
+                "Passengers",
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String("minecraft:pig".into())),
+                    ("UUID", uuid_tag([1, 2, 3, 4])),
+                ])]),
+            ),
+        ]);
+        let vehicle = Tag::compound([("Attach", uuid_tag([1, 2, 3, 4])), ("Entity", entity)]);
+        let raw = Tag::compound([("RootVehicle", vehicle.clone())]);
+        let mut level = Level::default();
+        level.read_player(&raw);
+        level.player_extra = Some(raw);
+        assert_eq!(level.root_vehicle, Some([1, 2, 3, 4]));
+        assert_eq!(level.player_tag().get("RootVehicle"), Some(&vehicle));
+        // Even saving before the vehicle is restored must not destroy it.
+        level.root_vehicle = None;
+        assert_eq!(level.player_tag().get("RootVehicle"), Some(&vehicle));
+    }
+
     /// `RecipesUsed` is what a furnace owes in experience, so a save that drops it pays the
     /// player nothing after a reload.
     #[test]
@@ -5140,6 +6387,200 @@ mod tests {
         );
     }
 
+    fn gen_world(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("horizon-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `WorldOpenFlows.openWorldCheckWorldStemCompatibility`: every world a preset makes is
+    /// stable, and a world with a changed dimension, a custom one or a customized generator
+    /// is asked about.
+    #[test]
+    fn world_stem_compatibility_flags_unstable_and_customized_worlds() {
+        for preset in [
+            WorldPreset::Normal,
+            WorldPreset::Flat,
+            WorldPreset::LargeBiomes,
+            WorldPreset::Amplified,
+            WorldPreset::SingleBiomeSurface,
+        ] {
+            let dir = gen_world("stem-stable");
+            write_world_gen_settings(
+                &dir,
+                7,
+                WorldGen {
+                    preset,
+                    structures: true,
+                    bonus_chest: false,
+                },
+            )
+            .unwrap();
+            assert!(!world_gen_unstable(&dir), "{preset:?}");
+            assert!(!is_old_customized_world(&dir));
+            let _ = fs::remove_dir_all(dir);
+        }
+        // Without world_gen_settings there is nothing to ask about.
+        let dir = gen_world("stem-none");
+        assert!(!world_gen_unstable(&dir) && !is_old_customized_world(&dir));
+        let _ = fs::remove_dir_all(dir);
+
+        let dir = gen_world("stem-edit");
+        write_world_gen_settings(&dir, 7, WorldGen::default()).unwrap();
+        let settings = world_gen_settings(&dir).unwrap();
+        let edit = |change: &dyn Fn(&mut Tag)| {
+            let mut tag = settings.clone();
+            change(&mut tag);
+            write_saved_data(&dir, "world_gen_settings", tag).unwrap();
+        };
+        fn dimension<'a>(tag: &'a mut Tag, key: &str) -> &'a mut Tag {
+            tag.get_mut("dimensions").unwrap().get_mut(key).unwrap()
+        }
+        // A custom biome source in the Nether is not the preset.
+        edit(&|tag| {
+            let nether = dimension(tag, "minecraft:the_nether");
+            let generator = nether.get_mut("generator").unwrap();
+            *generator.get_mut("biome_source").unwrap() = Tag::compound([
+                ("type", string("minecraft:fixed")),
+                ("biome", string("minecraft:plains")),
+            ]);
+        });
+        assert!(world_gen_unstable(&dir));
+        // The End on another dimension type.
+        edit(&|tag| {
+            let end = dimension(tag, "minecraft:the_end");
+            *end.get_mut("type").unwrap() = string("minecraft:overworld");
+        });
+        assert!(world_gen_unstable(&dir));
+        // Another noise settings in the Overworld is fine (amplified), in the Nether it is not.
+        edit(&|tag| {
+            let nether = dimension(tag, "minecraft:the_nether");
+            *nether
+                .get_mut("generator")
+                .unwrap()
+                .get_mut("settings")
+                .unwrap() = string("minecraft:overworld");
+        });
+        assert!(world_gen_unstable(&dir));
+        // A fourth dimension, and a missing builtin one.
+        edit(&|tag| {
+            if let Some(Tag::Compound(dimensions)) = tag.get_mut("dimensions") {
+                let end = dimensions.get(&"minecraft:the_end".into()).unwrap().clone();
+                dimensions.insert("mypack:moon".into(), end);
+            }
+        });
+        assert!(world_gen_unstable(&dir));
+        edit(&|tag| {
+            if let Some(Tag::Compound(dimensions)) = tag.get_mut("dimensions") {
+                dimensions.remove(&"minecraft:the_end".into());
+            }
+        });
+        assert!(world_gen_unstable(&dir));
+        // legacy_custom_options marks an old customized world.
+        edit(&|tag| {
+            if let Tag::Compound(map) = tag {
+                map.insert("legacy_custom_options".into(), string("{\"seaLevel\":63}"));
+            }
+        });
+        assert!(is_old_customized_world(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// `WorldOpenFlows.loadWorldStem`: the enabled data packs' level stems are the base of
+    /// `WorldDimensions.bake`, replacing the saved one of their id.
+    #[test]
+    fn world_stem_compatibility_reads_data_pack_dimensions() {
+        let dir = gen_world("stem-datapack");
+        write_world_gen_settings(&dir, 7, WorldGen::default()).unwrap();
+        assert!(!world_gen_unstable(&dir));
+        let write = |pack: &str, file: &str, text: &str| {
+            let path = dir.join("datapacks").join(pack).join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("p", "pack.mcmeta", "{}");
+        // A pack's dimension of another id is not vanilla-like.
+        write(
+            "p",
+            "data/mypack/dimension/moon.json",
+            r#"{"type":"minecraft:the_end","generator":{"type":"minecraft:noise","settings":"minecraft:end","biome_source":{"type":"minecraft:the_end"}}}"#,
+        );
+        assert!(world_gen_unstable(&dir));
+        // Disabled, it counts for nothing.
+        fs::write(dir.join("datapacks.json"), r#"{"disabled":["file/p"]}"#).unwrap();
+        assert!(!world_gen_unstable(&dir));
+        fs::remove_file(dir.join("datapacks.json")).unwrap();
+        fs::remove_file(dir.join("datapacks/p/data/mypack/dimension/moon.json")).unwrap();
+        assert!(!world_gen_unstable(&dir));
+        // A pack's Nether with another biome source replaces the saved vanilla one.
+        write(
+            "p",
+            "data/minecraft/dimension/the_nether.json",
+            r#"{"type":"minecraft:the_nether","generator":{"type":"minecraft:noise","settings":"minecraft:nether","biome_source":{"type":"minecraft:fixed","biome":"minecraft:plains"}}}"#,
+        );
+        assert!(world_gen_unstable(&dir));
+        // And a vanilla-like one stays stable.
+        write(
+            "p",
+            "data/minecraft/dimension/the_nether.json",
+            r#"{"type":"minecraft:the_nether","generator":{"type":"minecraft:noise","settings":"minecraft:nether","biome_source":{"type":"minecraft:multi_noise","preset":"minecraft:nether"}}}"#,
+        );
+        assert!(!world_gen_unstable(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A world that still needs its file fixes keeps its generator settings in level.dat; they
+    /// are read as the fixes would leave them, so the question is asked on the first open.
+    #[test]
+    fn world_gen_settings_of_a_world_needing_file_fixes_are_read_in_memory() {
+        let dir = gen_world("stem-prefix");
+        write_world_gen_settings(&dir, 7, WorldGen::default()).unwrap();
+        let settings = world_gen_settings(&dir).unwrap();
+        let customized = {
+            let mut tag = settings.clone();
+            if let Tag::Compound(map) = &mut tag {
+                map.insert("legacy_custom_options".into(), string("{\"seaLevel\":63}"));
+            }
+            tag
+        };
+        // 26.3 layout moved back to the old one: settings in level.dat, no saved data file.
+        fs::remove_file(saved_data_path(&dir, "world_gen_settings")).unwrap();
+        write_dat(
+            &dir.join("level.dat"),
+            Tag::compound([(
+                "Data",
+                Tag::compound([
+                    ("DataVersion", Tag::Int(4700)),
+                    ("WorldGenSettings", customized),
+                ]),
+            )]),
+        )
+        .unwrap();
+        assert!(needs_file_fixes(&dir));
+        let read = world_gen_settings(&dir).expect("settings");
+        assert!(read.get("dimensions").is_some());
+        assert!(!world_gen_unstable(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn low_disk_space_is_under_64_mib_usable() {
+        assert_eq!(LOW_DISK_SPACE, 64 * 1024 * 1024);
+        let dir = std::env::temp_dir();
+        assert!(estimate_disk_space(&dir) > 0);
+        assert_eq!(
+            low_disk_space(&dir),
+            estimate_disk_space(&dir) < LOW_DISK_SPACE
+        );
+        // A path that does not exist cannot be asked: vanilla reads that as plenty.
+        #[cfg(unix)]
+        assert_eq!(
+            estimate_disk_space(&dir.join("horizon-no-such-folder/x")),
+            u64::MAX
+        );
+    }
+
     #[test]
     fn forced_chunks_survive_dimension_restarts_and_removals() {
         let root = std::env::temp_dir().join(format!("horizon-forced-{}", std::process::id()));
@@ -5150,14 +6591,14 @@ mod tests {
             "minecraft:the_end",
         ];
         for (i, dim) in dimensions.iter().enumerate() {
-            let save = SaveDir::new(dimension_dir(&root, dim));
+            let save = SaveDir::new(dimension_dir(&root, dim), LevelShape::OVERWORLD);
             assert!(save.load_forced_chunks().is_empty());
             let forced = HashSet::from([(i as i32, -17), (-23, i as i32), (-1, -1)]);
             save.save_forced_chunks(&forced).unwrap();
         }
         for (i, dim) in dimensions.iter().enumerate() {
             let path = dimension_dir(&root, dim);
-            let save = SaveDir::new(path.clone());
+            let save = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
             let mut forced = save.load_forced_chunks();
             assert_eq!(
                 forced,
@@ -5182,10 +6623,14 @@ mod tests {
             forced.remove(&(-1, -1));
             save.save_forced_chunks(&forced).unwrap();
             drop(save);
-            let reopened = SaveDir::new(path.clone());
+            let reopened = SaveDir::new(path.clone(), LevelShape::OVERWORLD);
             assert_eq!(reopened.load_forced_chunks(), forced);
             reopened.save_forced_chunks(&HashSet::new()).unwrap();
-            assert!(SaveDir::new(path.clone()).load_forced_chunks().is_empty());
+            assert!(
+                SaveDir::new(path.clone(), LevelShape::OVERWORLD)
+                    .load_forced_chunks()
+                    .is_empty()
+            );
             assert_eq!(
                 read_saved_data(&path, "chunk_tickets")
                     .unwrap()

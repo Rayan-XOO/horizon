@@ -76,9 +76,11 @@ fn view_pages(data: Option<&StackData>) -> Vec<Text> {
         .iter()
         .enumerate()
         .map(|(i, page)| match tagged.then(|| &w.page_tags[i]) {
-            Some(tag @ horizon_world::nbt::Tag::Compound(_)) => {
-                horizon_client::entity_nbt::name_text(tag)
-            }
+            // A component object, or a component list (`ComponentSerialization`
+            // takes both; servers behind ViaVersion send the list form).
+            Some(
+                tag @ (horizon_world::nbt::Tag::Compound(_) | horizon_world::nbt::Tag::List(_)),
+            ) => horizon_client::entity_nbt::name_text(tag),
             _ => Text::literal(page),
         })
         .collect()
@@ -93,6 +95,11 @@ impl Game<'_> {
     /// `BookViewScreen.mouseClicked`: the click event of the text under the
     /// cursor on the page.
     fn book_link_at(&self, page: &Text, left: f32) -> Option<horizon_client::text::ClickEvent> {
+        self.book_style_at(page, left)?.click
+    }
+    /// `ActiveTextCollector` over the page: the style of the character
+    /// under the cursor, for its click and hover events.
+    fn book_style_at(&self, page: &Text, left: f32) -> Option<horizon_client::text::Style> {
         let (mx, my) = self.cursor;
         let row = ((my - 32.0) / 9.0).floor();
         if row < 0.0 || row >= LINES as f32 {
@@ -107,7 +114,7 @@ impl Game<'_> {
         for (c, style) in line.chars() {
             x -= self.gui.atlas.font.advance(c, style);
             if x < 0.0 {
-                return style.click.clone();
+                return Some(style.clone());
             }
         }
         None
@@ -137,7 +144,22 @@ impl Game<'_> {
                 }
             }
             ClickEvent::OpenUrl(url) => self.click_url(url),
-            _ => {}
+            // closeContainerOnServer, then clickCommandAction with no screen
+            // after the command: the book closes and the command runs.
+            ClickEvent::RunCommand(command) => {
+                self.close_book();
+                self.click_command(&command);
+            }
+            // Screen.defaultHandleClickEvent: copied, the book stays open.
+            ClickEvent::CopyToClipboard(value) => {
+                use horizon_client::clipboard::Clipboard;
+                self.clipboard.set(&value);
+            }
+            // defaultHandleGameClickEvent: the dialog opens over the book.
+            ClickEvent::ShowDialog(dialog) => self.show_dialog_ref(&dialog),
+            // SuggestCommand's insertText does nothing on a book; a server's
+            // text never opens a file.
+            ClickEvent::SuggestCommand(_) | ClickEvent::OpenFile(_) => {}
         }
     }
     /// `WritableBookItem.use` / `WrittenBookItem.use` (`Player.openItemGui`).
@@ -356,6 +378,11 @@ impl Game<'_> {
                 Some(KeyCode::PageDown) => self.turn_page(true),
                 Some(KeyCode::ArrowUp) => self.book_move_line(-1),
                 Some(KeyCode::ArrowDown) => self.book_move_line(1),
+                // MultilineTextField.keyPressed: Home and End seek the caret's
+                // line; with Ctrl they go to the page's start and end.
+                Some(edge @ (KeyCode::Home | KeyCode::End)) if !self.has_control_down() => {
+                    self.book_line_edge(edge == KeyCode::End)
+                }
                 Some(KeyCode::Enter | KeyCode::NumpadEnter) => self.page_insert("\n"),
                 Some(key) if self.book_page_key(key) => {}
                 _ => {
@@ -520,6 +547,26 @@ impl Game<'_> {
             page_edit.set_cursor(pos, shift);
         }
     }
+    /// Home and End: the start or end of the visual line holding the caret
+    /// (`getCursorLineView`'s beginIndex and endIndex).
+    fn book_line_edge(&mut self, end: bool) {
+        let shift = self.has_shift_down();
+        let (text, cursor) = match self.book.as_ref() {
+            Some(BookScreen::Edit {
+                pages,
+                page,
+                page_edit,
+                ..
+            }) => (pages[*page].clone(), page_edit.cursor),
+            _ => return,
+        };
+        let rows = self.page_rows(&text);
+        let (_, line) = self.caret_on(&text, &rows, cursor);
+        let (start, stop) = rows[line];
+        if let Some(BookScreen::Edit { page_edit, .. }) = self.book.as_mut() {
+            page_edit.set_cursor(if end { stop } else { start }, shift);
+        }
+    }
     /// Wrapped rows of a page as character ranges, the same breaks as `font.split`.
     fn page_rows(&self, page: &str) -> Vec<(usize, usize)> {
         let font = &self.gui.atlas.font;
@@ -600,8 +647,15 @@ impl Game<'_> {
         let pos = self.gui.atlas.font.fit(title, rel);
         title_edit.set_cursor(pos, shift);
     }
-    /// A click on the open page.
-    fn book_page_click(&mut self, origin_x: f32, origin_y: f32, mx: f32, my: f32) {
+    /// A click on the open page (`MultiLineEditBox.onClick`): a double click
+    /// selects the word before the cursor and leaves the cursor where it is.
+    fn book_page_click(&mut self, origin_x: f32, origin_y: f32, mx: f32, my: f32, double: bool) {
+        if double {
+            if let Some(BookScreen::Edit { page_edit, .. }) = self.book.as_mut() {
+                page_edit.select_word_at_cursor();
+            }
+            return;
+        }
         let shift = self.has_shift_down();
         let text = match self.book.as_ref() {
             Some(BookScreen::Edit { pages, page, .. }) => pages[*page].clone(),
@@ -804,6 +858,23 @@ impl Game<'_> {
         self.lectern_menu_done(key, &menu);
         self.follow_lectern();
     }
+    /// LecternScreen's Take Book: the menu's button 3. The book leaves the
+    /// lectern, so the screen closes (the server closes the menu once the
+    /// book is gone; a server's client closes at once rather than wait).
+    fn take_lectern_book(&mut self, key: (i32, i32, i32)) {
+        self.lectern_button(key, 3);
+        if self.may_build()
+            && matches!(
+                self.book,
+                Some(BookScreen::View {
+                    lectern: Some(_),
+                    ..
+                })
+            )
+        {
+            self.close_book();
+        }
+    }
     /// The `book` control command: a button of the open book or lectern
     /// screen (the page arrows, Take Book, Done), then its page.
     pub(super) fn book_control(
@@ -820,7 +891,7 @@ impl Game<'_> {
             Some("next") => self.turn_page(true),
             Some("back") => self.turn_page(false),
             Some("take") => match lectern {
-                Some(key) => self.lectern_button(key, 3),
+                Some(key) => self.take_lectern_book(key),
                 None => return Err("not a lectern".into()),
             },
             // The book and quill's buttons: Sign, then Sign and Close; Done
@@ -967,6 +1038,12 @@ impl Game<'_> {
         let b = HudBatch::new(size);
         let (w, left) = (b.width, ((b.width - 192.0) / 2.0).floor());
         let (mx, my) = self.cursor;
+        // MouseHandler: a click within 250 ms of the last one on this screen is a double click.
+        let now = std::time::Instant::now();
+        let double = self
+            .book_last_click
+            .is_some_and(|at| now.duration_since(at).as_millis() < 250);
+        self.book_last_click = Some(now);
         let inside =
             |x: f32, y: f32, bw: f32, bh: f32| mx >= x && my >= y && mx < x + bw && my < y + bh;
         let click = |game: &mut Self| {
@@ -1007,7 +1084,7 @@ impl Game<'_> {
                     click(self);
                     self.save_book(false);
                 } else if inside(left + 36.0, 32.0, 114.0, 14.0 * 9.0) {
-                    self.book_page_click(left + 36.0, 32.0, mx, my);
+                    self.book_page_click(left + 36.0, 32.0, mx, my, double);
                 }
             }
             Some(BookScreen::View {
@@ -1023,14 +1100,13 @@ impl Game<'_> {
                     self.turn_page(true);
                 } else if page > 0 && inside(left + 43.0, 159.0, 23.0, 13.0) {
                     self.turn_page(false);
-                } else if let Some(key) = lectern {
+                } else if let Some(key) = lectern.filter(|_| self.may_build()) {
                     if inside(w / 2.0 - 100.0, 196.0, 98.0, 20.0) {
                         click(self);
                         self.close_book();
                     } else if inside(w / 2.0 + 2.0, 196.0, 98.0, 20.0) {
                         click(self);
-                        // LecternScreen's Take Book: the menu's button 3.
-                        self.lectern_button(key, 3);
+                        self.take_lectern_book(key);
                     }
                 } else if inside((w - 200.0) / 2.0, 196.0, 200.0, 20.0) {
                     click(self);
@@ -1279,7 +1355,9 @@ impl Game<'_> {
                     }
                 }
                 page_buttons(batch, *page > 0, *page + 1 < pages.len());
-                if lectern.is_some() {
+                // LecternScreen.createMenuControls: Done and Take Book only with
+                // build permission, else BookViewScreen's wide Done.
+                if lectern.is_some() && self.may_build() {
                     button(batch, w / 2.0 - 100.0, 98.0, &tr("gui.done", "Done"), true);
                     button(
                         batch,
@@ -1296,6 +1374,16 @@ impl Game<'_> {
                         &tr("gui.done", "Done"),
                         true,
                     );
+                }
+                // HoveredTextEffects.TOOLTIP_AND_CURSOR: the hovered words'
+                // show_text hover event, as the chat shows it.
+                if let Some(hover) = pages
+                    .get(*page)
+                    .and_then(|t| self.book_style_at(t, left))
+                    .and_then(|s| s.hover)
+                {
+                    let lines = self.wrapped_rows(&hover, (w as i32 / 2).max(200));
+                    self.draw_tooltip_lines(batch, &lines, mx, my);
                 }
             }
         }

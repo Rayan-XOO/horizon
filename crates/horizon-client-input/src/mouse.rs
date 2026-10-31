@@ -324,6 +324,46 @@ pub fn ease_in_out(t: f64) -> f64 {
     0.5 - 0.5 * (std::f64::consts::PI * t).cos()
 }
 
+/// `MouseHandler.grabMouse` / `releaseMouse`: the mouse position is the
+/// window's centre whenever the pointer's grab state changes, so a screen
+/// opened from gameplay starts with the cursor in the middle. A release of
+/// an already free pointer (or a grab of an already grabbed one) leaves the
+/// position where it is, as vanilla does.
+pub fn mouse_position_after_grab_change(
+    grab: bool,
+    was_grabbed: bool,
+    size: [u32; 2],
+    scale: f32,
+) -> Option<(f32, f32)> {
+    if grab == was_grabbed {
+        None
+    } else {
+        Some((size[0] as f32 / 2.0 / scale, size[1] as f32 / 2.0 / scale))
+    }
+}
+
+/// `MacosUtil.setCtrlClickEmulatesRightClick`: with the option on (and only on
+/// macOS), a left click made with Control held is a right click, and so is
+/// its release, whatever Control does in between.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RightClickEmulation {
+    emulating: bool,
+}
+impl RightClickEmulation {
+    /// Whether the left button's `pressed` or released event is a right click.
+    /// `enabled` is the option on macOS.
+    pub fn is_right_click(&mut self, pressed: bool, control: bool, enabled: bool) -> bool {
+        if pressed {
+            self.emulating = enabled && control;
+        }
+        let right = self.emulating;
+        if !pressed {
+            self.emulating = false;
+        }
+        right
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +524,45 @@ mod tests {
         let mut look = MouseLook::default();
         assert_eq!(look.on_scroll(0.0, 0.4, false, 1.0), None);
         assert_eq!(look.on_scroll(0.0, 0.7, false, 1.0), Some((1, (0, 1))));
+    }
+    #[test]
+    fn the_mouse_position_is_the_centre_when_the_grab_changes() {
+        // A grab of a free pointer and a release of a grabbed one both put
+        // the position at the window's centre (`MouseHandler.grabMouse`,
+        // `MouseHandler.releaseMouse`).
+        assert_eq!(
+            mouse_position_after_grab_change(true, false, [1920, 1080], 1.0),
+            Some((960.0, 540.0))
+        );
+        assert_eq!(
+            mouse_position_after_grab_change(false, true, [1920, 1080], 2.0),
+            Some((480.0, 270.0))
+        );
+        // Without a change of the grab state the position stays where it is.
+        assert_eq!(
+            mouse_position_after_grab_change(false, false, [1920, 1080], 1.0),
+            None
+        );
+        assert_eq!(
+            mouse_position_after_grab_change(true, true, [1920, 1080], 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn control_click_is_a_right_click_until_released() {
+        let mut e = RightClickEmulation::default();
+        // The option off, or no Control: a left click stays one.
+        assert!(!e.is_right_click(true, true, false));
+        assert!(!e.is_right_click(false, true, false));
+        assert!(!e.is_right_click(true, false, true));
+        assert!(!e.is_right_click(false, true, true));
+        // Control held at the press: the press and the release are right clicks,
+        // even when Control was let go before the release.
+        assert!(e.is_right_click(true, true, true));
+        assert!(e.is_right_click(false, false, true));
+        // The next left click is its own.
+        assert!(!e.is_right_click(true, false, true));
+        assert!(!e.is_right_click(false, false, true));
     }
 }

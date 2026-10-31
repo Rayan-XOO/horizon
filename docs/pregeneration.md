@@ -26,6 +26,9 @@ ticking while the task runs, whoever is in it. The progress goes to the server l
 and to the player who started it, and once more when it is done. A task is not kept across a restart:
 start it again and the chunks already saved load instead of generating.
 
+On a server with `max_view_distance` set ([hosting](hosting.md#seeing-further-max_view_distance)), the
+players see the pregenerated chunks past `view_distance` as well: that ring only sends saved chunks.
+
 ## How it works
 
 - `horizon_client::pregen::Pregen` cuts the area into strips at most 256 chunks wide and sweeps each
@@ -40,7 +43,7 @@ start it again and the chunks already saved load instead of generating.
   (`DecorationOrder`), and this makes a task decorate in the same order however its jobs are timed and
   shared among the workers: the same seed gives the same chunks.
 - Between server ticks the server waits for the workers' results and hands out the next jobs at once
-  (`Streaming::wait`, `pump_pregen`), instead of once a tick: a chunk passes through five jobs
+  (`Streaming::wait`, `pump_chunks`), instead of once a tick: a chunk passes through five jobs
   (generate, decorate, finish, light, save), each needing its neighbours' earlier ones.
 
 The chunks of the band's outer ring are finished (FULL) but not lit, as at the edge of what a player has

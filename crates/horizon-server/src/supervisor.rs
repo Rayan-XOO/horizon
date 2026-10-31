@@ -89,6 +89,8 @@ pub fn run(dir: &Path) -> Result<(), String> {
     let config = Config::load(dir)?;
     let program = engine::program(&config, dir)?;
     let resources = engine::resources(&config, dir, Some(&program))?;
+    // Half-copied game files would only crash the engine again at every restart: name what is missing.
+    engine::check_prepared(&resources)?;
     // A game the system can't load would only crash again at every restart: say why at once.
     engine::check_starts(&program)?;
     let _lock = lock(dir)?;
@@ -401,7 +403,8 @@ fn check_updates(shared: Arc<Shared>) {
             thread::sleep(Duration::from_secs(60));
             loop {
                 if let (Ok(release), Some(current)) = (update::release(None), install.current()) {
-                    let newer = update::newer(&release.tag, &current).then_some(release.tag);
+                    let newer = update::update_available(&release.tag, &current)
+                        .then_some(release.tag);
                     let told = shared.update.lock().unwrap().available.clone();
                     if let Some(tag) = newer.as_ref().filter(|t| told.as_ref() != Some(*t)) {
                         note(

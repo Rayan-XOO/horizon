@@ -19,6 +19,7 @@ use horizon_protocol::{
 };
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -42,6 +43,8 @@ pub enum Event {
     Brand(String),
     /// The server runs mods' quiet commands (`horizon_protocol::quiet`).
     QuietCommands,
+    /// The server carries mod messages (`horizon_protocol::mod_net`).
+    ModNet,
     /// Configuration finished: the play state begins with these registries.
     Joined {
         registries: Arc<Dynamic>,
@@ -51,6 +54,9 @@ pub enum Event {
     Packet(Box<play::Clientbound>),
     /// A packet that failed to decode (skipped, like vanilla's skippable packets).
     DecodeError(String),
+    /// The server sent us back to configuration (`ClientboundStartConfigurationPacket`):
+    /// the game shows `ServerReconfigScreen` until the server logs it in again.
+    Reconfiguring,
     /// The server sent us back to configuration and finished it again.
     Reconfigured(Arc<Dynamic>),
     /// ClientboundResourcePackPushPacket, in configuration or in play.
@@ -61,6 +67,10 @@ pub enum Event {
     ShowDialog(horizon_world::nbt::Tag),
     /// `clear_dialog` in configuration.
     ClearDialog,
+    /// ClientboundCodeOfConductPacket: the game shows it and answers with
+    /// `Session::accept_code_of_conduct` or a disconnect; until then the
+    /// server waits in configuration.
+    CodeOfConduct(String),
     /// `ClientboundTransferPacket`: the server sent us to another address.
     /// The connection ends right after; the game reconnects there with the
     /// stored cookies.
@@ -101,10 +111,11 @@ impl Session {
         address: &str,
         name: &str,
         auth: Option<Arc<AuthSession>>,
-        view_distance: i8,
+        info: cfg::ClientInformation,
         lang: Arc<Language>,
+        resources: PathBuf,
     ) -> Self {
-        Self::start(address, name, auth, view_distance, lang, None, None)
+        Self::start(address, name, auth, info, lang, None, None, resources)
     }
     /// `ConnectScreen.startConnecting` for a `transfer`: the cookies the
     /// server stored carry to the new connection (`TransferState`).
@@ -112,37 +123,41 @@ impl Session {
         address: &str,
         name: &str,
         auth: Option<Arc<AuthSession>>,
-        view_distance: i8,
+        info: cfg::ClientInformation,
         lang: Arc<Language>,
         cookies: Cookies,
+        resources: PathBuf,
     ) -> Self {
         Self::start(
             address,
             name,
             auth,
-            view_distance,
+            info,
             lang,
             None,
             Some(cookies),
+            resources,
         )
     }
     /// Join an integrated server through memory (`Connection.connectToLocalServer`).
     pub fn connect_local(
         pipe: horizon_protocol::connection::Pipe,
         name: &str,
-        view_distance: i8,
+        info: cfg::ClientInformation,
         lang: Arc<Language>,
+        resources: PathBuf,
     ) -> Self {
-        Self::start("local", name, None, view_distance, lang, Some(pipe), None)
+        Self::start("local", name, None, info, lang, Some(pipe), None, resources)
     }
     fn start(
         address: &str,
         name: &str,
         auth: Option<Arc<AuthSession>>,
-        view_distance: i8,
+        info: cfg::ClientInformation,
         lang: Arc<Language>,
         local: Option<horizon_protocol::connection::Pipe>,
         cookies: Option<Cookies>,
+        resources: PathBuf,
     ) -> Self {
         let (send, events) = channel();
         let writer = Arc::new(Mutex::new(None));
@@ -164,7 +179,7 @@ impl Session {
                     &address_owned,
                     &name_owned,
                     auth.as_deref(),
-                    view_distance,
+                    info,
                     &lang,
                     &send,
                     &thread_writer,
@@ -172,6 +187,7 @@ impl Session {
                     &thread_counters,
                     &thread_cookies,
                     transferred,
+                    &resources,
                 );
                 let from_server = result.is_ok();
                 let reason = result.unwrap_or_else(|e| e);
@@ -262,13 +278,25 @@ impl Session {
             w.shutdown();
         }
     }
+    /// ServerboundAcceptCodeOfConductPacket, sent in configuration.
+    pub fn accept_code_of_conduct(&self) {
+        let mut writer = self.writer.lock().unwrap();
+        if let Some(w) = writer.as_mut()
+            && w.send(&cfg::Serverbound::AcceptCodeOfConduct(Empty).encode())
+                .is_err()
+        {
+            w.shutdown();
+        }
+    }
+    /// `Connection.disconnect`: the socket closes and the game goes on at once.
+    /// The reader thread is left to end on its own: on Windows a shutdown
+    /// doesn't wake a read already waiting, so joining it held the window until
+    /// the server dropped the connection, many seconds later.
     pub fn disconnect(&mut self) {
         if let Some(w) = self.writer.lock().unwrap().take() {
             w.shutdown();
         }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        drop(self.thread.take());
     }
 }
 impl Drop for Session {
@@ -351,6 +379,52 @@ fn tr(lang: &Language, key: &str) -> String {
     lang.get(key).cloned().unwrap_or_else(|| key.to_owned())
 }
 
+/// `Connection$1.initChannel`: a client socket's pipeline starts with
+/// `ReadTimeoutHandler(30)`. A server sends a keep-alive every 15 s, so one
+/// that sends nothing for 30 s has frozen or dropped off the network.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `Connection.connect`: the socket to a server, with `read_timeout`
+/// ([`READ_TIMEOUT`]) on every read. The friends relay supplies a concrete
+/// endpoint, not a Minecraft hostname, so it skips the SRV lookup.
+fn connect_tcp(
+    host: &str,
+    port: u16,
+    relayed: bool,
+    read_timeout: Duration,
+) -> Result<Connection, String> {
+    let c = if relayed {
+        Connection::connect(host, port, Duration::from_secs(10))
+    } else {
+        Connection::connect_server(host, port, Duration::from_secs(10))
+    }
+    .map_err(|e| e.to_string())?;
+    c.reader
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|e| e.to_string())?;
+    Ok(c)
+}
+
+/// `Connection.exceptionCaught`: a read that timed out ends with
+/// `disconnect.timeout`, any other failure with `disconnect.genericReason`
+/// ("Internal Exception: ..."); a stream the server closed ends with
+/// `disconnect.endOfStream` (`Connection.channelInactive`).
+fn connection_lost(e: horizon_protocol::Error, lang: &Language) -> String {
+    if e.is_timed_out() {
+        tr(lang, "disconnect.timeout")
+    } else if e.is_end_of_stream() {
+        tr(lang, "disconnect.endOfStream")
+    } else {
+        plain(
+            &translatable(
+                "disconnect.genericReason",
+                &[&format!("Internal Exception: {e}")],
+            ),
+            lang,
+        )
+    }
+}
+
 /// The whole connection. Ok: why it ended for good (the server's reason, or
 /// a refusal no retry fixes); Err: the connection failed.
 fn run(
@@ -358,7 +432,7 @@ fn run(
     address: &str,
     name: &str,
     auth: Option<&AuthSession>,
-    view_distance: i8,
+    info: cfg::ClientInformation,
     lang: &Language,
     send: &Sender<Event>,
     shared_writer: &Mutex<Option<ConnWriter>>,
@@ -366,6 +440,7 @@ fn run(
     shared_counters: &Mutex<Option<Arc<Counters>>>,
     cookies: &Cookies,
     transferred: bool,
+    resources: &Path,
 ) -> Result<String, String> {
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
@@ -380,17 +455,11 @@ fn run(
                 target
             }
         };
-        let c = if address.starts_with(FRIEND) {
-            // The friends relay supplies a concrete endpoint, not a Minecraft hostname.
-            Connection::connect(&host, port, Duration::from_secs(10))
-        } else {
-            Connection::connect_server(&host, port, Duration::from_secs(10))
-        }
-        .map_err(|e| e.to_string())?;
+        let c = connect_tcp(&host, port, address.starts_with(FRIEND), READ_TIMEOUT)?;
         (host, port, c)
     };
     *shared_counters.lock().unwrap() = Some(c.reader.counters.clone());
-    let e = |e: horizon_protocol::Error| e.to_string();
+    let e = |e: horizon_protocol::Error| connection_lost(e, lang);
     c.send(
         &handshake::Serverbound::Intention(handshake::Intention {
             protocol: PROTOCOL_VERSION,
@@ -487,10 +556,8 @@ fn run(
         }
     };
     status(send, "Joining world...");
-    c.send(
-        &cfg::Serverbound::ClientInformation(cfg::ClientInformation::new(view_distance)).encode(),
-    )
-    .map_err(e)?;
+    c.send(&cfg::Serverbound::ClientInformation(info).encode())
+        .map_err(e)?;
     c.send(
         &cfg::Serverbound::CustomPayload(cfg::CustomPayload {
             channel: "minecraft:brand".into(),
@@ -501,13 +568,29 @@ fn run(
     .map_err(e)?;
     let (mut reader, writer) = c.split();
     *shared_writer.lock().unwrap() = Some(writer);
-    let registries = configure(&mut reader, shared_writer, configuring, lang, send, cookies)?;
+    let registries = configure(
+        &mut reader,
+        shared_writer,
+        configuring,
+        lang,
+        send,
+        cookies,
+        resources,
+    )?;
     let _ = send.send(Event::Joined {
         registries: Arc::new(registries),
         uuid: profile.uuid,
         name: profile.name,
     });
-    receive_play(&mut reader, shared_writer, configuring, lang, send, cookies)
+    receive_play(
+        &mut reader,
+        shared_writer,
+        configuring,
+        lang,
+        send,
+        cookies,
+        resources,
+    )
 }
 
 fn receive_play(
@@ -517,9 +600,10 @@ fn receive_play(
     lang: &Language,
     send: &Sender<Event>,
     cookies: &Cookies,
+    resources: &Path,
 ) -> Result<String, String> {
     loop {
-        let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
+        let (id, payload) = reader.recv().map_err(|e| connection_lost(e, lang))?;
         let packet = match play::Clientbound::decode(id, &payload) {
             Ok(p) => p,
             Err(err) => {
@@ -548,12 +632,20 @@ fn receive_play(
                 let _ = send.send(Event::PackPop(p.id));
             }
             play::Clientbound::StartConfiguration(_) => {
+                let _ = send.send(Event::Reconfiguring);
                 if let Some(w) = shared_writer.lock().unwrap().as_mut() {
                     let _ = w.send(&play::Serverbound::ConfigurationAcknowledged(Empty).encode());
                     configuring.store(true, Ordering::Relaxed);
                 }
-                let registries =
-                    configure(reader, shared_writer, configuring, lang, send, cookies)?;
+                let registries = configure(
+                    reader,
+                    shared_writer,
+                    configuring,
+                    lang,
+                    send,
+                    cookies,
+                    resources,
+                )?;
                 let _ = send.send(Event::Reconfigured(Arc::new(registries)));
             }
             // ClientCommonPacketListenerImpl.handleRequestCookie: the stored
@@ -602,18 +694,27 @@ fn configure(
     lang: &Language,
     send: &Sender<Event>,
     cookies: &Cookies,
+    resources: &Path,
 ) -> Result<Dynamic, String> {
     let mut registries = Dynamic::default();
     let reply = |p: cfg::Serverbound| -> Result<(), String> {
         match writer.lock().unwrap().as_mut() {
-            Some(w) => w.send(&p.encode()).map_err(|e| e.to_string()),
+            Some(w) => w.send(&p.encode()).map_err(|e| connection_lost(e, lang)),
             None => Err("Disconnected".into()),
         }
     };
     loop {
-        let (id, payload) = reader.recv().map_err(|e| e.to_string())?;
-        match cfg::Clientbound::decode(id, &payload).map_err(|e| e.to_string())? {
+        let (id, payload) = reader.recv().map_err(|e| connection_lost(e, lang))?;
+        match cfg::Clientbound::decode(id, &payload).map_err(|e| connection_lost(e, lang))? {
             cfg::Clientbound::KeepAlive(k) => reply(cfg::Serverbound::KeepAlive(k))?,
+            cfg::Clientbound::CustomPayload(p) if p.channel == crate::content_identity::CHANNEL => {
+                let hash = crate::content_identity::identity(resources)
+                    .map_err(|_| crate::content_identity::MISMATCH.to_string())?;
+                reply(cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                    channel: crate::content_identity::CHANNEL.into(),
+                    data: hash.to_vec(),
+                }))?;
+            }
             cfg::Clientbound::CustomPayload(p) => receive_brand(&p, send),
             cfg::Clientbound::Ping(p) => reply(cfg::Serverbound::Pong(p))?,
             // Know no packs: the server then sends every registry entry in full.
@@ -623,8 +724,9 @@ fn configure(
                 }))?
             }
             cfg::Clientbound::RegistryData(r) => registries.add(r),
-            cfg::Clientbound::CodeOfConduct(_) => {
-                reply(cfg::Serverbound::AcceptCodeOfConduct(Empty))?
+            cfg::Clientbound::UpdateTags(t) => registries.add_tags(&t),
+            cfg::Clientbound::CodeOfConduct(c) => {
+                let _ = send.send(Event::CodeOfConduct(c.text));
             }
             // The game answers: it may prompt the player first.
             cfg::Clientbound::ResourcePackPush(p) => {
@@ -665,7 +767,7 @@ fn configure(
                 let mut w = writer.lock().unwrap();
                 let w = w.as_mut().ok_or("Disconnected")?;
                 w.send(&cfg::Serverbound::FinishConfiguration(Empty).encode())
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| connection_lost(e, lang))?;
                 configuring.store(false, Ordering::Relaxed);
                 return Ok(registries);
             }
@@ -681,6 +783,8 @@ fn receive_brand(payload: &cfg::CustomPayload, send: &Sender<Event>) {
         let _ = send.send(Event::Brand(brand));
     } else if payload.channel == horizon_protocol::quiet::CHANNEL {
         let _ = send.send(Event::QuietCommands);
+    } else if payload.channel == horizon_protocol::mod_net::CHANNEL {
+        let _ = send.send(Event::ModNet);
     }
 }
 
@@ -779,9 +883,307 @@ pub fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128
     Ok((json, start.elapsed().as_millis()))
 }
 
+/// What a server that answers only the legacy ping reports
+/// (`LegacyServerPinger.Output.handleResponse`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LegacyStatus {
+    pub protocol: i32,
+    pub version: String,
+    pub motd: String,
+    pub players: i32,
+    pub max_players: i32,
+}
+
+/// `Mth.getInt(str, default)`.
+fn legacy_int(s: &str, default: i32) -> i32 {
+    s.parse().unwrap_or(default)
+}
+
+/// `LegacyServerPinger.channelRead0` on the string after the 0xFF byte: split
+/// on NUL (at most 6 parts) and the first part must be `§1`.
+fn parse_legacy_status(text: &str) -> Option<LegacyStatus> {
+    let parts: Vec<&str> = text.splitn(6, '\0').collect();
+    if parts.first() != Some(&"\u{a7}1") || parts.len() < 6 {
+        return None;
+    }
+    Some(LegacyStatus {
+        protocol: legacy_int(parts[1], 0),
+        version: parts[2].to_owned(),
+        motd: parts[3].to_owned(),
+        players: legacy_int(parts[4], -1),
+        max_players: legacy_int(parts[5], -1),
+    })
+}
+
+/// `LegacyProtocolUtils.writeLegacyString`: the UTF-16 length, then UTF-16BE.
+fn write_legacy_string(out: &mut Vec<u8>, s: &str) {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    out.extend_from_slice(&(units.len() as u16).to_be_bytes());
+    for unit in units {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+}
+
+/// `LegacyServerPinger.channelActive`: the 1.6 `0xFE 0x01 0xFA MC|PingHost` request.
+fn legacy_ping_request(host: &str, port: u16) -> Vec<u8> {
+    let mut out = vec![254, 1, 250];
+    write_legacy_string(&mut out, "MC|PingHost");
+    let mut payload = vec![127];
+    write_legacy_string(&mut payload, host);
+    payload.extend_from_slice(&i32::from(port).to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(&payload);
+    out
+}
+
+/// `ServerStatusPinger.pingLegacyServer`: ask a server that does not answer
+/// the status handshake with the pre-1.7 ping.
+pub fn ping_legacy(address: &str, timeout: Duration) -> Result<LegacyStatus, String> {
+    let (host, port) = parse_address(address).ok_or("Invalid address")?;
+    let mut c = Connection::connect_server(&host, port, timeout).map_err(|e| e.to_string())?;
+    c.reader
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| e.to_string())?;
+    let e = |e: horizon_protocol::Error| e.to_string();
+    c.writer
+        .write_raw(&legacy_ping_request(&host, port))
+        .map_err(e)?;
+    let head = c.reader.read_raw(3).map_err(e)?;
+    if head[0] != 255 {
+        return Err("unexpected legacy reply".into());
+    }
+    let units = usize::from(u16::from_be_bytes([head[1], head[2]]));
+    let bytes = c.reader.read_raw(units * 2).map_err(e)?;
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| u16::from_be_bytes(*p))
+        .collect();
+    parse_legacy_status(&String::from_utf16_lossy(&units))
+        .ok_or_else(|| "unexpected legacy reply".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_ping_request_is_the_1_6_ping_host_packet() {
+        let bytes = legacy_ping_request("a.b", 25565);
+        assert_eq!(&bytes[..3], &[254, 1, 250]);
+        // "MC|PingHost": 11 chars.
+        assert_eq!(&bytes[3..5], &[0, 11]);
+        let after = 5 + 22;
+        // payload: 127, string (2 + 6 bytes), port.
+        assert_eq!(&bytes[after..after + 2], &[0, 1 + 2 + 6 + 4]);
+        assert_eq!(bytes[after + 2], 127);
+        assert_eq!(&bytes[after + 3..after + 5], &[0, 3]);
+        assert_eq!(&bytes[bytes.len() - 4..], &25565i32.to_be_bytes());
+    }
+
+    #[test]
+    fn legacy_status_is_split_on_nul_after_the_section_one_marker() {
+        let status =
+            parse_legacy_status("\u{a7}1\x00127\x001.6.4\x00A \u{a7}aserver\x003\x0020").unwrap();
+        assert_eq!(
+            status,
+            LegacyStatus {
+                protocol: 127,
+                version: "1.6.4".into(),
+                motd: "A \u{a7}aserver".into(),
+                players: 3,
+                max_players: 20,
+            }
+        );
+        // Unparsable counts are -1, a wrong marker is no status.
+        let status = parse_legacy_status("\u{a7}1\x00x\x00v\x00m\x00?\x00?").unwrap();
+        assert_eq!(
+            (status.protocol, status.players, status.max_players),
+            (0, -1, -1)
+        );
+        assert!(parse_legacy_status("kick\x00127\x00v\x00m\x001\x002").is_none());
+    }
+
+    /// The en_us text of the disconnect reasons.
+    fn disconnect_language() -> Language {
+        [
+            ("disconnect.timeout", "Timed out"),
+            ("disconnect.endOfStream", "End of stream"),
+            ("disconnect.genericReason", "%s"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+    }
+
+    #[test]
+    fn a_server_that_stops_answering_times_out() {
+        // The server accepts and then sends nothing, like a frozen server
+        // or a network gone without a reset.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let held = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        let c = connect_tcp("127.0.0.1", port, true, Duration::from_millis(300)).unwrap();
+        let _server = held.join().unwrap().unwrap();
+        let (mut reader, writer) = c.split();
+        let (done, result) = channel();
+        std::thread::spawn(move || {
+            let (send, _events) = channel();
+            let _ = done.send(receive_play(
+                &mut reader,
+                &Mutex::new(Some(writer)),
+                &AtomicBool::new(false),
+                &disconnect_language(),
+                &send,
+                &Cookies::default(),
+                Path::new("."),
+            ));
+        });
+        let ended = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the connection never timed out");
+        assert_eq!(ended, Err("Timed out".to_owned()));
+    }
+
+    #[test]
+    fn lost_connections_read_like_vanillas_disconnect_reasons() {
+        let lang = disconnect_language();
+        let lost = |e| connection_lost(e, &lang);
+        assert_eq!(lost(horizon_protocol::Error::timed_out()), "Timed out");
+        assert_eq!(
+            lost(horizon_protocol::Error::end_of_stream()),
+            "End of stream"
+        );
+        assert_eq!(
+            lost(horizon_protocol::Error::new("Bad VarInt")),
+            "Internal Exception: Bad VarInt"
+        );
+    }
+
+    #[test]
+    fn configuration_answers_the_content_identity_challenge() {
+        let root =
+            std::env::temp_dir().join(format!("horizon-content-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("facts.json"),
+            br#"{"states":[["minecraft:stone",false,false,"Block{minecraft:stone}",{"id":"minecraft:stone"}]]}"#,
+        )
+        .unwrap();
+        let expected = crate::content_identity::identity(&root).unwrap();
+        let (client, server) = horizon_protocol::connection::Pipe::pair();
+        let (mut reader, writer) = Connection::local(client).split();
+        let writer = Mutex::new(Some(writer));
+        let thread = std::thread::spawn(move || {
+            let (send, _events) = channel();
+            configure(
+                &mut reader,
+                &writer,
+                &AtomicBool::new(true),
+                &Language::new(),
+                &send,
+                &Cookies::default(),
+                &root,
+            )
+        });
+        let mut server = Connection::local(server);
+        server
+            .send(
+                &cfg::Clientbound::CustomPayload(cfg::CustomPayload {
+                    channel: crate::content_identity::CHANNEL.into(),
+                    data: vec![],
+                })
+                .encode(),
+            )
+            .unwrap();
+        server
+            .send(&cfg::Clientbound::Ping(cfg::Ping { id: 17 }).encode())
+            .unwrap();
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::CustomPayload(cfg::CustomPayload {
+                channel: crate::content_identity::CHANNEL.into(),
+                data: expected.to_vec(),
+            })
+        );
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::Pong(cfg::Ping { id: 17 })
+        );
+        server
+            .send(&cfg::Clientbound::FinishConfiguration(Empty).encode())
+            .unwrap();
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(
+            cfg::Serverbound::decode(id, &body).unwrap(),
+            cfg::Serverbound::FinishConfiguration(Empty)
+        );
+        assert!(thread.join().unwrap().is_ok());
+        std::fs::remove_dir_all(
+            std::env::temp_dir().join(format!("horizon-content-identity-{}", std::process::id())),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn disconnect_and_drop_do_not_wait_for_a_stalled_reader() {
+        // A reader can remain stalled after Windows socket shutdown. It must
+        // not delay either an explicit leave or Session's Drop on the UI thread.
+        for explicit_disconnect in [true, false] {
+            let (client, _server) = horizon_protocol::connection::Pipe::pair();
+            let (_reader, writer) = Connection::local(client).split();
+            let writer = Arc::new(Mutex::new(Some(writer)));
+            let (_send, events) = channel();
+            let (release, stalled) = channel();
+            let (finished, completed) = channel();
+            let thread = std::thread::spawn(move || {
+                let _ = stalled.recv_timeout(std::time::Duration::from_secs(3));
+                let _ = finished.send(());
+            });
+            let mut session = Session {
+                events,
+                writer: writer.clone(),
+                configuring: Arc::new(AtomicBool::new(false)),
+                thread: Some(thread),
+                address: "local".into(),
+                name: "TestPlayer".into(),
+                counters: Arc::new(Mutex::new(None)),
+                cookies: Cookies::default(),
+                debug: false,
+            };
+            let started = std::time::Instant::now();
+            if explicit_disconnect {
+                session.disconnect();
+                session.disconnect(); // Repeated cleanup is harmless.
+            }
+            drop(session);
+            let elapsed = started.elapsed();
+            let reader_still_pending = completed.try_recv().is_err();
+            // Always release the synthetic reader before asserting, even if
+            // a future regression restores the blocking join.
+            let _ = release.send(());
+            if reader_still_pending {
+                completed
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap();
+            }
+            assert!(
+                writer.lock().unwrap().is_none(),
+                "connection was not closed"
+            );
+            assert!(
+                reader_still_pending,
+                "disconnect waited for the stalled reader"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(1),
+                "disconnect took {elapsed:?}"
+            );
+        }
+    }
 
     #[test]
     fn pings_wait_behind_teleports_but_keepalives_do_not_wait_for_the_game() {
@@ -798,6 +1200,7 @@ mod tests {
                 &Language::new(),
                 &send,
                 &Cookies::default(),
+                Path::new("."),
             )
         });
         let mut server = Connection::local(server);
@@ -860,6 +1263,7 @@ mod tests {
                 &Language::new(),
                 &send,
                 &Cookies::default(),
+                Path::new("."),
             )
         });
         let mut server = Connection::local(server);
@@ -906,6 +1310,7 @@ mod tests {
                 &Language::new(),
                 &send,
                 &thread_cookies,
+                Path::new("."),
             )
         });
         let mut server = Connection::local(server);
