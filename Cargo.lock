@@ -308,6 +308,7 @@ version = "0.1.0"
 dependencies = [
  "horizon-mods",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -1086,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-android"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -1107,6 +1108,7 @@ dependencies = [
  "horizon-hdr",
  "horizon-items",
  "horizon-mods",
+ "horizon-native-abi",
  "horizon-prepare",
  "horizon-protocol",
  "horizon-server-files",
@@ -1194,6 +1196,7 @@ dependencies = [
  "horizon-hdr",
  "horizon-items",
  "horizon-mods",
+ "horizon-native-abi",
  "horizon-protocol",
  "horizon-server-files",
  "horizon-shader-api",
@@ -1360,6 +1363,13 @@ dependencies = [
  "toml",
  "wasmparser",
  "zip",
+]
+
+[[package]]
+name = "horizon-native-abi"
+version = "0.1.0"
+dependencies = [
+ "libloading",
 ]
 
 [[package]]

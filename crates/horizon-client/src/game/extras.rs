@@ -254,6 +254,7 @@ impl Game<'_> {
             extras_hud::draw_minimap(batch, atlas, &mut corners, &look);
         }
         self.native_hud(batch, &mut corners);
+        self.prebuilt_hud(batch, &mut corners);
     }
     /// The height the status effect icons take at the top right
     /// (`Hud.extractEffects`: beneficial at y 1, harmful at y 26).

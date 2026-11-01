@@ -40,7 +40,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     private EditText clientId;
     private LinearLayout codeBox, advancedBox;
     private TextView code, codeHint;
-    private Button copy, browser, advanced;
+    private Button copy, browser, advanced, mods;
     private String verifyUri = "https://www.microsoft.com/link";
     private boolean slim;
 
@@ -98,6 +98,13 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         systemDriver = Ui.button(this, Ui.t("Системный драйвер", "System driver"), false);
         systemDriver.setOnClickListener(this);
         card.addView(systemDriver, Ui.gap(this, 8));
+        card.addView(Ui.text(this, Ui.t(
+                "Моды: .hnmod со сборкой для Android или .hmod. Также можно положить файл в Android/data/dev.horizonlab.horizon/files/mods/.",
+                "Mods: a .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),
+                12, Ui.MUTED, false), Ui.gap(this, 10));
+        mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
+        mods.setOnClickListener(this);
+        card.addView(mods, Ui.gap(this, 8));
         Ui.section(card, Ui.t("Экран", "Screen"));
         Button cutout = Ui.button(this, cutoutLabel(), false);
         cutout.setOnClickListener(new View.OnClickListener() {
@@ -330,6 +337,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             microsoft.setEnabled(true);
             message.setTextColor(Ui.GREEN);
             message.setText(Ui.t("Вышли. Перезапустите игру.", "Signed out. Restart the game."));
+        } else if (v == mods) {
+            startActivity(new Intent(this, ModImportActivity.class));
         } else if (v == back) {
             finish();
         }

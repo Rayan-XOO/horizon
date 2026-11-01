@@ -1,6 +1,6 @@
 [package]
 name = "horizon-android"
-version = "0.3.7"
+version = "0.3.8"
 edition.workspace = true
 license.workspace = true
 rust-version = "1.90"
@@ -40,6 +40,8 @@ horizon-friends = { path = "../horizon-friends" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
 # Their runtime is the `mods` feature.
 horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
+# Prebuilt native mods (`.hnmod` libraries, docs/android-mods.md): where the game opens them.
+horizon-native-abi = { path = "../horizon-native-abi", features = ["host"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"

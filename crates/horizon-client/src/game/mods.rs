@@ -201,8 +201,13 @@ impl Game<'_> {
             .and_then(|exe| std::fs::read_to_string(exe.with_file_name(BUILD_INFO)).ok())
             .unwrap_or_default();
         let native_dir = Self::options_path().with_file_name(mod_list::NATIVE_DIR);
-        let unbuilt = not_built(&native_dir, &built, &self.settings.mods.installed);
-        self.settings.mods.installed.extend(unbuilt);
+        if super::prebuilt_mods::ON {
+            // This game can't be built with mods: it opens the libraries they carry instead.
+            self.start_prebuilt_mods();
+        } else {
+            let unbuilt = not_built(&native_dir, &built, &self.settings.mods.installed);
+            self.settings.mods.installed.extend(unbuilt);
+        }
         let installed = &self.settings.mods.installed;
         self.mods.stopped = installed
             .iter()

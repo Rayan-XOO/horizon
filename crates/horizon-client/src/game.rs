@@ -169,6 +169,7 @@ mod moving_pistons;
 mod music;
 mod names;
 mod native_hooks;
+mod prebuilt_mods;
 mod native_lifecycle;
 mod native_menus;
 mod native_mobs;
@@ -2340,6 +2341,7 @@ struct Game<'a> {
     extras: extras::ExtrasState,
     /// Horizon mods (`game/mods.rs`), none running unless turned on.
     mods: mods::ModsState,
+    prebuilt: prebuilt_mods::PrebuiltMods,
     /// Every item and recipe, for mods (`game/native_recipes.rs`), made once.
     recipe_tables: native_recipes::RecipeTables,
     /// The item panel beside container screens (`game/native_panel.rs`).
@@ -6237,6 +6239,7 @@ impl Game<'_> {
         self.update_totem_ready();
         self.tick_command_extras();
         self.native_tick();
+        self.prebuilt_tick();
         self.tell_native_now();
         let camera_eye = self.camera_eye_height();
         let stick = self.pad_move();
@@ -16114,6 +16117,7 @@ impl<'a> Game<'a> {
             frame_graph: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
+            prebuilt: Default::default(),
             recipe_tables: Default::default(),
             panel: Default::default(),
             native_shaders: Default::default(),

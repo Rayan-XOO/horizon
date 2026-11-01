@@ -324,7 +324,7 @@ impl Package {
     pub fn read(path: &Path) -> Result<Self, String> {
         if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("hnmod")) {
             return Err(
-                "native mod (.hnmod): the phone cannot compile it. Download the .hmod file if the mod has one, or build it with the PC launcher"
+                "native mod (.hnmod): put it in the mods folder instead; on a phone it runs when it carries an Android build (docs/android-mods.md)"
                     .into(),
             );
         }

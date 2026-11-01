@@ -77,6 +77,13 @@ folder is used instead (reachable only with `adb shell run-as` on a debug build)
   9 Select, 10 Start, 11 LS, 12 RS.
 - The touch controls hide while a controller, keyboard or mouse plays and come back on the next touch.
 
+## Mods
+
+`.hnmod` files that carry an Android build (`binaries` → `aarch64-linux-android`) run on the phone: share or
+open one with Horizon, use Profile → Install a mod, or copy it into `files/mods/`. Source-only `.hnmod` files
+need the PC launcher's compiler; Options → Mods says so. `.hmod` content mods go into `files/horizon-mods/`.
+How to build one: [docs/android-mods.md](docs/android-mods.md).
+
 ## What differs from desktop
 
 | Area | Android |

@@ -39,3 +39,5 @@
 *.jks
 *.keystore
 .horizon-keys/
+/mods/hello-android/target/
+/mods/hello-android/Cargo.lock
