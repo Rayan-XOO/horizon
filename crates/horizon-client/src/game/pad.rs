@@ -65,7 +65,11 @@ mod hardware {
     use serde_json::{Value, json};
 
     impl Pads {
+        /// On Android, the controllers the activity's input events report (`android_input`).
         pub(super) fn read(&mut self) -> PadState {
+            #[cfg(target_os = "android")]
+            return crate::game::android_input::pad_state();
+            #[cfg(not(target_os = "android"))]
             PadState::default()
         }
     }
@@ -116,12 +120,17 @@ impl Game<'_> {
         }
         let threshold = self.settings.controller.trigger_threshold;
         let edges = self.pad.edges.update(&state, threshold);
+        // On Android the touch controls drive the virtual pad: only the hardware one counts.
+        let hardware_active = hardware.active(&self.settings.controller);
         if state.active(&self.settings.controller) {
             self.last_input = Instant::now();
             // Touch is not a controller: no pad cursor, glyphs or pad keyboard for it.
-            if !touch_only {
+            if !touch_only && (hardware_active || !cfg!(target_os = "android")) {
                 self.pad.in_use = true;
             }
+        }
+        if hardware_active && cfg!(target_os = "android") {
+            self.touch.hardware = true;
         }
         self.pad.state = state;
         if !touch_only {

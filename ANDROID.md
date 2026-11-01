@@ -65,9 +65,17 @@ folder is used instead (reachable only with `adb shell run-as` on a debug build)
   top-right corner = pause (Start), just left of it = inventory; right edge from top to bottom =
   next hotbar slot, use/place, attack/break, then at the bottom jump (outermost) and sneak.
   They go through the virtual controller, so they follow the controller bindings (`horizon-controller.txt`).
-- **Keyboard/mouse** (USB/Bluetooth) arrive through winit like on desktop.
-- **Gamepads:** gilrs has no Android backend, so the `controllers` feature is off. A Bluetooth pad's buttons
-  may reach the game as key events only; not mapped yet.
+- **Keyboard** (USB/Bluetooth) arrives through winit like on desktop (WASD, Esc, F-keys, typing into
+  text fields). The system Back key closes a screen or pauses; it never leaves the game.
+- **Mouse:** clicks, wheel and the pointer go to the game as on desktop. While playing, the pointer is
+  captured (`View.requestPointerCapture`) and turns the view; menus release it.
+- **Gamepads:** gilrs has no Android backend, so `src/game/android_input.rs` reads the activity's own
+  events (KEYCODE_BUTTON_*, AXIS_X/Y, Z/RZ or RX/RY, LTRIGGER/RTRIGGER, GAS/BRAKE, HAT_X/HAT_Y) through an
+  input filter added to winit (`third_party/winit`) and hands them to the same pad code as the desktop:
+  bindings from `horizon-controller.txt`, deadzones, the menu cursor. DirectInput pads without a key
+  layout (BUTTON_1..12) are read in the usual order: 1 X, 2 A, 3 B, 4 Y, 5 LB, 6 RB, 7 LT, 8 RT,
+  9 Select, 10 Start, 11 LS, 12 RS.
+- The touch controls hide while a controller, keyboard or mouse plays and come back on the next touch.
 
 ## What differs from desktop
 

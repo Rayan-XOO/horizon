@@ -60,6 +60,8 @@ large_enum_variant = "allow"
 # Drop this and the folder once a wgpu release has these fixes.
 [patch.crates-io]
 wgpu-hal = { path = "third_party/wgpu-hal" }
+# winit with an input filter on Android (gamepad and mouse events; third_party/winit).
+winit = { path = "third_party/winit" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.

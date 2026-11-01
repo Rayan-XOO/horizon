@@ -17,8 +17,8 @@ import android.view.inputmethod.InputMethodManager;
  * NativeActivity plus a text bridge: an invisible view takes the soft
  * keyboard's text (any script, not only what maps to key codes) and hands it
  * to the game (libhorizon's nativeText/nativeKey). The game calls
- * showKeyboard while a text field has focus. The window draws under the
- * display cutout.
+ * showKeyboard while a text field has focus, and setPointerCapture while a
+ * mouse plays. The window draws under the display cutout.
  */
 public class HorizonActivity extends NativeActivity {
     static {
@@ -154,6 +154,23 @@ public class HorizonActivity extends NativeActivity {
                     }
                 }
                 startActivity(new android.content.Intent(HorizonActivity.this, ProfileActivity.class));
+            }
+        });
+    }
+
+    /**
+     * Called from the game thread: capture the mouse while playing (relative movement turns the
+     * view, no pointer is drawn) and let it go in menus.
+     */
+    public void setPointerCapture(final boolean on) {
+        runOnUiThread(new Runnable() {
+            public void run() {
+                View v = getWindow().getDecorView();
+                if (on) {
+                    v.requestPointerCapture();
+                } else if (v.hasPointerCapture()) {
+                    v.releasePointerCapture();
+                }
             }
         });
     }

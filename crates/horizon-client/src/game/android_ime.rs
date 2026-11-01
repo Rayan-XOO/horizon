@@ -141,3 +141,21 @@ pub(super) fn open_profile() {
         log::warn!("Horizon: profile screen: {e}");
     }
 }
+
+/// Capture the mouse pointer (relative movement, no pointer drawn) or let it go
+/// (`HorizonActivity.setPointerCapture`).
+pub(super) fn pointer_capture(on: bool) {
+    let Some(app) = super::ANDROID_APP.get() else {
+        return;
+    };
+    let result = (|| -> jni::errors::Result<()> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast())? };
+        let mut env = vm.attach_current_thread_permanently()?;
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        env.call_method(&activity, "setPointerCapture", "(Z)V", &[jni::objects::JValue::Bool(on.into())])?;
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log::warn!("Horizon: pointer capture: {e}");
+    }
+}

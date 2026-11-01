@@ -190,6 +190,8 @@ mod packs;
 mod pad;
 #[cfg(target_os = "android")]
 mod android_ime;
+#[cfg(target_os = "android")]
+mod android_input;
 mod touch;
 mod pad_menu;
 mod paintings;
@@ -14525,6 +14527,8 @@ impl ApplicationHandler for Game<'_> {
                 server.set_paused(true);
             }
             self.touch_release_all();
+            android_input::reset();
+            self.touch.pointer_captured = None;
             self.audio.set_output_paused(true);
         }
         if let Some(renderer) = &mut self.renderer {
@@ -15678,6 +15682,8 @@ impl ApplicationHandler for Game<'_> {
             return;
         }
         self.touch_frame();
+        #[cfg(target_os = "android")]
+        self.android_input_frame(event_loop);
         self.poll_pads(event_loop);
         self.pause_if_inactive();
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
@@ -17456,6 +17462,7 @@ fn new_event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoo
     {
         use winit::platform::android::EventLoopBuilderExtAndroid;
         let app = ANDROID_APP.get().expect("android_main sets the activity").clone();
+        android_input::install();
         EventLoop::builder().with_android_app(app).build()
     }
     #[cfg(not(target_os = "android"))]

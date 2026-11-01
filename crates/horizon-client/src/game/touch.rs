@@ -305,6 +305,12 @@ pub(super) struct Touches {
     ime_shown: bool,
     /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
     ime_retap: bool,
+    /// A controller, keyboard or mouse plays: the controls are hidden until a touch.
+    pub(super) hardware: bool,
+    /// A mouse has been used: the pointer is captured while playing.
+    pub(super) mouse: bool,
+    /// The pointer capture last asked for.
+    pub(super) pointer_captured: Option<bool>,
 }
 
 impl Default for Touches {
@@ -322,6 +328,9 @@ impl Default for Touches {
             press_at: [0.0; 2],
             ime_shown: false,
             ime_retap: false,
+            hardware: false,
+            mouse: false,
+            pointer_captured: None,
         }
     }
 }
@@ -527,7 +536,7 @@ impl Game<'_> {
     }
 
     fn touch_controls_shown(&self) -> bool {
-        cfg!(target_os = "android") && self.player.is_some() && !self.pad_in_menu()
+        cfg!(target_os = "android") && self.player.is_some() && !self.pad_in_menu() && !self.touch.hardware
     }
 
     /// Over a screen in the world (inventory, containers, pause, chat...):
@@ -894,6 +903,10 @@ impl Game<'_> {
         let send = |game: &mut Self, event: WindowEvent| {
             game.window_event(event_loop, window_id, event);
         };
+        // A finger on the screen: the touch controls come back.
+        if touch.phase == TouchPhase::Started {
+            self.touch.hardware = false;
+        }
         if self.touch.editing && !self.touch_controls_shown() {
             self.touch.editing = false;
         }
