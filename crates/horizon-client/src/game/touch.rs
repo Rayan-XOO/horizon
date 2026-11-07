@@ -559,19 +559,6 @@ fn dpad_cell(r: f32) -> f32 {
     r * 2.0 + 2.0
 }
 
-/// The arc of a ring from the top, clockwise, `frac` of the way round.
-fn arc(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, t: f32, frac: f32, color: u32) {
-    const N: usize = 40;
-    let n = ((N as f32 * frac.clamp(0.0, 1.0)).ceil() as usize).min(N);
-    let at = |i: usize, r: f32| {
-        let a = i as f32 / N as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-        [c[0] + r * a.cos(), c[1] + r * a.sin()]
-    };
-    for i in 0..n {
-        batch.fill_quad(atlas, [at(i, r - t), at(i, r), at(i + 1, r), at(i + 1, r - t)], color);
-    }
-}
-
 /// Pixel icons, 9 x 9: `#` is lit. Drawn for Horizon; not taken from any game's textures.
 const ARROW_UP: [&str; 9] = [
     "....#....",
@@ -1055,8 +1042,10 @@ impl Game<'_> {
                     let held = since.elapsed().as_millis() as f32 / HOLD_MS as f32;
                     let frac = if attacking { self.mining.as_ref().map_or(0.0, |m| m.progress) } else { held * 0.15 };
                     if held > 0.4 {
-                        ring(batch, atlas, c, 15.0, 3.0, rgba(0, 0, 0, 90));
-                        arc(batch, atlas, c, 15.0, 3.0, frac.max(0.02), rgba(255, 255, 255, 220));
+                        // A full white circle round the finger; the break progress
+                        // fills it from the centre.
+                        ring(batch, atlas, c, 15.0, 3.0, rgba(255, 255, 255, 220));
+                        disc(batch, atlas, c, 12.0 * frac.clamp(0.0, 1.0), rgba(255, 255, 255, 70));
                     }
                 }
             }
