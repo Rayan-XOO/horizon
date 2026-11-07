@@ -14,6 +14,7 @@
 //! it, and saves to `touch_layout.json` in the game directory.
 //!
 //! A focused text field brings up the soft keyboard (`android_ime`).
+use super::event_loop::EventLoopCtl;
 use super::Game;
 use horizon_client::{
     gamepad::Button,
@@ -888,7 +889,7 @@ impl Game<'_> {
         }
     }
 
-    pub(super) fn touch_event(&mut self, event_loop: &ActiveEventLoop, touch: Touch) {
+    pub(super) fn touch_event(&mut self, event_loop: &dyn EventLoopCtl, touch: Touch) {
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -901,7 +902,7 @@ impl Game<'_> {
         let device_id = touch.device_id;
         let window_id = window.id();
         let send = |game: &mut Self, event: WindowEvent| {
-            game.window_event(event_loop, window_id, event);
+            game.handle_window_event(event_loop, window_id, event, super::input_trace::InputOrigin::User);
         };
         // A finger on the screen: the touch controls come back.
         if touch.phase == TouchPhase::Started {

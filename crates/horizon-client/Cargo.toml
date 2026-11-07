@@ -111,6 +111,9 @@ wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 [target.'cfg(target_os = "android")'.dependencies]
 # Android: the NativeActivity glue (no Java), see ANDROID.md.
 winit = { version = "0.30.13", features = ["android-native-activity"] }
+# The soft keyboard bridge and the activity calls (HorizonActivity.java, game/android_ime.rs).
+jni = "0.21"
+libc = "0.2"
 
 [features]
 default = ["audio", "controllers"]

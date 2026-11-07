@@ -335,7 +335,7 @@ impl super::Game<'_> {
     /// game as the window's own would, the pointer is captured while playing with
     /// a mouse, and the touch controls hide while a controller, keyboard or mouse
     /// plays (a touch brings them back, `touch_event`).
-    pub(super) fn android_input_frame(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    pub(super) fn android_input_frame(&mut self, event_loop: &dyn super::event_loop::EventLoopCtl) {
         use winit::{
             application::ApplicationHandler,
             dpi::PhysicalPosition,
@@ -386,7 +386,7 @@ impl super::Game<'_> {
                     phase: TouchPhase::Moved,
                 },
             };
-            self.window_event(event_loop, window_id, event);
+            self.handle_window_event(event_loop, window_id, event, super::input_trace::InputOrigin::User);
         }
         // The pointer is captured for turning the view, and let go in menus.
         let capture = self.touch.mouse && self.focused && self.player.is_some() && !self.pad_in_menu();

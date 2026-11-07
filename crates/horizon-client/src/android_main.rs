@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 mod android_msa;
 mod android_setup;
-mod game;
+use horizon_client::game;
 
 use horizon_client::{crash, logging};
 use winit::platform::android::activity::AndroidApp;
@@ -55,7 +55,7 @@ fn android_main(app: AndroidApp) {
     let _ = game::ANDROID_APP.set(app.clone());
     // A panic here is already in the crash report (crash::install). Catch it so the activity is
     // still finished below: a NativeActivity whose loop died shows a dead window otherwise.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(game::run)) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(game::run_with)) {
         Ok(Err(error)) => {
             log::error!("Horizon: {error}");
             crash::report_error(&home, "client", &*error);

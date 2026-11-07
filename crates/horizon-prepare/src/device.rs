@@ -45,7 +45,7 @@ pub fn from_client_jar(
     progress: &dyn Fn(usize, usize),
 ) -> Result<usize, String> {
     let mut jar = open_zip(client)?;
-    let names = zip_names(&jar);
+    let names = zip_names(&jar)?;
     let total = names.len();
     let mut count = 0;
     for (i, name) in names.iter().enumerate() {
