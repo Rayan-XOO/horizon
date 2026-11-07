@@ -66,9 +66,44 @@ fn performance_cores() -> Option<usize> {
     (read == 0 && count > 0).then_some(count as usize)
 }
 
-#[cfg(not(target_vendor = "apple"))]
+/// Android phones mix core kinds too (big.LITTLE: a prime core, a few big ones and
+/// several little ones). The kernel names each core's top clock in cpufreq; the cores
+/// above the slowest kind count, as Apple's performance cores do. `None` where every
+/// core is the same kind or cpufreq isn't readable.
+#[cfg(target_os = "android")]
+fn performance_cores() -> Option<usize> {
+    let fast = fast_cpus()?;
+    Some(fast.len())
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "android")))]
 fn performance_cores() -> Option<usize> {
     None
+}
+
+/// Each core's top clock in kHz (`cpuinfo_max_freq`), by core number.
+#[cfg(target_os = "android")]
+fn cpu_max_freqs() -> Vec<(usize, u64)> {
+    (0..32)
+        .filter_map(|cpu| {
+            let path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_max_freq");
+            let khz = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
+            Some((cpu, khz))
+        })
+        .collect()
+}
+
+/// The cores faster than the slowest kind, when there is more than one kind.
+#[cfg(target_os = "android")]
+fn fast_cpus() -> Option<Vec<usize>> {
+    static FAST: OnceLock<Option<Vec<usize>>> = OnceLock::new();
+    FAST.get_or_init(|| {
+        let freqs = cpu_max_freqs();
+        let slowest = freqs.iter().map(|f| f.1).min()?;
+        let fast: Vec<usize> = freqs.iter().filter(|f| f.1 > slowest).map(|f| f.0).collect();
+        (!fast.is_empty()).then_some(fast)
+    })
+    .clone()
 }
 
 /// `Some(n)` when `value` names a positive count (`" 4 "` counts; `"0"`,
@@ -110,7 +145,25 @@ fn favour() -> bool {
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) != 0 }
 }
 
-#[cfg(not(any(target_vendor = "apple", windows)))]
+/// Android can't raise a thread's priority either, but it can keep the thread off the
+/// little cores: the render and server threads stay on the big and prime cores, where a
+/// frame or a tick doesn't wait behind a slow core's clock.
+#[cfg(target_os = "android")]
+fn favour() -> bool {
+    let Some(fast) = fast_cpus() else {
+        return false;
+    };
+    // SAFETY: `set` is a live, zeroed local; pid 0 is the calling thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for cpu in fast {
+            libc::CPU_SET(cpu, &mut set);
+        }
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) == 0
+    }
+}
+
+#[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
 fn favour() -> bool {
     false
 }
