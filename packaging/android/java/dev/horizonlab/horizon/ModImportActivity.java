@@ -52,7 +52,7 @@ public class ModImportActivity extends Activity {
         String name = displayName(uri);
         String lower = name.toLowerCase(java.util.Locale.ROOT);
         String folder = lower.endsWith(".hnmod") ? "mods" : lower.endsWith(".hmod") ? "horizon-mods" : null;
-        if (folder == null || !name.matches("[A-Za-z0-9._ ()+-]{1,120}")) {
+        if (folder == null || !name.matches("[\\p{L}\\p{N}._ ()+-]{1,120}")) {
             toast(Ui.t("Это не мод Horizon (.hnmod или .hmod): ", "Not a Horizon mod (.hnmod or .hmod): ") + name);
             return;
         }

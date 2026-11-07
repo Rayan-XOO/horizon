@@ -193,7 +193,12 @@ public class SetupActivity extends Activity
     }
 
     /** A message a player can act on, from the native error text. */
-    static String friendlyError(String e) {
+    static String friendlyError(String raw) {
+        // Judge the error, not its link: a timeout on .../derived.zip is not a damaged pack.
+        String e = raw.replaceAll("https?://\\S+", "");
+        if (e.contains("No space") || e.contains("ENOSPC")) {
+            return Ui.t("Закончилось место на телефоне.", "The phone ran out of space.");
+        }
         if (e.startsWith("No derived pack")) {
             return Ui.t("Не найден пакет данных Horizon. Положите horizon-derived.zip в папку игры и нажмите «Повторить».",
                     "The Horizon data pack was not found. Put horizon-derived.zip in the game folder and tap Retry.");
@@ -223,9 +228,6 @@ public class SetupActivity extends Activity
         if (e.contains("Dns") || e.contains("onnect") || e.contains("timed out") || e.contains("Network")) {
             return Ui.t("Нет связи с сервером. Проверьте интернет и нажмите «Повторить».",
                     "Could not reach the server. Check the connection and tap Retry.");
-        }
-        if (e.contains("No space") || e.contains("ENOSPC")) {
-            return Ui.t("Закончилось место на телефоне.", "The phone ran out of space.");
         }
         return Ui.t("Что-то пошло не так. Нажмите «Повторить», загрузка продолжится с того же места.",
                 "Something went wrong. Tap Retry, the download continues where it stopped.");
