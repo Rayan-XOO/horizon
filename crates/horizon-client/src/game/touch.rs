@@ -933,22 +933,6 @@ impl Game<'_> {
                 ring(batch, atlas, c, r + 2.0, 1.5, rgba(255, 220, 60, 255));
             }
         }
-        // Touch aiming: Bedrock's ring round a finger held on a block, filling as it breaks.
-        if !editing && let Some((_, scale)) = self.touch_gui() {
-            for f in t.fingers.values() {
-                if let Finger::Look { start, since, moved: false, attacking, .. } = *f {
-                    let c = [(start[0] / f64::from(scale)) as f32, (start[1] / f64::from(scale)) as f32];
-                    let held = since.elapsed().as_millis() as f32 / HOLD_MS as f32;
-                    let frac = if attacking { self.mining.as_ref().map_or(0.0, |m| m.progress) } else { held * 0.15 };
-                    if held > 0.4 {
-                        // A full white circle round the finger; the break progress
-                        // fills it from the centre.
-                        ring(batch, atlas, c, 15.0, 3.0, rgba(255, 255, 255, 220));
-                        disc(batch, atlas, c, 12.0 * frac.clamp(0.0, 1.0), rgba(255, 255, 255, 70));
-                    }
-                }
-            }
-        }
         if editing {
             let title = match t.selected {
                 Some(id) => {
