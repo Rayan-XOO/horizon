@@ -1,6 +1,8 @@
 package dev.horizonlab.horizon;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
@@ -19,6 +21,7 @@ import java.io.OutputStream;
  */
 public class ModImportActivity extends Activity {
     private static final int PICK = 1;
+    private AlertDialog dialog;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -31,8 +34,7 @@ public class ModImportActivity extends Activity {
             uri = intent.getData();
         }
         if (uri != null) {
-            install(uri);
-            finish();
+            confirm(uri);
             return;
         }
         Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -46,6 +48,43 @@ public class ModImportActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (result == RESULT_OK && data != null && data.getData() != null) install(data.getData());
         finish();
+    }
+
+    /**
+     * This activity is exported and a .hnmod is native code that runs in the game's process, next
+     * to the Microsoft sign-in. So a file handed over by another app is only installed once the
+     * player says so. file: URIs are refused: the app holds no storage permission, so all they
+     * can reach is its own private files, and copying those out would leak the sign-in.
+     */
+    private void confirm(final Uri uri) {
+        if ("file".equals(uri.getScheme())) {
+            toast(Ui.t("Откройте мод через «Поделиться» или кнопку в профиле.", "Share the mod to Horizon, or use the button on the profile screen."));
+            finish();
+            return;
+        }
+        dialog = new AlertDialog.Builder(this)
+                .setTitle(Ui.t("Установить мод?", "Install this mod?"))
+                .setMessage(displayName(uri) + "\n\n" + Ui.t(
+                        "Мод получает полный доступ к игре и вашему входу в Microsoft. Устанавливайте только те моды, которым доверяете.",
+                        "A mod gets full access to the game and your Microsoft sign-in. Only install mods you trust."))
+                .setPositiveButton(Ui.t("Установить", "Install"), new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int which) {
+                        install(uri);
+                    }
+                })
+                .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+                .setOnDismissListener(new DialogInterface.OnDismissListener() {
+                    public void onDismiss(DialogInterface d) {
+                        finish();
+                    }
+                })
+                .show();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (dialog != null) dialog.dismiss();
+        super.onDestroy();
     }
 
     private void install(Uri uri) {
@@ -77,7 +116,11 @@ public class ModImportActivity extends Activity {
         }
         if (!part.renameTo(out)) {
             out.delete();
-            part.renameTo(out);
+            if (!part.renameTo(out)) {
+                part.delete();
+                toast(Ui.t("Не удалось установить мод: ", "Could not install the mod: ") + name);
+                return;
+            }
         }
         toast(Ui.t("Мод установлен: ", "Mod installed: ") + name
                 + Ui.t(". Перезапустите игру; он в Настройки > Моды.", ". Restart the game; it is in Options > Mods."));
