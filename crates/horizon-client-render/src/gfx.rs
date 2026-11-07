@@ -4598,13 +4598,18 @@ impl Renderer {
             },
             mapped_at_creation: false,
         });
-        // HORIZON_GPU_CULL=0 turns occlusion culling off, `all` culls every
+        // HORIZON_GPU_CULL=0 turns occlusion culling off (Android: any other
+        // value turns it on), `all` culls every
         // frame however few its draws and little it hides, `shader` tests in
         // the shader as on Metal (A/B checks).
         let cull_env = std::env::var("HORIZON_GPU_CULL");
         let adapter_info = adapter.get_info();
         let cull = cull::Cull::supported(&adapter, &device)
             .filter(|_| occlusion_culling_requested(&adapter_info, cull_env.as_deref().ok()))
+            // Off on Android unless asked for (HORIZON_GPU_CULL=1): on mobile
+            // tilers (Adreno) its box test let sections drop out for a frame
+            // or a few after a block changed, showing through terrain.
+            .filter(|_| !cfg!(target_os = "android") || cull_env.is_ok())
             .map(|depth_test| match cull_env.as_deref() {
                 Ok("shader") => cull::DepthTest::InShader,
                 _ => depth_test,
@@ -5047,6 +5052,25 @@ impl Renderer {
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             self.surface.take().and_then(|s| Arc::try_unwrap(s).ok());
     }
+    /// Android: the native window is destroyed while the app is in the
+    /// background; the surface made from it goes with it.
+    pub fn lose_surface(&mut self) {
+        self.surface = None;
+        *self
+            .spare_surface
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.suspended = true;
+    }
+    /// Android: a new native window after `lose_surface`.
+    pub fn regain_surface(&mut self) -> Result<()> {
+        if self.surface.is_some() {
+            return Ok(());
+        }
+        self.recreate_surface()?;
+        self.suspended = self.config.width == 0 || self.config.height == 0;
+        Ok(())
+    }
     /// Reattach a window after surface loss or a failed renderer replacement.
     pub fn recreate_surface(&mut self) -> Result<()> {
         self.queue.wait();
@@ -5177,6 +5201,14 @@ impl Renderer {
     pub fn section_sides(&self) -> bool {
         self.sides_on
     }
+    /// Whether opaque terrain draws first, apart from cutout terrain. The
+    /// renderer now picks this per backend itself; the setting is kept so
+    /// existing option files still load.
+    pub fn opaque_split(&self) -> bool {
+        false
+    }
+    /// Kept for the setting's toggle; see `opaque_split`.
+    pub fn set_opaque_split(&mut self, _on: bool) {}
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {
         self.sides_on = on;

@@ -113,6 +113,7 @@ pub enum H {
     ShadowCache,
     /// Opens the shader pack list (`options_ui::Page::ShaderPacks`).
     ShaderPacks,
+    OpaqueSplit,
     GraphicsApi,
     TranslucentBatching,
     HdrSmoothGradients,
@@ -491,11 +492,18 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 ),
                 (
                     "Power",
-                    vec![h(
-                        H::BatteryMode,
-                        None,
-                        "60 FPS cap (30 in menus or unfocused), half the workers: less power.",
-                    )],
+                    vec![
+                        h(
+                            H::BatteryMode,
+                            None,
+                            "60 FPS cap (30 in menus or unfocused), half the workers: less power.",
+                        ),
+                        h(
+                            H::OpaqueSplit,
+                            None,
+                            "Draws solid blocks before leaves and grass: faster terrain.",
+                        ),
+                    ],
                 ),
             ],
         ),
@@ -930,6 +938,7 @@ impl H {
             H::ShadowCache => labelled("Shadow Cache", on_off(g.shadow_cache)),
             // A press across the row, as Calibrate...: the list it opens shows the pick.
             H::ShaderPacks => Text::literal(lang::get("Shader Packs...")),
+            H::OpaqueSplit => labelled("Fast Opaque Pass", on_off(g.opaque_split)),
             H::GraphicsApi => labelled("Graphics API", g.api.label()),
             // These two are greyed out where the device can't (`Item::blocked`): Off, as
             // they are there, while the saved value waits for a device that can.
@@ -1054,6 +1063,7 @@ impl H {
             H::HdrLighting => g.hdr_lighting = !g.hdr_lighting,
             H::BatteryMode => g.battery = !g.battery,
             H::ShadowCache => g.shadow_cache = !g.shadow_cache,
+            H::OpaqueSplit => g.opaque_split = !g.opaque_split,
             H::GraphicsApi => g.api = step(GraphicsApi::choices(), g.api, back),
             H::TranslucentBatching => g.translucent_batching = !g.translucent_batching,
             H::HdrSmoothGradients => g.hdr_smooth_gradients = !g.hdr_smooth_gradients,
@@ -1180,6 +1190,8 @@ impl Item {
             Item::Horizon(H::HdrSmoothGradients) => {
                 g.hdr_smooth_gradients && crate::graphics::smooth_gradients_offered()
             }
+            Item::Horizon(H::OpaqueSplit) => g.opaque_split,
+            Item::Vanilla(Opt::ViewBobbing) => s.view_bobbing,
             Item::Vanilla(Opt::Vsync) => s.vsync,
             Item::Extra(e) => return e.switch(&s.extras),
             Item::Vanilla(Opt::Fullscreen) => s.fullscreen,
@@ -1254,6 +1266,7 @@ impl Item {
                         | H::FrameGeneration
                         | H::BatteryMode
                         | H::ShadowCache
+                        | H::OpaqueSplit
                         | H::GraphicsApi
                         | H::TranslucentBatching
                         | H::HdrSmoothGradients

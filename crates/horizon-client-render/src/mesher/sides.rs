@@ -40,6 +40,10 @@ const BUCKETS: [Bucket; 7] = [
     Bucket::Side(1, false),
 ];
 const OTHER: usize = 2;
+/// The opaque buckets, then as many cutout ones.
+const N: usize = 14;
+/// Where the cutout buckets start.
+const CUTOUT: usize = 7;
 /// How far, in blocks, the eye must be behind a bucket's planes before the
 /// bucket is left out. The renderer computes both the eye and the section
 /// origins in `f32`, with errors far below this.
@@ -86,7 +90,7 @@ pub struct Sides {
     split: bool,
     /// Per bucket facing a positive direction, its lowest plane; facing a
     /// negative one, its highest (unused for the other bucket).
-    planes: [f32; 7],
+    planes: [f32; N],
 }
 
 impl Sides {
@@ -187,7 +191,7 @@ impl Sides {
             match (wanted && seen(bucket), run) {
                 (true, None) => run = Some(start),
                 (false, Some(first)) => {
-                    draw(first, start - first);
+                    draw(first, start - first, start > self.ends[CUTOUT - 1]);
                     run = None;
                 }
                 _ => {}
@@ -195,7 +199,7 @@ impl Sides {
             start = end;
         }
         if let Some(first) = run {
-            draw(first, start - first);
+            draw(first, start - first, start > self.ends[CUTOUT - 1]);
         }
     }
 }
@@ -503,9 +507,9 @@ mod tests {
         let layers: Vec<u16> = solid.iter().step_by(4).map(|v| v.layer).collect();
         // +X, +Z, +Y, -Z, -X, -Y.
         assert_eq!(layers, [0, 4, 2, 5, 1, 3]);
-        assert_eq!(sides.planes[0], 4.0); // +X at x = 4
-        assert_eq!(sides.planes[5], 3.0); // -X at x = 3
-        assert_eq!(sides.planes[3], 5.0); // +Y at y = 5
+        assert_eq!(sides.planes[CUTOUT], 4.0); // +X at x = 4
+        assert_eq!(sides.planes[CUTOUT + 5], 3.0); // -X at x = 3
+        assert_eq!(sides.planes[CUTOUT + 3], 5.0); // +Y at y = 5
     }
 
     #[test]

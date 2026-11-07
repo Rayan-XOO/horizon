@@ -7,7 +7,7 @@ mod fluid;
 mod leaf_culling;
 mod lighting;
 pub mod packed;
-mod sides;
+pub(crate) mod sides;
 use crate::connected::{Pick, TileLayer};
 use crate::{
     assets::{Assets, RenderAssets},
