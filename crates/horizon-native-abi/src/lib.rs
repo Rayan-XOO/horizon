@@ -20,7 +20,7 @@ use std::ffi::c_void;
 
 /// The ABI version. Raised only when a field is added at the end of a
 /// struct below; the game opens a mod whose `abi` is this or lower.
-pub const ABI: u32 = 1;
+pub const ABI: u32 = 2;
 /// The symbol a mod exports: `extern "C" fn(&mut Host) -> *const ModTable`.
 pub const ENTRY: &str = "horizon_mod_entry";
 /// The target name of an Android (arm64) build in `binaries`.
@@ -66,6 +66,18 @@ pub struct Host {
     pub hud_line: extern "C" fn(ctx: *mut c_void, text: Str, rgb: u32),
     /// The mod's own folder for its files (made for it).
     pub data_dir: Str,
+    /// ABI 2: sets one of the game's mod-driven options for as long as the mod
+    /// is on (see [`options`]); an unknown key or value is ignored.
+    pub set_option: extern "C" fn(ctx: *mut c_void, key: Str, value: Str),
+}
+
+/// Keys and values for [`Host::set_option`] (ABI 2).
+pub mod options {
+    /// Entity and block-entity occlusion culling, used while the player's own
+    /// setting is off: `off`, `sync` or `async`.
+    pub const ENTITY_CULLING: &str = "entity_culling";
+    /// Hide the name tags of entities wholly behind blocks: `true` or `false`.
+    pub const HIDE_OCCLUDED_NAME_TAGS: &str = "hide_occluded_name_tags";
 }
 impl Host {
     pub fn log(&mut self, text: &str) {
@@ -76,6 +88,12 @@ impl Host {
     }
     pub fn hud_line(&mut self, text: &str, rgb: u32) {
         (self.hud_line)(self.ctx, Str::new(text), rgb);
+    }
+    /// A mod-driven game option ([`options`]). Needs a game with ABI 2.
+    pub fn set_option(&mut self, key: &str, value: &str) {
+        if self.abi >= 2 {
+            (self.set_option)(self.ctx, Str::new(key), Str::new(value));
+        }
     }
     pub fn data_dir(&self) -> std::path::PathBuf {
         // SAFETY: the game keeps the folder's name alive while the mod is open.

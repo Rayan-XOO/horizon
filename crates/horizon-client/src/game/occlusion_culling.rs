@@ -2035,7 +2035,7 @@ impl Game<'_> {
     pub(super) fn prepare_occlusion_culling(&mut self, camera: glam::DVec3) {
         self.entity_section_camera = None;
         self.entity_section_visibility_valid = false;
-        let entity_mode = self.settings.horizon.entity_culling;
+        let entity_mode = self.entity_culling_mode();
         let requested = entity_mode != EntityCullingMode::Off;
         let eligible = requested
             // Packs can replace opaque models, so their terrain is not a safe occluder.

@@ -7366,7 +7366,7 @@ impl Game<'_> {
     pub(super) fn mob_geometry(&self, camera: glam::DVec3, alpha: f64, out: &mut Vec<Vertex>) {
         // The coarse mob bounds pay off only in dense async scenes; otherwise,
         // keep the existing exact mesh-culling path.
-        if self.settings.horizon.entity_culling == EntityCullingMode::Asynchronous
+        if self.entity_culling_mode() == EntityCullingMode::Asynchronous
             && self
                 .async_occlusion_culler
                 .as_ref()

@@ -19,6 +19,7 @@ use horizon_native_abi::{
     State,
     host::{Loaded, Outbox},
 };
+use horizon_client::graphics::EntityCullingMode;
 use std::path::{Path, PathBuf};
 
 /// The folder players drop `.hnmod` files into, beside `options.txt`.
@@ -40,6 +41,46 @@ pub(super) struct Prebuilt {
 #[derive(Default)]
 pub(super) struct PrebuiltMods {
     mods: Vec<Prebuilt>,
+    /// Options each mod set through `set_option`, by mod id.
+    options: std::collections::HashMap<String, ModOptions>,
+    /// What the mods that are on ask for, together.
+    pub(super) asked: ModOptions,
+}
+
+/// The game options a mod can drive (`horizon_native_abi::options`).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(super) struct ModOptions {
+    pub(super) entity_culling: Option<EntityCullingMode>,
+    pub(super) hide_occluded_name_tags: bool,
+}
+
+impl ModOptions {
+    fn set(&mut self, key: &str, value: &str) {
+        use horizon_native_abi::options as o;
+        match (key, value) {
+            (o::ENTITY_CULLING, "off") => self.entity_culling = None,
+            (o::ENTITY_CULLING, "sync") => self.entity_culling = Some(EntityCullingMode::Synchronous),
+            (o::ENTITY_CULLING, "async") => self.entity_culling = Some(EntityCullingMode::Asynchronous),
+            (o::HIDE_OCCLUDED_NAME_TAGS, v) => self.hide_occluded_name_tags = v == "true",
+            _ => {}
+        }
+    }
+    /// Several mods: the stronger culling, and any asking to hide tags.
+    fn join(self, other: Self) -> Self {
+        let rank = |m: Option<EntityCullingMode>| match m {
+            Some(EntityCullingMode::Asynchronous) => 2,
+            Some(EntityCullingMode::Synchronous) => 1,
+            _ => 0,
+        };
+        Self {
+            entity_culling: if rank(other.entity_culling) > rank(self.entity_culling) {
+                other.entity_culling
+            } else {
+                self.entity_culling
+            },
+            hide_occluded_name_tags: self.hide_occluded_name_tags || other.hide_occluded_name_tags,
+        }
+    }
 }
 
 /// The message on a bundle's row when it carries no library for this game.
@@ -223,6 +264,19 @@ impl Game<'_> {
         for line in out.chat {
             self.native_chat(&line);
         }
+        if !out.options.is_empty() {
+            let o = self.prebuilt.options.entry(id.to_owned()).or_default();
+            for (k, v) in &out.options {
+                o.set(k, v);
+            }
+        }
+    }
+    /// The entity culling in effect: the player's own setting, else a mod's.
+    pub(super) fn entity_culling_mode(&self) -> EntityCullingMode {
+        match self.settings.horizon.entity_culling {
+            EntityCullingMode::Off => self.prebuilt.asked.entity_culling.unwrap_or(EntityCullingMode::Off),
+            mode => mode,
+        }
     }
     fn prebuilt_state(&self) -> State {
         let player = self.native_player();
@@ -254,6 +308,15 @@ impl Game<'_> {
         for (id, out) in asked {
             self.prebuilt_outbox(&id, out);
         }
+        // A mod switched off (or gone) stops driving its options.
+        let disabled = &self.settings.mods.disabled;
+        let mods = &self.prebuilt.mods;
+        self.prebuilt.asked = self
+            .prebuilt
+            .options
+            .iter()
+            .filter(|(id, _)| !disabled.contains(*id) && mods.iter().any(|m| &m.id == *id && m.loaded.is_some()))
+            .fold(ModOptions::default(), |a, (_, o)| a.join(*o));
     }
     pub(super) fn prebuilt_tick(&mut self) {
         let state = self.prebuilt_state();

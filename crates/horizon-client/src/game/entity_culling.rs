@@ -80,7 +80,7 @@ impl Game<'_> {
     pub(super) fn cull_entity_vertices(&self, vertices: &mut Vec<Vertex>, start: usize) -> bool {
         let hidden = self.occlusion_hidden(Some(vertices), start, None);
         if hidden && !(self.pack_shadow_casters.0 && self.hide_spans_from(start, vertices.len())) {
-            if self.settings.horizon.entity_culling == EntityCullingMode::Asynchronous
+            if self.entity_culling_mode() == EntityCullingMode::Asynchronous
                 && let Some(culler) = &self.async_occlusion_culler
             {
                 culler.record_entity_vertices_culled(vertices.len().saturating_sub(start));
@@ -93,7 +93,7 @@ impl Game<'_> {
 
     pub(super) fn cull_entity_camera_bounds(&self, lo: glam::Vec3, hi: glam::Vec3) -> bool {
         if self.occlusion_hidden_camera_bounds(lo, hi) {
-            if self.settings.horizon.entity_culling == EntityCullingMode::Asynchronous
+            if self.entity_culling_mode() == EntityCullingMode::Asynchronous
                 && let Some(culler) = &self.async_occlusion_culler
             {
                 culler.record_entity_vertices_culled(2);
@@ -118,7 +118,7 @@ impl Game<'_> {
     }
 
     fn occlusion_hidden_camera_bounds(&self, lo: glam::Vec3, hi: glam::Vec3) -> bool {
-        match self.settings.horizon.entity_culling {
+        match self.entity_culling_mode() {
             EntityCullingMode::Off => false,
             EntityCullingMode::Asynchronous => {
                 if let Some(culler) = &self.async_occlusion_culler {
@@ -188,7 +188,7 @@ impl Game<'_> {
         entity: &T,
         render_bounds: Aabb,
     ) -> EntityCullDecision {
-        if self.settings.horizon.entity_culling == EntityCullingMode::Off
+        if self.entity_culling_mode() == EntityCullingMode::Off
             || self.pack_shadow_casters.0
             || entity.render_glowing(self)
         {
@@ -206,7 +206,7 @@ impl Game<'_> {
             self.count_cull(0);
             return EntityCullDecision::Hidden;
         }
-        match self.settings.horizon.entity_culling {
+        match self.entity_culling_mode() {
             EntityCullingMode::Off => EntityCullDecision::Bypass,
             EntityCullingMode::Synchronous => {
                 if self.entity_hidden_sync(None, 0, Some(bounds)) {
@@ -310,7 +310,7 @@ impl Game<'_> {
         start: usize,
         bounds: Option<Aabb>,
     ) -> bool {
-        match self.settings.horizon.entity_culling {
+        match self.entity_culling_mode() {
             EntityCullingMode::Off => false,
             EntityCullingMode::Synchronous => self.entity_hidden_sync(vertices, start, bounds),
             EntityCullingMode::Asynchronous => {
