@@ -5550,7 +5550,7 @@ impl Game<'_> {
     /// texel, built once per (skin, slim) from the decoded image the skin
     /// downloader still holds (`horizon_client::mobs::skin_layers`). `None`
     /// while the option is off or the image is not in memory yet.
-    fn skin_3d_model(
+    pub(super) fn skin_3d_model(
         &self,
         kind: &std::sync::Arc<horizon_client::mobs::MobType>,
         skin: &str,
@@ -5709,7 +5709,11 @@ impl Game<'_> {
             mob.cape = cape;
         }
         if self.player_model.is_some() {
-            let (skin, is_slim) = self.drawn_skin(own, skin_of(&skins, own));
+            // The profile screen's own skin (Android) wins over the server's.
+            let (skin, is_slim) = match self.local_skin.chosen() {
+                Some(chosen) => chosen,
+                None => self.drawn_skin(own, skin_of(&skins, own)),
+            };
             // Avatar.isModelPartShown(CAPE): the Skin Customization option.
             let cape = capes
                 .get(&own)
@@ -6631,6 +6635,7 @@ impl Game<'_> {
         }
         // The player's own model (third person, the inventory's preview).
         self.tick_player_model();
+        self.tick_local_skin();
         self.tick_emotes();
         if !dead {
             self.remote_tick_using();

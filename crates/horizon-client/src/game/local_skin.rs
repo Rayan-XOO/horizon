@@ -2,10 +2,13 @@
 //! `horizon-skin.txt` (`model:slim` or `model:classic`) in the game directory,
 //! written by the profile screen (ProfileActivity). Checked once a second; a
 //! changed file is put in an atlas skin slot (`store_skin`) and on the
-//! player's model, slim arms through `player_slim#main`.
+//! player's model, slim arms through the model's `slim` flag (`player_slim#main`).
+//!
+//! Every world, single player too, is joined through a connection (the
+//! integrated server), so this runs from the connected tick and wins over the
+//! skin the server's profile names (`update_remote_skins`).
 use super::Game;
-use horizon_client::mobs::{Mob, MobType};
-use std::{sync::Arc, time::SystemTime};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub(super) struct LocalSkin {
@@ -14,14 +17,15 @@ pub(super) struct LocalSkin {
     location: Option<String>,
     rgba: Vec<u8>,
     slim: bool,
-    slim_type: Option<Option<Arc<MobType>>>,
 }
 
 const PNG: &str = "horizon-skin.png";
 const MODEL: &str = "horizon-skin.txt";
 
 fn mtime(name: &str) -> SystemTime {
-    std::fs::metadata(name).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+    std::fs::metadata(name)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 impl LocalSkin {
@@ -29,13 +33,19 @@ impl LocalSkin {
     pub(super) fn location(&self) -> Option<&str> {
         self.location.as_deref()
     }
+    /// The skin and arm model to draw the local player with, if one is set.
+    pub(super) fn chosen(&self) -> Option<(String, bool)> {
+        self.location.clone().map(|l| (l, self.slim))
+    }
 }
 
 impl Game<'_> {
     pub(super) fn tick_local_skin(&mut self) {
         let now = std::time::Instant::now();
         let s = &mut self.local_skin;
-        if s.checked.is_none_or(|t| now.duration_since(t).as_secs() >= 1) {
+        if s.checked
+            .is_none_or(|t| now.duration_since(t).as_secs() >= 1)
+        {
             s.checked = Some(now);
             let stamp = (mtime(PNG), mtime(MODEL));
             if s.stamp != Some(stamp) {
@@ -43,10 +53,15 @@ impl Game<'_> {
                 s.slim = std::fs::read_to_string(MODEL).is_ok_and(|t| t.contains("model:slim"));
                 let skin = horizon_client::hud::decode(std::path::Path::new(PNG))
                     .ok()
-                    .and_then(|(w, h, rgba)| horizon_client::skins::process_legacy_skin(w, h, &rgba));
+                    .and_then(|(w, h, rgba)| {
+                        horizon_client::skins::process_legacy_skin(w, h, &rgba)
+                    });
                 match skin {
                     Some(rgba) => {
-                        let secs = stamp.0.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                        let secs = stamp
+                            .0
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs());
                         s.location = Some(format!("horizon/local_skin_{secs}"));
                         s.rgba = rgba;
                     }
@@ -62,30 +77,26 @@ impl Game<'_> {
         let Some(location) = self.local_skin.location.clone() else {
             return;
         };
-        if !(self.skin_slots.contains(&location) && self.gui.atlas.sprites.contains_key(&location)) {
+        if !(self.skin_slots.contains(&location) && self.gui.atlas.sprites.contains_key(&location))
+        {
             let rgba = self.local_skin.rgba.clone();
             self.store_skin(location.clone(), rgba);
         }
-        if self.local_skin.slim && self.player.is_some() {
-            if self.local_skin.slim_type.is_none() {
-                let slim = self.res.player_type().as_ref().and_then(|kind| {
-                    horizon_client::mobs::load_model(&self.options.resources, "minecraft:player_slim#main")
-                        .map(|model| Arc::new(MobType { model: Arc::new(model), ..(**kind).clone() }))
-                });
-                if slim.is_none() {
-                    log::warn!("Horizon: no player_slim model; classic arms");
-                }
-                self.local_skin.slim_type = Some(slim);
+        let slim = self.local_skin.slim;
+        let differs = self
+            .player_model
+            .as_ref()
+            .is_some_and(|m| m.skin.as_deref() != Some(location.as_str()) || m.slim != slim);
+        if differs {
+            let kind = self.player_model.as_ref().map(|m| m.kind.clone());
+            let skin_3d = kind.and_then(|kind| self.skin_3d_model(&kind, &location, slim));
+            if let Some(m) = self.player_model.as_mut() {
+                // AvatarRenderer picks `player_slim#main` from `slim`; the first-person
+                // arm reads the same flag.
+                m.skin = Some(location);
+                m.slim = slim;
+                m.skin_3d = skin_3d;
             }
-            let is_slim = |m: &Mob| self.local_skin.slim_type.as_ref().and_then(|t| t.as_ref()).is_some_and(|t| Arc::ptr_eq(&m.kind, t));
-            if !self.player_model.as_ref().is_some_and(is_slim) {
-                if let (Some(kind), Some(p)) = (self.local_skin.slim_type.clone().flatten(), self.player.as_ref()) {
-                    self.player_model = Some(Mob::new(0, kind, p.position, self.yaw));
-                }
-            }
-        }
-        if let Some(m) = self.player_model.as_mut() {
-            m.skin = Some(location);
         }
     }
 }
