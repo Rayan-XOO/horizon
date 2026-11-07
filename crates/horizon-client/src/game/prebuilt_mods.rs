@@ -264,6 +264,14 @@ impl Game<'_> {
         for line in out.chat {
             self.native_chat(&line);
         }
+        for command in out.commands {
+            let command = command.trim_start_matches('/');
+            if self.remote.is_some() {
+                self.send_chat(&format!("/{command}"));
+            } else {
+                self.run_command_quietly(command);
+            }
+        }
         if !out.options.is_empty() {
             let o = self.prebuilt.options.entry(id.to_owned()).or_default();
             for (k, v) in &out.options {
@@ -280,6 +288,7 @@ impl Game<'_> {
     }
     fn prebuilt_state(&self) -> State {
         let player = self.native_player();
+        let aim = player.is_some().then(|| self.prebuilt_far_aim()).flatten();
         State {
             in_world: player.is_some(),
             playing: self.native_playing(),
@@ -289,7 +298,37 @@ impl Game<'_> {
             yaw: self.yaw,
             pitch: self.pitch,
             ticks: u64::from(self.ticks),
+            aim_hit: aim.is_some(),
+            aim_block: aim.map_or([0; 3], |a| a.0),
+            aim_point: aim.map_or([0.0; 3], |a| a.1),
+            min_y: self.world.shape.min_y,
+            dimension: match &*self.dim.id().to_string() {
+                "minecraft:overworld" => 0,
+                "minecraft:the_nether" => 1,
+                "minecraft:the_end" => 2,
+                _ => 3,
+            },
         }
+    }
+    /// The first solid block along the view within 200 blocks, and where the
+    /// ray enters it (fluids and air pass), for mods.
+    fn prebuilt_far_aim(&self) -> Option<([i32; 3], [f64; 3])> {
+        let eye = self.eye_position()?;
+        let (y, p) = (f64::from(self.yaw).to_radians(), f64::from(self.pitch).to_radians());
+        let d = [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()];
+        let facts = self.res.facts();
+        let mut t = 0.5;
+        while t <= 200.0 {
+            let pt = [eye[0] + d[0] * t, eye[1] + d[1] * t, eye[2] + d[2] * t];
+            let b = pt.map(|v| v.floor() as i32);
+            let name = &*facts.get(self.world.block(b[0], b[1], b[2])).name;
+            let open = matches!(name, "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air") || name.contains("water") || name.contains("lava");
+            if !open {
+                return Some((b, pt));
+            }
+            t += 0.5;
+        }
+        None
     }
     /// Calls `f` on each mod that is open and on, then does what it asked.
     fn each_prebuilt(&mut self, mut f: impl FnMut(&Loaded) -> Outbox) {

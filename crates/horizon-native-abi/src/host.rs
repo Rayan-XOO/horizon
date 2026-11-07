@@ -33,6 +33,8 @@ pub struct Outbox {
     pub hud: Vec<(String, u32)>,
     /// `set_option` calls: key, value.
     pub options: Vec<(String, String)>,
+    /// `run_command` calls, in order.
+    pub commands: Vec<String>,
 }
 
 extern "C" fn put_log(ctx: *mut c_void, text: Str) {
@@ -59,6 +61,15 @@ extern "C" fn put_option(ctx: *mut c_void, key: Str, value: Str) {
         // SAFETY: as `put_log`.
         let (k, v) = unsafe { (key.as_str().to_owned(), value.as_str().to_owned()) };
         out.options.push((k, v));
+    }
+}
+
+extern "C" fn put_command(ctx: *mut c_void, command: Str) {
+    // SAFETY: as `put_log`.
+    let out = unsafe { &mut *ctx.cast::<Outbox>() };
+    if out.commands.len() < 4096 {
+        // SAFETY: as `put_log`.
+        out.commands.push(unsafe { command.as_str() }.to_owned());
     }
 }
 
@@ -111,6 +122,7 @@ impl Loaded {
             hud_line: put_hud,
             data_dir: Str::new(data_dir),
             set_option: put_option,
+            run_command: put_command,
         }
     }
     fn call(&self, f: impl FnOnce(&mut Host)) -> Outbox {

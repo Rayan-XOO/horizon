@@ -20,7 +20,7 @@ use std::ffi::c_void;
 
 /// The ABI version. Raised only when a field is added at the end of a
 /// struct below; the game opens a mod whose `abi` is this or lower.
-pub const ABI: u32 = 2;
+pub const ABI: u32 = 3;
 /// The symbol a mod exports: `extern "C" fn(&mut Host) -> *const ModTable`.
 pub const ENTRY: &str = "horizon_mod_entry";
 /// The target name of an Android (arm64) build in `binaries`.
@@ -69,6 +69,9 @@ pub struct Host {
     /// ABI 2: sets one of the game's mod-driven options for as long as the mod
     /// is on (see [`options`]); an unknown key or value is ignored.
     pub set_option: extern "C" fn(ctx: *mut c_void, key: Str, value: Str),
+    /// ABI 3: runs a command (no slash) as the player, quietly: on a server
+    /// (single player's own included) it is sent like a typed command.
+    pub run_command: extern "C" fn(ctx: *mut c_void, command: Str),
 }
 
 /// Keys and values for [`Host::set_option`] (ABI 2).
@@ -95,6 +98,14 @@ impl Host {
             (self.set_option)(self.ctx, Str::new(key), Str::new(value));
         }
     }
+    /// Runs a command as the player (ABI 3); false on an older game.
+    pub fn run_command(&mut self, command: &str) -> bool {
+        if self.abi < 3 {
+            return false;
+        }
+        (self.run_command)(self.ctx, Str::new(command));
+        true
+    }
     pub fn data_dir(&self) -> std::path::PathBuf {
         // SAFETY: the game keeps the folder's name alive while the mod is open.
         unsafe { self.data_dir.as_str() }.into()
@@ -116,6 +127,15 @@ pub struct State {
     pub pitch: f32,
     /// Game ticks since start.
     pub ticks: u64,
+    /// ABI 3: a solid block the view ray meets within 200 blocks (fluids and
+    /// air pass): its block, and where the ray enters it.
+    pub aim_hit: bool,
+    pub aim_block: [i32; 3],
+    pub aim_point: [f64; 3],
+    /// ABI 3: the world's lowest block y, and the dimension: 0 overworld,
+    /// 1 the nether, 2 the end, 3 another.
+    pub min_y: i32,
+    pub dimension: u32,
 }
 
 /// What a mod's [`ENTRY`] returns: its calls, each optional, and the state

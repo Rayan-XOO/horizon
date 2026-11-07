@@ -128,6 +128,7 @@ Android-библиотеки, там будет написано почему о
   `hud`), `data_dir()` (своя папка мода для файлов).
 - `State`: `in_world`, `playing`, `x`, `y`, `z`, `yaw`, `pitch`, `ticks`.
 - ABI 2: `Host::set_option(key, value)` — опции игры, которыми управляет мод, пока он включён: `entity_culling` (`off`, `sync`, `async`; действует, пока своя настройка игрока выключена) и `hide_occluded_name_tags` (`true`/`false`). Пример — `mods/entity-culling`.
+- ABI 3: `Host::run_command(cmd)` — команда от имени игрока (на сервере отправляется как набранная), и в `State`: `aim_hit`/`aim_block`/`aim_point` (блок по взгляду до 200 блоков), `min_y`, `dimension`. Пример — `mods/orbital-laser`.
 
 ### Ограничения
 
@@ -226,6 +227,7 @@ The library exports `horizon_mod_entry(&mut Host) -> *const ModTable`. Every typ
   `hud` only), `data_dir` (the mod's own folder, `horizon-mods/.horizon-mod-data/<id>/`).
 - `State`: in a world, playing, the player's position, yaw and pitch, the tick count.
 - ABI 2: `Host::set_option(key, value)` — game options a mod drives while it is on: `entity_culling` (`off`, `sync`, `async`; applies while the player's own setting is off) and `hide_occluded_name_tags` (`true`/`false`). See `mods/entity-culling`.
+- ABI 3: `Host::run_command(cmd)` — a command as the player (sent like a typed one on a server), and in `State`: `aim_hit`/`aim_block`/`aim_point` (the block in view within 200 blocks), `min_y`, `dimension`. See `mods/orbital-laser`.
 
 In Rust, implement `horizon_native_abi::NativeMod` and call `export_mod!(MyMod)`; panics stay in the mod. The
 ABI only grows at the end of its structs; the game opens a mod made for its ABI version or an older one.
