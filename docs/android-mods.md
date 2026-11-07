@@ -127,6 +127,7 @@ Android-библиотеки, там будет написано почему о
 - `Host`: `log`, `chat` (строка в чат), `hud_line(text, rgb)` (строка в блоке мода слева сверху, только в
   `hud`), `data_dir()` (своя папка мода для файлов).
 - `State`: `in_world`, `playing`, `x`, `y`, `z`, `yaw`, `pitch`, `ticks`.
+- ABI 2: `Host::set_option(key, value)` — опции игры, которыми управляет мод, пока он включён: `entity_culling` (`off`, `sync`, `async`; действует, пока своя настройка игрока выключена) и `hide_occluded_name_tags` (`true`/`false`). Пример — `mods/entity-culling`.
 
 ### Ограничения
 
@@ -224,6 +225,7 @@ The library exports `horizon_mod_entry(&mut Host) -> *const ModTable`. Every typ
 - `Host`: `log`, `chat` (a line in chat), `hud_line` (a line of the mod's box in the top left corner, inside
   `hud` only), `data_dir` (the mod's own folder, `horizon-mods/.horizon-mod-data/<id>/`).
 - `State`: in a world, playing, the player's position, yaw and pitch, the tick count.
+- ABI 2: `Host::set_option(key, value)` — game options a mod drives while it is on: `entity_culling` (`off`, `sync`, `async`; applies while the player's own setting is off) and `hide_occluded_name_tags` (`true`/`false`). See `mods/entity-culling`.
 
 In Rust, implement `horizon_native_abi::NativeMod` and call `export_mod!(MyMod)`; panics stay in the mod. The
 ABI only grows at the end of its structs; the game opens a mod made for its ABI version or an older one.
