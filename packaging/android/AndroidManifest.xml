@@ -22,7 +22,7 @@
         android:hasCode="true"
         android:extractNativeLibs="true"
         android:largeHeap="true"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        android:theme="@style/HorizonGame">
         <profileable android:shell="true" />
         <activity
             android:name=".SetupActivity"
@@ -43,7 +43,7 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|smallestScreenSize">
             <meta-data android:name="android.app.lib_name" android:value="horizon" />
         </activity>
-        <activity android:name=".ProfileActivity" android:exported="false" android:theme="@android:style/Theme.Material.NoActionBar" android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".ProfileActivity" android:exported="false" android:theme="@style/HorizonProfile" android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ModImportActivity"
             android:exported="true"
