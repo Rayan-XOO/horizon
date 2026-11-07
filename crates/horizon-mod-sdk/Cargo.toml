@@ -1,0 +1,15 @@
+[package]
+name = "horizon-mod-sdk"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "The Horizon mod SDK (input, ui, render, world, atlas, hud, storage) for prebuilt mods: a mod built against it as a library for the game's target runs from its .hnmod, driven through mod ABI 4"
+
+[dependencies]
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+libloading = { version = "0.8", optional = true }
+
+[features]
+host = ["dep:libloading"]

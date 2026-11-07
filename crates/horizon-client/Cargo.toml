@@ -45,6 +45,8 @@ horizon-narrator = { path = "../horizon-narrator" }
 horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
 # Prebuilt native mods (`.hnmod` libraries, docs/android-mods.md): where the game opens them.
 horizon-native-abi = { path = "../horizon-native-abi", features = ["host"] }
+horizon-mod-sdk = { path = "../horizon-mod-sdk", features = ["host"] }
+postcard = { version = "1", features = ["alloc"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"

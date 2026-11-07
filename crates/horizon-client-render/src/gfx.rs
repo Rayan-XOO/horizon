@@ -7335,6 +7335,7 @@ impl Renderer {
         }
     }
     pub fn render(&mut self, frame: &Frame) -> Result<bool> {
+        crate::sdk_post::capture(frame);
         // A lost device cannot accept uploads either. Leave recovery to the
         // owner instead of submitting atlas patches to the invalid device.
         if self.device_lost() {

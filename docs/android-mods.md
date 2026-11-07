@@ -128,7 +128,8 @@ Android-библиотеки, там будет написано почему о
   `hud`), `data_dir()` (своя папка мода для файлов).
 - `State`: `in_world`, `playing`, `x`, `y`, `z`, `yaw`, `pitch`, `ticks`.
 - ABI 2: `Host::set_option(key, value)` — опции игры, которыми управляет мод, пока он включён: `entity_culling` (`off`, `sync`, `async`; действует, пока своя настройка игрока выключена) и `hide_occluded_name_tags` (`true`/`false`). Пример — `mods/entity-culling`.
-- ABI 3: `Host::run_command(cmd)` — команда от имени игрока (на сервере отправляется как набранная), и в `State`: `aim_hit`/`aim_block`/`aim_point` (блок по взгляду до 200 блоков), `min_y`, `dimension`. Пример — `mods/orbital-laser`.
+- ABI 3: `Host::run_command(cmd)` — команда от имени игрока (на сервере отправляется как набранная), и в `State`: `aim_hit`/`aim_block`/`aim_point` (блок по взгляду до 200 блоков), `min_y`, `dimension`.
+- ABI 4: **SDK-моды** (`crates/horizon-mod-sdk`). Мод на полном SDK Horizon (`input`, `ui`, `render`, `world`, `atlas`, `hud`, `storage`) собирается как `.so` и экспортирует `horizon_sdk_entry` (это делает `horizon_mod_sdk::export_mod!`). Всё своё мод несёт в `.hnmod`: свои шейдеры (WGSL post pass с параметрами и данными, рисуется поверх мира, читает цвет, глубину, камеру и текстуры блоков), звуки, предметы, модели, текстуры и язык (`horizon-mod.toml`, `assets/`, `data/` в том же файле), свой экран (квады, спрайты, предметы, текст, клики и ввод), HUD-панель, тряску камеры, клавиши, толчок/перенос игрока и правку мира напрямую (`world.edit-blocks`, высоты, чтение колонок). Игре для нового мода ничего менять не нужно. Пример — `mods/orbital-laser` (оригинальный Orbital Laser 0.5.10, собранный из исходников без изменений). Работа с миром идёт через сервер одиночной игры и требует уровня оператора 4 (читы включены).
 
 ### Ограничения
 
@@ -186,7 +187,8 @@ world you should see "Hello Android" top left; type `/hello` in chat.
 ### Available API and limitations
 
 Same as listed above: `tick`/`hud`/`key`/`command` callbacks; `log`, `chat`, `hud_line`, `data_dir`;
-player state. No world/block/item/server hooks, arm64 only, source-only desktop `.hnmod` files don't run,
+player state. ABI 4: SDK mods (`crates/horizon-mod-sdk`), whose `.hnmod` carries their own shaders, sounds, items,
+models, textures, screens, HUD, camera shake and direct world edits; see `mods/orbital-laser`. No world/block/item/server hooks, arm64 only, source-only desktop `.hnmod` files don't run,
 and mods are unsandboxed native code — install only mods you trust.
 
 ---

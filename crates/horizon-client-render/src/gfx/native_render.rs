@@ -36,6 +36,7 @@ pub fn set_mods_built_in(on: bool) {
 /// Whether [`native_world_drawn`] may draw ([`set_mods_built_in`]).
 pub fn world_drawn_hooked() -> bool {
     MODS_BUILT_IN.load(Ordering::Relaxed)
+        || crate::sdk_post::active()
         || RENDERERS
             .get()
             .is_some_and(|renderers| !renderers.is_empty())
@@ -151,6 +152,8 @@ pub struct RenderNeeds {
 #[inline(never)]
 pub fn native_world_drawn(world: &mut WorldDrawn<'_>) {
     generated::dispatch_world_drawn(RENDERERS.get().map_or(&[], |renderers| renderers), world);
+    // Prebuilt SDK mods' post passes (mod ABI 4).
+    crate::sdk_post::draw(world);
 }
 
 /// The first-person hand is drawn (see [`HandDrawn`]), on every frame [`native_world_drawn`]
@@ -164,6 +167,7 @@ pub fn native_hand_drawn(hand: &mut HandDrawn<'_>) {
 #[inline(never)]
 pub fn native_render_needs(needs: &mut RenderNeeds) {
     generated::dispatch_render_needs(RENDERERS.get().map_or(&[], |renderers| renderers), needs);
+    crate::sdk_post::needs(needs);
 }
 
 /// What the mods need this frame ([`native_render_needs`]).

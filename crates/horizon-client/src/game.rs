@@ -254,6 +254,7 @@ mod native_item_energy;
 mod native_item_fluids;
 mod native_level_refs;
 mod prebuilt_mods;
+mod sdk_mods;
 mod native_lifecycle;
 mod native_living_refs;
 mod native_machines;

@@ -1290,6 +1290,10 @@ impl MotionWorld<'_, '_, '_> {
         keys: crate::sprint::Keys,
         sprint_window: i32,
     ) -> Result<()> {
+        // A prebuilt SDK mod's carry holds the player in place of their own motion.
+        if let std::ops::ControlFlow::Break(r) = crate::sdk_carry::player_tick(self, keys) {
+            return r;
+        }
         self.local_tick(keys, |player, keys| {
             player.sprint_input_tick_with_window(keys, sprint_window)
         })

@@ -235,6 +235,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-polyfill"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
+dependencies = [
+ "critical-section",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -700,6 +709,12 @@ checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
 ]
+
+[[package]]
+name = "critical-section"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
 name = "crossbeam-queue"
@@ -1292,6 +1307,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hash32"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1329,6 +1353,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "heapless"
+version = "0.7.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
+dependencies = [
+ "atomic-polyfill",
+ "hash32",
+ "rustc_version",
+ "serde",
+ "spin",
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -1505,6 +1543,7 @@ dependencies = [
  "horizon-hdr",
  "horizon-items",
  "horizon-mod-api-gen",
+ "horizon-mod-sdk",
  "horizon-mods",
  "horizon-narrator",
  "horizon-native-abi",
@@ -1528,6 +1567,7 @@ dependencies = [
  "open",
  "png",
  "pollster",
+ "postcard",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -1791,6 +1831,16 @@ dependencies = [
  "snap",
  "tungstenite",
  "yaml-rust2",
+]
+
+[[package]]
+name = "horizon-mod-sdk"
+version = "0.2.0"
+dependencies = [
+ "libloading",
+ "log",
+ "postcard",
+ "serde",
 ]
 
 [[package]]
@@ -3434,6 +3484,7 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
+ "heapless",
  "serde",
 ]
 
@@ -4168,6 +4219,15 @@ dependencies = [
  "hkdf",
  "rand_core 0.6.4",
  "sha2",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

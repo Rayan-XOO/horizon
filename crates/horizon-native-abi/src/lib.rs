@@ -20,7 +20,9 @@ use std::ffi::c_void;
 
 /// The ABI version. Raised only when a field is added at the end of a
 /// struct below; the game opens a mod whose `abi` is this or lower.
-pub const ABI: u32 = 3;
+pub const ABI: u32 = 4;
+// ABI 4 adds no field here: it is the prebuilt SDK mods' own entry, `horizon_sdk_entry` (crates/horizon-mod-sdk,
+// `wire`), which a library exports instead of [`ENTRY`].
 /// The symbol a mod exports: `extern "C" fn(&mut Host) -> *const ModTable`.
 pub const ENTRY: &str = "horizon_mod_entry";
 /// The target name of an Android (arm64) build in `binaries`.

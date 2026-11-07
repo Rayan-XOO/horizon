@@ -219,6 +219,16 @@ impl fmt::Display for Capability {
 }
 
 impl Manifest {
+    /// The [`MANIFEST`] inside a native `.hnmod` (its content's), when it carries one.
+    pub fn of_bundle(path: &Path) -> Result<Self, String> {
+        use std::io::Read as _;
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut entry = zip.by_name(MANIFEST).map_err(|e| format!("{MANIFEST}: {e}"))?;
+        let mut text = String::new();
+        (&mut entry).take(1 << 20).read_to_string(&mut text).map_err(|e| format!("{MANIFEST}: {e}"))?;
+        Self::parse(&text)
+    }
     pub fn parse(text: &str) -> Result<Self, String> {
         let m: Manifest = toml::from_str(text).map_err(|e| format!("{MANIFEST}: {e}"))?;
         let id_ok = (1..=64).contains(&m.id.len())
@@ -367,6 +377,12 @@ impl Package {
             ));
         }
         Ok(Package { manifest, wasm })
+    }
+    /// The content of a native `.hnmod` that carries one (its [`MANIFEST`] beside `horizon-native.json`, and its
+    /// `assets/` and `data/`), as a package with no code: where the game opens the bundle's prebuilt library
+    /// (Android), it reads the content from the same file.
+    pub fn read_bundle_content(path: &Path) -> Result<Self, String> {
+        Ok(Package { manifest: Manifest::of_bundle(path)?, wasm: None })
     }
     /// Whether the mod at `path` (a `.hmod` or a folder) has a [`MANIFEST`]: content, or a legacy
     /// WebAssembly mod. A `.hmod` holding only native code has none.

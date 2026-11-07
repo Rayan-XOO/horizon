@@ -95,6 +95,7 @@ pub mod pvp_hud;
 pub mod screen_draw;
 pub mod screen_effects;
 pub mod sculk;
+pub mod sdk_post;
 pub mod section_mask;
 pub mod server_terrain;
 pub mod settings;

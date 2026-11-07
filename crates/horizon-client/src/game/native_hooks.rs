@@ -2305,6 +2305,7 @@ impl Game<'_> {
     /// Once a frame, in a world or not, after Horizon's extras.
     pub(super) fn native_frame(&mut self, elapsed: Duration) {
         mod_api::dispatch_frame(self, mod_api::mods(), elapsed);
+        self.sdk_frame(elapsed);
     }
     /// Client-side evaluation of a mod's namespaced conditional item model property.
     /// Set value only for a property your mod owns; unhandled properties stay false.
@@ -2354,6 +2355,7 @@ impl Game<'_> {
     /// server's levels have `native_level_load`. API 135.
     pub(super) fn native_client_level_load(&mut self, dimension: &str) {
         mod_api::dispatch_client_level_load(self, mod_api::mods(), dimension);
+        self.sdk_client_level_load(dimension);
     }
     /// The client dropped its level for `dimension` (`LevelEvent.Unload`
     /// from `Minecraft.setLevel` and `disconnect`): replaced by another
@@ -2362,12 +2364,14 @@ impl Game<'_> {
     /// Client-side. API 135.
     pub(super) fn native_client_level_unload(&mut self, dimension: &str) {
         mod_api::dispatch_client_level_unload(self, mod_api::mods(), dimension);
+        self.sdk_client_level_unload(dimension);
     }
     /// Once a tick, in every `Game`: the window's (in single player, on LAN
     /// and on servers), and the server's own (`native_window` is false
     /// there: the single player server thread, a dedicated server).
     pub(super) fn native_tick(&mut self) {
         mod_api::dispatch_tick(self, mod_api::mods());
+        self.sdk_tick();
     }
     /// Before an eligible targeted block's selection outline is built.
     /// Cancel skips only the default block highlight, after normal HUD and game-mode gates.
@@ -2590,6 +2594,7 @@ impl Game<'_> {
     /// After a successful authoritative server level tick pass.
     pub(super) fn native_level_tick_post(&mut self, dimension: &str) {
         mod_api::dispatch_level_tick_post(self, mod_api::mods(), dimension);
+        super::sdk_mods::level_tick(self, dimension);
     }
     /// The local player attacked an entity, right after the attack left for
     /// the server (`MultiPlayerGameMode.attack`): `target` is the entity's id,
@@ -2630,6 +2635,7 @@ impl Game<'_> {
     /// says is taken.
     pub(super) fn native_hud(&mut self, batch: &mut HudBatch, corners: &mut Corners) {
         mod_api::dispatch_hud(self, mod_api::mods(), batch, corners);
+        self.sdk_hud(batch, corners);
     }
     /// After the complete normal GUI batch, including screens, prompts, toasts,
     /// debug overlays, the pad cursor and IME. Fires even with F1 or a menu open;
@@ -2980,6 +2986,7 @@ impl Game<'_> {
     /// (`native_shake_matrix`). API 82.
     pub(super) fn native_camera_shake(&self, partial: f32, shake: &mut NativeShake) {
         mod_api::dispatch_camera_shake(self, mod_api::mods(), partial, shake);
+        self.sdk_camera_shake(partial, shake);
     }
     /// Once a frame while the world is drawn, `partial` ticks past the last tick (0 to 1), the
     /// camera at `camera`: add lines, box outlines, filled boxes, beacon-style beams and text
@@ -3253,6 +3260,7 @@ impl Game<'_> {
     /// Options > Mods lists the native mods: push yours.
     pub(super) fn native_mods(&mut self, mods: &mut Vec<NativeMod>) {
         mod_api::dispatch_mods(self, mod_api::mods(), mods);
+        self.sdk_mods(mods);
     }
     /// The buttons of mod `mod_id`'s settings page, under its keys: push
     /// their labels when it is yours. Asked again each time the page opens
@@ -3772,6 +3780,7 @@ impl Game<'_> {
         screen: &NativeScreenView<'_>,
     ) {
         mod_api::dispatch_screen_render_post(self, mod_api::mods(), batch, screen);
+        self.sdk_screen_render_post(batch, screen);
     }
     /// A mouse button went down over the open screen
     /// (`ScreenEvent.MouseButtonPressed.Pre`, vanilla's
@@ -3809,6 +3818,7 @@ impl Game<'_> {
             modifiers,
             canceled,
         );
+        self.sdk_screen_click(screen, button, canceled);
     }
     /// A mouse button went up over the open screen
     /// (`ScreenEvent.MouseButtonReleased.Pre`, vanilla's
@@ -3942,6 +3952,7 @@ impl Game<'_> {
             modifiers,
             canceled,
         );
+        self.sdk_screen_key(screen, key, canceled);
     }
     /// Before an open screen handles a named key's release (same screen gate as key presses).
     /// Cancel bypasses screen handling; physical keys and mapped keyboard hold/toggle state release.
@@ -3999,6 +4010,7 @@ impl Game<'_> {
             modifiers,
             canceled,
         );
+        self.sdk_screen_char(screen, c, canceled);
     }
     pub(super) fn native_screen_text_field_char_typed_pre(
         &self,
@@ -4320,6 +4332,7 @@ impl Game<'_> {
     /// `native_refresh_commands`. API 8.
     pub(super) fn native_register_commands(&mut self, commands: &mut Vec<NativeCommand>) {
         mod_api::dispatch_register_commands(self, mod_api::mods(), commands);
+        self.sdk_register_commands(commands);
     }
     /// A player's command on the server (`Commands.performCommand`),
     /// without its slash, for a command a mod registered and the player's
@@ -8330,11 +8343,13 @@ impl Game<'_> {
     /// arrives, with no player's state swapped in. Server-side. API 40.
     pub(super) fn native_net_from_client(&mut self, player: u128, channel: &str, data: &[u8]) {
         mod_api::dispatch_net_from_client(self, mod_api::mods(), player, channel, data);
+        super::sdk_mods::from_client(self, player, channel, data);
     }
     /// A message from the server on `channel` (`mod_id:name`), whose `data`
     /// is the sender's own bytes. The window's game only. API 40.
     pub(super) fn native_net_from_server(&mut self, channel: &str, data: &[u8]) {
         mod_api::dispatch_net_from_server(self, mod_api::mods(), channel, data);
+        super::sdk_mods::from_server(self, channel, data);
     }
     /// A play packet from the server reached the window's game, decoded,
     /// just before the game handles it (`Connection.genericsFtw` handing it
@@ -12118,7 +12133,7 @@ impl Game<'_> {
     pub(super) fn client_mod_command(&mut self, command: &str) -> bool {
         let mut ran = false;
         self.native_command(command, &mut ran);
-        ran || self.prebuilt_command(command)
+        ran || self.prebuilt_command(command) || self.sdk_command(command)
     }
     /// The zoom in effect while playing (a native mod's); the spyglass's own
     /// view wins.

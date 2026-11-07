@@ -31,6 +31,11 @@ pub(super) const ON: bool = cfg!(target_os = "android");
 /// One prebuilt mod found at start.
 pub(super) struct Prebuilt {
     id: String,
+    /// Its name (its content's `horizon-mod.toml`, else its id) and its row's title.
+    name: String,
+    title: String,
+    /// An SDK mod (mod ABI 4, `sdk_mods.rs`), driven there.
+    sdk: bool,
     /// The library in the app's own storage, opened when the mod is first on.
     lib: PathBuf,
     loaded: Option<Loaded>,
@@ -168,11 +173,15 @@ pub(super) fn scan(
             rows.push(row(m.id.clone(), title, Some(problem)));
             continue;
         }
-        let mut r = row(m.id.clone(), title, None);
+        let mut r = row(m.id.clone(), title.clone(), None);
         r.native = Some(NativePage::default());
         rows.push(r);
+        let name = horizon_mods::Manifest::of_bundle(&path).map_or_else(|_| m.id.clone(), |c| c.name);
         mods.push(Prebuilt {
             id: m.id.clone(),
+            name,
+            title: title.clone(),
+            sdk: false,
             lib,
             loaded: None,
             failed: false,
@@ -231,9 +240,20 @@ impl Game<'_> {
         let home = Self::options_path().with_file_name(mod_list::DIR);
         for i in 0..self.prebuilt.mods.len() {
             let m = &self.prebuilt.mods[i];
-            if m.loaded.is_some() || m.failed || !self.native_on(&m.id) {
+            if m.loaded.is_some() || m.failed || m.sdk || !self.native_on(&m.id) {
                 continue;
             }
+            // A prebuilt SDK mod (mod ABI 4): driven by `sdk_mods.rs`.
+            match super::sdk_mods::open(&m.id, &m.name, &m.title, &m.lib) {
+                Ok(true) => {
+                    log::info!("Horizon: SDK mod {} opened ({})", m.id, m.lib.display());
+                    self.prebuilt.mods[i].sdk = true;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => log::warn!("Horizon: mod {} can't open as an SDK mod: {e}", m.id),
+            }
+            let m = &self.prebuilt.mods[i];
             let data = home.join(".horizon-mod-data").join(&m.id);
             // SAFETY: the player installed the mod and left it on; it runs with the game's rights.
             let opened = unsafe { Loaded::open(&m.lib, &data) };
@@ -363,6 +383,7 @@ impl Game<'_> {
     }
     pub(super) fn prebuilt_key(&mut self, key: &str, pressed: bool) {
         self.each_prebuilt(|m| m.key(key, pressed));
+        self.sdk_key(key, pressed);
     }
     /// A chat command: whether a mod ran it.
     pub(super) fn prebuilt_command(&mut self, command: &str) -> bool {

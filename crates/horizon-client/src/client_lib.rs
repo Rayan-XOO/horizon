@@ -94,6 +94,8 @@ pub mod mobs;
 pub mod mod_content;
 pub mod mod_registry;
 pub mod motion;
+/// Prebuilt SDK mods' `world.carry-player` (mod ABI 4).
+pub mod sdk_carry;
 pub mod multiplayer;
 pub mod music;
 pub mod native_client_hooks;

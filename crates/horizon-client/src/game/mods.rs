@@ -102,17 +102,33 @@ pub(super) fn content_root(
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());
+    // Where the game opens prebuilt mods (Android), a `.hnmod` that carries content (its items, models, textures,
+    // sounds) has it read from the same file, on with its code.
+    let mut bundles: Vec<std::path::PathBuf> = Vec::new();
+    if super::prebuilt_mods::ON {
+        for dir in [here.join(super::prebuilt_mods::DIR), here.join(mod_list::NATIVE_DIR)] {
+            for p in horizon_mods::find(&dir) {
+                let native = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("hnmod"));
+                if native && Package::has_manifest(&p) && !bundles.iter().any(|b| b.file_name() == p.file_name()) {
+                    bundles.push(p);
+                }
+            }
+        }
+        paths.extend(bundles.iter().cloned());
+    }
     let mut known = None;
     let mut mods: Vec<ContentMod> = Vec::new();
     // The first load's list stays (`set_local`): a reload does not hash the files again.
     let announce = !horizon_protocol::mod_list::is_set();
     let mut announced = Vec::new();
     for path in &paths {
-        let Ok(package) = Package::read(path) else {
+        let bundle = bundles.contains(path);
+        let read = if bundle { Package::read_bundle_content(path) } else { Package::read(path) };
+        let Ok(package) = read else {
             continue;
         };
         let m = &package.manifest;
-        let on = enabled.contains(&m.id) || dev.contains(path);
+        let on = enabled.contains(&m.id) || dev.contains(path) || bundle;
         if !on
             || !m.capabilities.contains(&Capability::Registries)
             || mods.iter().any(|c| c.id == m.id)
