@@ -98,6 +98,23 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         systemDriver = Ui.button(this, Ui.t("Системный драйвер", "System driver"), false);
         systemDriver.setOnClickListener(this);
         card.addView(systemDriver, Ui.gap(this, 8));
+        final File safeMode = new File(getFilesDir(), "safe-mode.txt");
+        if (safeMode.isFile()) {
+            card.addView(Ui.text(this, Ui.t(
+                    "Безопасный запуск: Vulkan не стартовал, игра работает на OpenGL ES и может быть медленнее.",
+                    "Safe start: Vulkan did not start, so the game runs on OpenGL ES and can be slower."),
+                    12, Ui.WARN, false), Ui.gap(this, 10));
+            Button vulkan = Ui.button(this, Ui.t("Попробовать Vulkan снова", "Try Vulkan again"), false);
+            vulkan.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    safeMode.delete();
+                    new File(getFilesDir(), "launch.pending").delete();
+                    v.setEnabled(false);
+                    ((Button) v).setText(Ui.t("Перезапустите игру", "Restart the game"));
+                }
+            });
+            card.addView(vulkan, Ui.gap(this, 8));
+        }
         card.addView(Ui.text(this, Ui.t(
                 "Моды: .hnmod со сборкой для Android или .hmod. Также можно положить файл в Android/data/dev.horizonlab.horizon/files/mods/.",
                 "Mods: a .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),

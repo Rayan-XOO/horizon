@@ -151,6 +151,9 @@ public class HorizonActivity extends NativeActivity {
         // or finished by the system). The native side can't start again here: end the process
         // so the next launch is a fresh one. A configuration change is not an end.
         if (isFinishing() && !isChangingConfigurations() && !quitting) {
+            // The player closed it: not a failed start, however short (android_main.rs).
+            new java.io.File(getFilesDir(), "launch.pending").delete();
+            new java.io.File(getFilesDir(), "vulkan-driver.pending").delete();
             System.exit(0);
         }
     }
