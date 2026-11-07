@@ -1,0 +1,20 @@
+[package]
+name = "orbital-laser"
+version = "0.5.10-android.1"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Orbital Laser (Stink-O, MIT) for Horizon Android: the strike driver as a prebuilt mod"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+horizon-native-abi = { path = "../../crates/horizon-native-abi" }
+
+[profile.release]
+strip = true
+panic = "unwind"
+
+# Its own workspace: built with cargo ndk, not with the game.
+[workspace]
