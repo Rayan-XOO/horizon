@@ -15,9 +15,13 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Microsoft device-code sign-in for online-mode servers. Uses this build's own
- * Azure client ID (msa-client-id.txt). Never another app's ID. Tokens stay in
- * the app's private files and are not logged.
+ * Microsoft sign-in for online-mode servers. The quick way is a WebView on
+ * login.live.com (MsaLoginActivity): the player types only an email and a
+ * password, the oauth20_desktop.srf redirect hands over a code, and the Xbox,
+ * XSTS and Minecraft tokens follow by themselves. The device code with an own
+ * Azure client ID (msa-client-id.txt) stays as the fallback. Tokens stay in
+ * the app's private files and are not logged; the refresh token renews the
+ * sign-in, so later launches need no sign-in at all.
  */
 final class Msa {
     interface Listener {
@@ -47,6 +51,25 @@ final class Msa {
     }
 
     private Msa() {}
+
+    /** The public client of login.live.com's desktop flow (the WebView sign-in). */
+    static final String LIVE_CLIENT = "00000000402b5328";
+    static final String LIVE_REDIRECT = "https://login.live.com/oauth20_desktop.srf";
+    static final String LIVE_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL";
+
+    static String liveAuthorizeUrl() {
+        try {
+            return "https://login.live.com/oauth20_authorize.srf?client_id=" + LIVE_CLIENT
+                    + "&response_type=code&redirect_uri=" + enc(LIVE_REDIRECT)
+                    + "&scope=" + enc(LIVE_SCOPE) + "&prompt=select_account";
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static JSONObject readAccount(Context c) throws Exception {
+        return new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+    }
 
     static File idFile(Context c) {
         return new File(c.getFilesDir(), "msa-client-id.txt");
@@ -81,9 +104,10 @@ final class Msa {
     /** The saved account's Minecraft token runs out within the hour and it can be renewed. */
     static boolean needsRefresh(Context c) {
         try {
-            JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+            JSONObject o = readAccount(c);
             long exp = o.optLong("minecraft_expires_at", 0);
-            return !o.optString("refresh_token", "").isEmpty() && !clientId(c).isEmpty()
+            boolean live = "live".equals(o.optString("flow", ""));
+            return !o.optString("refresh_token", "").isEmpty() && (live || !clientId(c).isEmpty())
                     && exp < System.currentTimeMillis() / 1000L + 3600;
         } catch (Exception e) {
             return false;
@@ -99,18 +123,24 @@ final class Msa {
         final long expected;
         final String refresh;
         final String id;
+        final boolean live;
         try {
             synchronized (Msa.class) {
                 if (signingIn) return Ui.t("Дождитесь завершения входа.", "Wait for sign-in to finish.");
                 expected = generation;
-                JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+                JSONObject o = readAccount(c);
                 refresh = o.optString("refresh_token", "");
-                id = clientId(c);
+                live = "live".equals(o.optString("flow", ""));
+                id = live ? LIVE_CLIENT : clientId(c);
             }
             if (refresh.isEmpty() || id.isEmpty()) return Ui.t("Нет данных для обновления входа.", "Nothing to renew the sign-in with.");
-            JSONObject token = postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                    "grant_type=refresh_token&client_id=" + enc(id) + "&refresh_token=" + enc(refresh)
-                            + "&scope=" + enc("XboxLive.signin offline_access"));
+            JSONObject token = live
+                    ? postForm("https://login.live.com/oauth20_token.srf",
+                            "grant_type=refresh_token&client_id=" + enc(id) + "&refresh_token=" + enc(refresh)
+                                    + "&redirect_uri=" + enc(LIVE_REDIRECT) + "&scope=" + enc(LIVE_SCOPE))
+                    : postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                            "grant_type=refresh_token&client_id=" + enc(id) + "&refresh_token=" + enc(refresh)
+                                    + "&scope=" + enc("XboxLive.signin offline_access"));
             String access = token.optString("access_token", "");
             if (access.isEmpty()) {
                 String err = token.optString("error", "");
@@ -125,6 +155,7 @@ final class Msa {
             }
             String next = token.optString("refresh_token", "");
             JSONObject account = finish(access, next.isEmpty() ? refresh : next);
+            if (live) account.put("flow", "live");
             synchronized (Msa.class) {
                 checkCurrent(expected);
                 write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
@@ -183,6 +214,58 @@ final class Msa {
                 }
             }
         }, "horizon-msa").start();
+    }
+
+    /**
+     * Finishes the WebView sign-in: trades the login.live.com code for tokens and runs the
+     * Xbox, XSTS and Minecraft chain. Shares the session generation with start, cancel and
+     * signOut, so a sign-out during the exchange discards it.
+     */
+    static void startWithCode(final Context c, final String authCode, final Listener listener) {
+        final long expected;
+        synchronized (Msa.class) {
+            expected = ++generation;
+            signingIn = true;
+        }
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    checkCurrent(expected);
+                    JSONObject token = postForm("https://login.live.com/oauth20_token.srf",
+                            "grant_type=authorization_code&client_id=" + enc(LIVE_CLIENT) + "&code=" + enc(authCode)
+                                    + "&redirect_uri=" + enc(LIVE_REDIRECT) + "&scope=" + enc(LIVE_SCOPE));
+                    String access = token.optString("access_token", "");
+                    if (access.isEmpty()) throw new Exception(oauth(token));
+                    checkCurrent(expected);
+                    JSONObject account = finish(access, token.optString("refresh_token", ""));
+                    account.put("flow", "live");
+                    final String name;
+                    synchronized (Msa.class) {
+                        checkCurrent(expected);
+                        write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
+                        name = account.optString("name");
+                        try {
+                            HorizonActivity.nativeAccountRefreshed();
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    deliver(expected, new Runnable() {
+                        public void run() { listener.onDone(name); }
+                    });
+                } catch (final Exception e) {
+                    final String msg = e instanceof java.io.IOException
+                            ? Ui.t("Нет сети. Проверьте интернет и попробуйте снова.", "No network. Check the connection and try again.")
+                            : (e.getMessage() == null ? "Sign-in failed." : e.getMessage());
+                    deliver(expected, new Runnable() {
+                        public void run() { listener.onError(msg); }
+                    });
+                } finally {
+                    synchronized (Msa.class) {
+                        if (generation == expected) signingIn = false;
+                    }
+                }
+            }
+        }, "horizon-msa-live").start();
     }
 
     private static String signIn(Context c, String clientId, final Listener listener, final long expected) throws Exception {
