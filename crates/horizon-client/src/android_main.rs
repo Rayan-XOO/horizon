@@ -61,7 +61,7 @@ fn android_main(app: AndroidApp) {
             log::error!("Horizon: {error}");
             crash::report_error(&home, "client", &*error);
         }
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => clear_launch_marks(&app),
         Err(_) => log::error!("Horizon: the game thread panicked"),
     }
     logging::flush();
@@ -110,11 +110,20 @@ fn apply_vulkan_driver(internal: &std::path::Path) {
     });
 }
 
+/// The player quit on purpose: however short the launch, it did not fail. Without this, opening
+/// the game and quitting twice within 25 seconds turned safe start on.
+fn clear_launch_marks(app: &AndroidApp) {
+    if let Some(internal) = app.internal_data_path() {
+        let _ = std::fs::remove_file(internal.join("launch.pending"));
+        let _ = std::fs::remove_file(internal.join("vulkan-driver.pending"));
+    }
+}
+
 /// Safe start: a launch that died within its first 25 seconds (with the system driver)
 /// leaves `launch.pending`; after two such launches in a row the next ones start on
-/// OpenGL ES with GPU occlusion culling off, until one stays up. Some drivers (Adreno 740
-/// on certain firmware, Mali on old Android) fail inside Vulkan before the first frame.
-/// `safe-mode.txt` in internal storage forces it; deleting it gives Vulkan another try.
+/// OpenGL ES with GPU occlusion culling off. Some drivers (Adreno 740 on certain firmware,
+/// Mali on old Android) fail inside Vulkan before the first frame. `safe-mode.txt` in
+/// internal storage keeps it on until the profile screen's "Try Vulkan again" deletes it.
 fn apply_safe_mode(internal: &std::path::Path) {
     let pending = internal.join("launch.pending");
     let forced = internal.join("safe-mode.txt");
