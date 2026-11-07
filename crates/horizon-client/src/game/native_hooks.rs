@@ -12082,6 +12082,7 @@ impl Game<'_> {
                 self.native_panel_key(name);
             }
             self.native_key(name, pressed);
+            self.prebuilt_key(name, pressed);
         }
     }
     /// `ClientHooks.onClickInput`: tells `native_interaction_key` that `button`
@@ -12105,6 +12106,7 @@ impl Game<'_> {
     pub(super) fn native_mouse_event(&mut self, button: MouseButton, pressed: bool) {
         let name = keybinds::mouse_name(button);
         self.native_key(&name, pressed);
+        self.prebuilt_key(&name, pressed);
     }
     /// Wheel steps while playing: whether a native mod took them.
     pub(super) fn native_wheel_event(&mut self, steps: f32) -> bool {
@@ -12116,7 +12118,7 @@ impl Game<'_> {
     pub(super) fn client_mod_command(&mut self, command: &str) -> bool {
         let mut ran = false;
         self.native_command(command, &mut ran);
-        ran
+        ran || self.prebuilt_command(command)
     }
     /// The zoom in effect while playing (a native mod's); the spyglass's own
     /// view wins.

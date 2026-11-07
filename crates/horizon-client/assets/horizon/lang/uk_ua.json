@@ -471,5 +471,9 @@
   "Pack settings": "Налаштування пакета",
   "Built-in settings": "Вбудовані налаштування",
   "%s settings": "Налаштування %s",
-  "Settings made by the pack's author: they change only this pack.": "Налаштування, створені автором пакета: вони змінюють лише цей пакет."
+  "Settings made by the pack's author: they change only this pack.": "Налаштування, створені автором пакета: вони змінюють лише цей пакет.",
+  "horizon.options.menu_navigation": "Навігація в меню",
+  "horizon.options.on_screen_keyboard": "Екранна клавіатура",
+  "horizon.mods.not_built_phone": " (лише ПК)",
+  "horizon.mods.not_built_phone.tip": "Нативний мод (.hnmod) збирається в гру лаунчером на ПК, тому на телефоні він не запуститься. Візьміть .hmod-версію мода, якщо вона є, або грайте з ним на ПК."
 }

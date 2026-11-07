@@ -81,6 +81,7 @@
   "Black Level": "Уровень чёрного",
   "UI Brightness": "Яркость интерфейса",
   "Battery Mode": "Режим экономии",
+  "Fast Opaque Pass": "Быстрый проход непрозрачных",
   "Graphics API": "Графический API",
   "Performance Overlay": "Оверлей производительности",
   "Full Detail Distance": "Дальность полной детализации",
@@ -179,6 +180,7 @@
   "Shows when the world saves.": "Показывает, когда мир сохраняется.",
   "Shows attack cooldown.": "Показывает перезарядку удара.",
   "60 FPS cap (30 in menus or unfocused), half the workers: less power.": "Предел 60 FPS (30 в меню и без фокуса) и половина потоков: меньше энергии.",
+  "Draws solid blocks before leaves and grass: faster terrain.": "Сначала рисует сплошные блоки, затем листву и траву: быстрее ландшафт.",
   "Threads that generate, light and mesh chunks. Next start.": "Потоки, которые генерируют, освещают и строят чанки. Со следующего запуска.",
   "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.": "Vulkan, при сбое — DirectX 12 (Windows) или OpenGL (Linux). Со следующего запуска.",
   "Mesh data sent to the GPU per frame. Lower is smoother while loading.": "Данных меша в видеокарту за кадр. Меньше — плавнее во время загрузки.",
@@ -240,5 +242,7 @@
   "Pack settings": "Настройки пакета",
   "Built-in settings": "Встроенные настройки",
   "%s settings": "Настройки %s",
-  "Settings made by the pack's author: they change only this pack.": "Настройки, созданные автором пакета: они меняют только этот пакет."
+  "Settings made by the pack's author: they change only this pack.": "Настройки, созданные автором пакета: они меняют только этот пакет.",
+  "horizon.mods.not_built_phone": " (только ПК)",
+  "horizon.mods.not_built_phone.tip": "Нативный мод (.hnmod) собирается в игру лаунчером на ПК, поэтому на телефоне он не запустится. Возьмите .hmod-версию мода, если она есть, или играйте с ним на ПК."
 }

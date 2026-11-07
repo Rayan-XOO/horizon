@@ -598,6 +598,10 @@ impl ApplicationHandler for Split<'_> {
         }
     }
 
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.host.suspended(event_loop);
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.surfaces.is_empty() {
             return self.host.window_event(event_loop, id, event);

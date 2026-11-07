@@ -6199,6 +6199,7 @@ impl Game<'_> {
         // Client mods tick on any server, single player's own included.
         self.native_net.to_server = 0;
         self.native_tick();
+        self.prebuilt_tick();
         self.tell_native_now();
         // Far tiles the samplers asked for (`lod_net`).
         if let Some(r) = &self.remote {

@@ -40,7 +40,7 @@ pub(super) struct WorldOptions {
     scroll: f32,
     view: View,
     /// InWorldGameRulesScreen, while it is open.
-    rules: Option<RulesScreen>,
+    pub(super) rules: Option<RulesScreen>,
     focused_button: Option<Button>,
     popup_focus: Option<usize>,
 }

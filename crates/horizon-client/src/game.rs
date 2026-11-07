@@ -174,6 +174,7 @@ mod key_focus;
 mod lan;
 mod lan_actions;
 mod lan_attributes;
+mod local_skin;
 mod lan_camera;
 mod lan_chat;
 mod lan_crafting;
@@ -252,6 +253,7 @@ mod native_item_container;
 mod native_item_energy;
 mod native_item_fluids;
 mod native_level_refs;
+mod prebuilt_mods;
 mod native_lifecycle;
 mod native_living_refs;
 mod native_machines;
@@ -302,6 +304,11 @@ mod ordered_tick;
 mod packs;
 mod pad;
 mod pad_actions;
+#[cfg(target_os = "android")]
+mod android_ime;
+#[cfg(target_os = "android")]
+mod android_input;
+mod touch;
 mod pad_menu;
 mod paintings;
 mod pandas;
@@ -512,7 +519,9 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     error::EventLoopError,
-    event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{
+        DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    },
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
@@ -694,7 +703,12 @@ impl Options {
             .ok_or("missing executable directory")?
             .join("resources");
         let mut o = Self {
-            resources: if sibling.join("horizon-resources.json").exists() {
+            resources: if let Some(path) =
+                std::env::var_os("HORIZON_RESOURCES").filter(|p| !p.is_empty())
+            {
+                // Android: set by android_main to the app's storage (ANDROID.md).
+                path.into()
+            } else if sibling.join("horizon-resources.json").exists() {
                 sibling
             } else {
                 std::path::Path::new(".local/horizon-client").join(horizon_core::VANILLA_VERSION)
@@ -2750,6 +2764,8 @@ struct Game<'a> {
     last_input: Instant,
     /// Controllers (Horizon's own).
     pad: pad::Pads,
+    /// Fingers on a touch screen (Android).
+    touch: touch::Touches,
     frames: u64,
     /// The glint clock and options, read once at the start of each frame
     /// (game/item_draw.rs).
@@ -3181,6 +3197,7 @@ struct Game<'a> {
     pvp: pvp::PvpState,
     /// Horizon mods (`game/mods.rs`), none running unless turned on.
     mods: mods::ModsState,
+    prebuilt: prebuilt_mods::PrebuiltMods,
     /// Every item and recipe, for mods (`game/native_recipes.rs`), made once.
     recipe_tables: native_recipes::RecipeTables,
     /// The item panel beside container screens (`game/native_panel.rs`).
@@ -3484,6 +3501,8 @@ struct Game<'a> {
     fangs: fangs::FangState,
     /// The local player as a model (third person, the inventory).
     player_model: Option<Mob>,
+    /// The player's own skin file (`local_skin`).
+    local_skin: local_skin::LocalSkin,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Dim {
@@ -8249,6 +8268,7 @@ impl Game<'_> {
         self.update_totem_ready();
         self.tick_command_extras();
         self.native_tick();
+        self.prebuilt_tick();
         self.tell_native_now();
         self.tick_world(running)
     }
@@ -8840,8 +8860,13 @@ impl Game<'_> {
                 None
             };
             self.captured = self.capture_mode.is_some();
+            // Android has no pointer to grab: touch turns the view (game/touch.rs).
+            #[cfg(target_os = "android")]
+            {
+                self.captured = true;
+            }
             // Windows already warped above, inside the clip's own position.
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "android")))]
             if self.captured && self.focused {
                 warp(window);
             }
@@ -9115,6 +9140,7 @@ impl Game<'_> {
         self.frame_graph
             .draw(self.settings.horizon.overlay, &mut batch, &self.gui.atlas);
         self.draw_pad_cursor(&mut batch);
+        self.draw_touch_controls(&mut batch);
         batch
     }
     fn hud_layers(&mut self, size: [u32; 2]) -> HudBatch {
@@ -9188,6 +9214,7 @@ impl Game<'_> {
             self.draw_tutorial_toasts(&mut batch, false);
             self.draw_pack_toasts(&mut batch, false);
             self.draw_music_toast(&mut batch, false);
+            self.draw_touch_controls(&mut batch);
             return batch;
         }
         let atlas_ptr: *const HudAtlas = &self.gui.atlas;
@@ -12940,6 +12967,7 @@ impl Game<'_> {
         self.tick_advancements();
         self.tick_player_model();
         self.tick_emotes();
+        self.tick_local_skin();
         Ok(())
     }
     /// SkyRenderer.renderSunMoonAndStars: bodies on a frame rotated Y -90 then X by angle.
@@ -16787,6 +16815,9 @@ impl Game<'_> {
             camera.y.floor() as i32,
             camera.z.floor() as i32,
         ];
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_opaque_split(self.settings.horizon.opaque_split);
+        }
         // The camera inside an opaque block sees nothing through it: disable.
         let cave_culling = self.settings.horizon.cave_culling
             && !self
@@ -18381,6 +18412,19 @@ fn autosave_interval(rate: f32) -> i64 {
 impl ApplicationHandler for Game<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
+            // Android: the native window is back after the app was in the background.
+            #[cfg(target_os = "android")]
+            {
+                ANDROID_BACKGROUND.store(false, Ordering::Relaxed);
+                self.audio.set_output_paused(false);
+                // The time away is not simulated in one go when the loop wakes up.
+                self.previous = Instant::now();
+            }
+            if let Some(renderer) = &mut self.renderer
+                && let Err(e) = renderer.regain_surface()
+            {
+                log::warn!("Horizon: surface not recreated: {e}");
+            }
             return;
         }
         debug_keys::warm_debug_cpu();
@@ -18471,6 +18515,35 @@ impl ApplicationHandler for Game<'_> {
             self.last_input = Instant::now();
         }
     }
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        // Android: the native window goes away in the background. Stop polling
+        // so the process sleeps instead of running at full speed behind Home.
+        // Home or another app: the game freezes. A world opens the pause menu (single player
+        // stops its server ticking), the sound output stops and the loop sleeps until the
+        // window is back.
+        #[cfg(target_os = "android")]
+        {
+            ANDROID_BACKGROUND.store(true, Ordering::Relaxed);
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if self.player.is_some()
+                && self.title.is_none()
+                && self.screen == Screen::Playing
+                && self.control.is_none()
+            {
+                self.screen = Screen::Paused;
+            }
+            if let Some(server) = &self.integrated {
+                server.set_paused(true);
+            }
+            self.touch_release_all();
+            android_input::reset();
+            self.touch.pointer_captured = None;
+            self.audio.set_output_paused(true);
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.lose_surface();
+        }
+    }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.idle(event_loop);
     }
@@ -18518,6 +18591,19 @@ impl Game<'_> {
         // Who caused it, before the event is handled: the trace wants the
         // window's own keys, never the ones the socket made up.
         self.trace_window_event(origin, &event);
+        // Android's back button or gesture: Escape (close the screen, or pause).
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::BrowserBack)
+        {
+            if key.state == ElementState::Pressed && !key.repeat {
+                self.touch_back();
+            }
+            return;
+        }
+        if let WindowEvent::Touch(touch) = &event {
+            self.touch_event(event_loop, *touch);
+            return;
+        }
         if let WindowEvent::KeyboardInput { event, .. } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
@@ -20096,11 +20182,20 @@ impl Game<'_> {
         if self.pending_save.is_some() {
             return;
         }
+        self.touch_frame();
+        #[cfg(target_os = "android")]
+        self.android_input_frame(event_loop);
         horizon_client::spans::time("pads", || self.poll_pads(event_loop));
         self.pause_if_inactive();
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
             self.error = Some("frame-limited run timed out".into());
             event_loop.exit();
+            return;
+        }
+        // In the background nothing is simulated or drawn: the loop waits for `resumed`.
+        #[cfg(target_os = "android")]
+        if ANDROID_BACKGROUND.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
         if let Some(w) = &self.window {
@@ -20125,6 +20220,11 @@ impl Game<'_> {
                 WindowEvent::RedrawRequested,
                 input_trace::InputOrigin::Game,
             );
+            return;
+        }
+        #[cfg(target_os = "android")]
+        if ANDROID_BACKGROUND.load(Ordering::Relaxed) {
+            event_loop.set_control_flow(ControlFlow::Wait);
             return;
         }
         // Consume the last frame's result: a hidden compositor may stop sending
@@ -20329,6 +20429,7 @@ impl<'a> Game<'a> {
             frame_end: now,
             last_input: now,
             pad: Default::default(),
+            touch: Default::default(),
             frames: 0,
             glint_frame: Default::default(),
             kept_block_entities: Default::default(),
@@ -20596,6 +20697,7 @@ impl<'a> Game<'a> {
             extras: Default::default(),
             pvp: Default::default(),
             mods: Default::default(),
+            prebuilt: Default::default(),
             recipe_tables: Default::default(),
             panel: Default::default(),
             native_shaders: Default::default(),
@@ -20728,6 +20830,7 @@ impl<'a> Game<'a> {
             camera_type: Default::default(),
             fangs: Default::default(),
             player_model: None,
+            local_skin: Default::default(),
         };
         if game.native_window() {
             game.native_client_start();
@@ -22531,6 +22634,35 @@ fn write_report(game: &Game<'_>) -> Result<()> {
     Ok(())
 }
 
+/// The event loop; on Android it needs the activity `android_main` was given.
+fn new_event_loop() -> std::result::Result<EventLoop<()>, winit::error::EventLoopError> {
+    #[cfg(target_os = "android")]
+    {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        let app = ANDROID_APP.get().expect("android_main sets the activity").clone();
+        android_input::install();
+        EventLoop::builder().with_android_app(app).build()
+    }
+    #[cfg(not(target_os = "android"))]
+    EventLoop::new()
+}
+
+/// The activity the Android entry point (`android_main.rs`) was started with.
+#[cfg(target_os = "android")]
+pub static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
+    std::sync::OnceLock::new();
+
+/// The activity is stopped (Home or another app). The loop waits instead of spinning.
+#[cfg(target_os = "android")]
+static ANDROID_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Quit Game ended the native loop. Ask the activity to die so the next launch
+/// is a new process, not a resumed black window.
+#[cfg(target_os = "android")]
+pub fn finish_activity() {
+    android_ime::quit();
+}
+
 /// The window system ended the event loop with a failure (on Linux, a compositor dropping the
 /// connection after a protocol error) while fullscreen was on: the next start opens windowed, so a
 /// fullscreen the system can't show doesn't crash every launch (#2904).
@@ -22557,7 +22689,7 @@ fn run_event_loop(mut game: Game<'_>) -> Result<()> {
         return game.error.take().map_or(Ok(()), Err);
     }
     let mut split = split::Split::new(game);
-    let result = EventLoop::new()?.run_app(&mut split);
+    let result = new_event_loop()?.run_app(&mut split);
     game = split.host;
     narrator::stop();
     leave_fullscreen_after(&result, &mut game.settings);
@@ -22599,6 +22731,8 @@ struct Loading {
     title_drawn: bool,
     menu: startup_menu::StartupMenu,
     error: Option<Box<dyn std::error::Error>>,
+    /// The one finger acting as the mouse; others are ignored (no double clicks).
+    touch_finger: Option<u64>,
 }
 /// How long the handoff waits for the first title frame before building the
 /// world renderer anyway (a hidden window may never be asked to redraw).
@@ -22614,6 +22748,12 @@ impl Loading {
     }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
+            // Android: the native window is back after the app was in the background.
+            if let Some(renderer) = &mut self.renderer
+                && let Err(e) = renderer.regain_surface()
+            {
+                log::warn!("Horizon: surface not recreated: {e}");
+            }
             return;
         }
         // The Window constructor: created fullscreen when options.txt or --fullscreen says so.
@@ -22704,11 +22844,64 @@ impl Loading {
         horizon_client::hud::GUI_SCALE.store(self.settings.gui_scale, Ordering::Relaxed);
         self.window = Some(window);
     }
+    fn suspended(&mut self, _: &ActiveEventLoop) {
+        // Android: the native window goes away in the background.
+        if let Some(renderer) = &mut self.renderer {
+            renderer.lose_surface();
+        }
+    }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, mut event: WindowEvent) {
         if self.window.as_ref().is_none_or(|w| w.id() != id) {
             return;
         }
         follow_keymap(&mut event);
+        // The loading screen has no Game yet, so it does not go through
+        // touch.rs. Android sends fingers as Touch, not mouse: without this
+        // the title is on screen and dead until the world renderer swap.
+        if let WindowEvent::Touch(touch) = event {
+            let device_id = touch.device_id;
+            let mut position = touch.location;
+            match touch.phase {
+                TouchPhase::Started if self.touch_finger.is_none() => self.touch_finger = Some(touch.id),
+                _ if self.touch_finger != Some(touch.id) => return,
+                TouchPhase::Ended | TouchPhase::Cancelled => self.touch_finger = None,
+                _ => {}
+            }
+            // A cancelled touch (a system gesture took it) lets go off screen: no click.
+            if touch.phase == TouchPhase::Cancelled {
+                position = winit::dpi::PhysicalPosition::new(-1.0, -1.0);
+            }
+            if let Err(error) = self.menu_event(
+                event_loop,
+                WindowEvent::CursorMoved {
+                    device_id,
+                    position,
+                },
+            ) {
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+            let state = match touch.phase {
+                TouchPhase::Started => Some(ElementState::Pressed),
+                TouchPhase::Ended | TouchPhase::Cancelled => Some(ElementState::Released),
+                TouchPhase::Moved => None,
+            };
+            if let Some(state) = state
+                && let Err(error) = self.menu_event(
+                    event_loop,
+                    WindowEvent::MouseInput {
+                        device_id,
+                        state,
+                        button: MouseButton::Left,
+                    },
+                )
+            {
+                self.error = Some(error);
+                event_loop.exit();
+            }
+            return;
+        }
         if let Err(error) = self.menu_event(event_loop, event) {
             self.error = Some(error);
             event_loop.exit();
@@ -22919,6 +23112,12 @@ impl ApplicationHandler for App {
             App::Ready(game) => game.resumed(event_loop),
         }
     }
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        match self {
+            App::Loading(loading) => loading.suspended(event_loop),
+            App::Ready(game) => game.suspended(event_loop),
+        }
+    }
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match self {
             App::Loading(loading) => loading.window_event(event_loop, id, event),
@@ -23085,9 +23284,10 @@ fn run_loading(
         title_drawn: false,
         menu,
         error: None,
+        touch_finger: None,
     };
     let mut app = App::Loading(Box::new(loading));
-    let result = EventLoop::new()?.run_app(&mut app);
+    let result = new_event_loop()?.run_app(&mut app);
     narrator::stop();
     match &mut app {
         // Ready: splitscreen around P1's game.

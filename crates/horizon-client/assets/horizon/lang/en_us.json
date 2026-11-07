@@ -154,6 +154,7 @@
   "Smooth Gradients": "Smooth Gradients",
   "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.": "16-bit frame: dark skies and shadows don't band. A bit more VRAM. Next start.",
   "Battery Mode": "Battery Mode",
+  "Fast Opaque Pass": "Fast Opaque Pass",
   "Graphics API": "Graphics API",
   "Translucent Batching": "Translucent Batching",
   "Performance Overlay": "Performance Overlay",
@@ -258,6 +259,7 @@
   "Shows when the world saves.": "Shows when the world saves.",
   "Shows attack cooldown.": "Shows attack cooldown.",
   "60 FPS cap (30 in menus or unfocused), half the workers: less power.": "60 FPS cap (30 in menus or unfocused), half the workers: less power.",
+  "Draws solid blocks before leaves and grass: faster terrain.": "Draws solid blocks before leaves and grass: faster terrain.",
   "Threads that generate, light and mesh chunks. Next start.": "Threads that generate, light and mesh chunks. Next start.",
   "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.": "Vulkan, then DirectX 12 (Windows) or OpenGL (Linux) where it fails. Next start.",
   "Water and glass in one buffer: fewer draw calls, a bit more VRAM. Next start.": "Water and glass in one buffer: fewer draw calls, a bit more VRAM. Next start.",
@@ -896,5 +898,7 @@
   "horizon.recipe_transfer.missing": "Missing Items",
   "horizon.recipe_transfer.no_room": "Inventory full",
   "horizon.recipe_transfer.unavailable": "Recipe does not fit this menu",
-  "horizon.recipe_transfer.unsupported": "Server requires a known recipe"
+  "horizon.recipe_transfer.unsupported": "Server requires a known recipe",
+  "horizon.mods.not_built_phone": " (PC only)",
+  "horizon.mods.not_built_phone.tip": "A native mod (.hnmod) is compiled into the game by the PC launcher, so a phone can't run it. Use the mod's .hmod file if it has one, or play it on a PC."
 }

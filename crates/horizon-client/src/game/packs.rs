@@ -21,9 +21,12 @@ use std::{
 
 /// Where overlay roots are built (beside options.txt).
 pub fn cache_dir() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(".horizon-cache/resourcepacks")
+    // HORIZON_CACHE: on Android the overlay lives in internal storage, since
+    // shared storage (/sdcard) refuses symlinks.
+    std::env::var_os("HORIZON_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default().join(".horizon-cache"))
+        .join("resourcepacks")
 }
 pub fn packs_dir() -> PathBuf {
     std::env::current_dir()
@@ -34,8 +37,16 @@ mod folder;
 
 /// `Util.getPlatform().openPath`: the system file manager on the folder.
 pub fn open_folder(dir: &Path) {
+    #[cfg(target_os = "android")]
+    {
+        super::android_ime::open_game_folder(dir);
+        return;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     if let Err(e) = folder::command(dir).and_then(|mut command| command.spawn()) {
         log::warn!("Horizon: could not open {}: {e}", dir.display());
+    }
     }
 }
 /// `Util.getPlatform().openUri`: the system browser on the link.
