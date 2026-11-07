@@ -50,6 +50,7 @@ fn android_main(app: AndroidApp) {
     crash::install(home.clone(), "client");
     if let Some(internal) = app.internal_data_path() {
         apply_vulkan_driver(&internal);
+        apply_safe_mode(&internal);
         android_msa::prepare(&internal, &home);
     }
     let _ = game::ANDROID_APP.set(app.clone());
@@ -103,6 +104,37 @@ fn apply_vulkan_driver(internal: &std::path::Path) {
     // SAFETY: still before any other thread starts.
     unsafe { std::env::set_var("HORIZON_VULKAN_LIB", path) };
     let pending = pending.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(25));
+        let _ = std::fs::remove_file(pending);
+    });
+}
+
+/// Safe start: a launch that died within its first 25 seconds (with the system driver)
+/// leaves `launch.pending`; after two such launches in a row the next ones start on
+/// OpenGL ES with GPU occlusion culling off, until one stays up. Some drivers (Adreno 740
+/// on certain firmware, Mali on old Android) fail inside Vulkan before the first frame.
+/// `safe-mode.txt` in internal storage forces it; deleting it gives Vulkan another try.
+fn apply_safe_mode(internal: &std::path::Path) {
+    let pending = internal.join("launch.pending");
+    let forced = internal.join("safe-mode.txt");
+    let failures: u32 = std::fs::read_to_string(&pending)
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0);
+    let safe = forced.exists() || failures >= 2;
+    if failures >= 2 && !forced.exists() {
+        let _ = std::fs::write(&forced, b"Vulkan failed to start twice; delete this file to try it again\n");
+    }
+    if safe && std::env::var_os("HORIZON_GRAPHICS_API").is_none() {
+        log::warn!("Horizon: safe start (OpenGL ES, no GPU culling) after {failures} failed launches");
+        // SAFETY: still before any other thread starts.
+        unsafe {
+            std::env::set_var("HORIZON_GRAPHICS_API", "opengl");
+            std::env::set_var("HORIZON_GPU_CULL", "0");
+        }
+    }
+    let _ = std::fs::write(&pending, format!("{}", failures + 1));
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(25));
         let _ = std::fs::remove_file(pending);

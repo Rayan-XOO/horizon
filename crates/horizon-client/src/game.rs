@@ -18532,6 +18532,12 @@ impl ApplicationHandler for Game<'_> {
             {
                 self.screen = Screen::Paused;
             }
+            // Android may kill a background app without another word: the world, the
+            // player's inventory and position are saved now, before the server pauses.
+            if self.integrated.is_some() && self.title.is_none() {
+                let reply = self.owner_console_command("save-all flush");
+                log::info!("Horizon: saved on going to the background: {reply:?}");
+            }
             if let Some(server) = &self.integrated {
                 server.set_paused(true);
             }

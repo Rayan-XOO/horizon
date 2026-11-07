@@ -429,9 +429,6 @@ impl Settings {
         if self.horizon.workers == 0 || self.horizon.workers > 2 {
             self.horizon.workers = 2;
         }
-        if self.max_fps > 60 {
-            self.max_fps = 60;
-        }
         self
     }
 }

@@ -41,6 +41,35 @@ public class HorizonActivity extends NativeActivity {
         sink = new TextSink(this);
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
         renewAccount();
+        hideSystemBars();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
+    }
+
+    /** Full screen: the navigation and status bars stay hidden; a swipe from the edge shows them for a moment. */
+    @SuppressWarnings("deprecation")
+    private void hideSystemBars() {
+        android.view.Window window = getWindow();
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            android.view.WindowInsetsController c = window.getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            window.getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        }
     }
 
     /** Keeps the Microsoft sign-in alive: renews it in the background when it is about to expire. */
@@ -67,6 +96,7 @@ public class HorizonActivity extends NativeActivity {
     protected void onResume() {
         super.onResume();
         renewAccount();
+        hideSystemBars();
     }
 
     /** 0 short edges, 1 never (letterbox past the camera), 2 always. */

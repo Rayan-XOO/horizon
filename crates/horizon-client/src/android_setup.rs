@@ -103,9 +103,9 @@ fn download(agent: &ureq::Agent, url: &str, target: &Path, sha1: Option<&str>) -
     }
     let part = target.with_extension("part");
     let mut last = String::new();
-    for attempt in 0..4 {
+    for attempt in 0..8u64 {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(attempt * 2));
+            std::thread::sleep(std::time::Duration::from_secs((attempt * 2).min(10)));
         }
         let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         let mut request = agent.get(url);
@@ -125,13 +125,24 @@ fn download(agent: &ureq::Agent, url: &str, target: &Path, sha1: Option<&str>) -
             }
         };
         let append = have > 0 && response.status() == 206;
-        let mut file = match fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .append(append)
-            .truncate(!append)
-            .open(&part)
-        {
+        let open = || {
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(append)
+                .truncate(!append)
+                .open(&part)
+        };
+        let mut file = match open().or_else(|e| {
+            // A file another app put there (a file manager, a copy from a PC) can be
+            // owned by another user: take it away and write our own.
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let _ = fs::remove_file(&part);
+                open()
+            } else {
+                Err(e)
+            }
+        }) {
             Ok(f) => f,
             Err(e) => return Err(format!("{}: {e}", part.display())),
         };
@@ -169,7 +180,10 @@ fn download(agent: &ureq::Agent, url: &str, target: &Path, sha1: Option<&str>) -
                 continue;
             }
         }
-        fs::rename(&part, target).map_err(|e| e.to_string())?;
+        if fs::rename(&part, target).is_err() {
+            let _ = fs::remove_file(target);
+            fs::rename(&part, target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
         return Ok(());
     }
     Err(last)
@@ -317,8 +331,12 @@ fn run(home: &Path, derived: &str) -> Result<(), String> {
                 if !ok {
                     let url = format!("https://resources.download.minecraft.net/{}/{hash}", &hash[..2]);
                     if let Err(e) = download(&agent, &url, &target, Some(&hash)) {
-                        *failure.lock().unwrap() = Some(e);
-                        return;
+                        // One more full round of tries before the whole setup stops.
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        if let Err(e2) = download(&agent, &url, &target, Some(&hash)) {
+                            *failure.lock().unwrap() = Some(format!("{e2} (first: {e})"));
+                            return;
+                        }
                     }
                 }
                 let _ = writeln!(done_file.lock().unwrap(), "{key}");
@@ -350,10 +368,35 @@ fn run(home: &Path, derived: &str) -> Result<(), String> {
         }
         target
     };
-    let file = fs::File::open(&pack).map_err(|e| e.to_string())?;
+    let file = fs::File::open(&pack).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "{}: the file belongs to another app (copied with a file manager). Delete it, \
+                 then copy it again with this app's folder button, or give the download link instead",
+                pack.display()
+            )
+        } else {
+            format!("{}: {e}", pack.display())
+        }
+    })?;
+    let mut head = [0u8; 2];
+    let looks_html = {
+        use std::io::Read;
+        (&file).read_exact(&mut head).is_ok() && head[0] == b'<'
+    };
+    {
+        use std::io::Seek;
+        let _ = (&file).seek(std::io::SeekFrom::Start(0));
+    }
     let mut zip = zip::ZipArchive::new(file).map_err(|e| {
         let _ = fs::remove_file(work.join("derived.zip"));
-        format!("derived pack: {e}")
+        if looks_html {
+            "derived pack: the link gives a web page, not a zip (Google Drive asks to confirm big \
+             files). Download it in the browser and put horizon-derived.zip in the app folder"
+                .to_string()
+        } else {
+            format!("derived pack: {e}")
+        }
     })?;
     counters(zip.len(), 0);
     for i in 0..zip.len() {
@@ -368,7 +411,16 @@ fn run(home: &Path, derived: &str) -> Result<(), String> {
             if let Some(p) = target.parent() {
                 fs::create_dir_all(p).map_err(|e| e.to_string())?;
             }
-            let mut out = fs::File::create(&target).map_err(|e| e.to_string())?;
+            let mut out = fs::File::create(&target)
+                .or_else(|e| {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        let _ = fs::remove_file(&target);
+                        fs::File::create(&target)
+                    } else {
+                        Err(e)
+                    }
+                })
+                .map_err(|e| format!("{}: {e}", target.display()))?;
             std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
         }
         FILES_DONE.store(i + 1, Ordering::Relaxed);
