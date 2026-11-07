@@ -292,6 +292,11 @@ impl Game<'_> {
             ) {
                 continue;
             }
+            // Entity Culling: a tag whose whole entity is behind blocks is not drawn.
+            if self.occluded_camera_bounds((lo - camera).as_vec3(), (hi - camera).as_vec3()) {
+                self.count_cull(1);
+                continue;
+            }
             let marks = if player || self.cosmetics_local() {
                 self.cosmetics_marks(m, Some(m.id) == own)
             } else {

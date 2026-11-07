@@ -64,6 +64,9 @@ impl EntityCullDecision {
 
 impl Game<'_> {
     pub(super) fn prepare_entity_culling(&mut self) {
+        let [entities, tags] = self.cull_counts.replace([0; 2]);
+        self.perf_counts[0] = entities;
+        self.perf_counts[1] = tags;
         // Spans tell the pack's passes which entities are hidden; without them, nothing changes.
         self.pack_shadow_casters = match (&self.renderer, &self.pack_ids) {
             (Some(r), Some(_)) => r.pack_shadow_casters(),
@@ -83,6 +86,7 @@ impl Game<'_> {
                 culler.record_entity_vertices_culled(vertices.len().saturating_sub(start));
             }
             vertices.truncate(start);
+            self.count_cull(0);
         }
         hidden
     }
@@ -94,9 +98,23 @@ impl Game<'_> {
             {
                 culler.record_entity_vertices_culled(2);
             }
+            self.count_cull(0);
             return true;
         }
         false
+    }
+
+    /// One more occlusion cull this frame: 0 an entity, 1 a name tag.
+    pub(super) fn count_cull(&self, kind: usize) {
+        let mut c = self.cull_counts.get();
+        c[kind] = c[kind].saturating_add(1);
+        self.cull_counts.set(c);
+    }
+
+    /// Whether the occlusion culler hides a box given relative to the camera,
+    /// without counting it as an entity.
+    pub(super) fn occluded_camera_bounds(&self, lo: glam::Vec3, hi: glam::Vec3) -> bool {
+        self.occlusion_hidden_camera_bounds(lo, hi)
     }
 
     fn occlusion_hidden_camera_bounds(&self, lo: glam::Vec3, hi: glam::Vec3) -> bool {
@@ -185,12 +203,14 @@ impl Game<'_> {
             if let Some(culler) = &self.async_occlusion_culler {
                 culler.record_entity_culled();
             }
+            self.count_cull(0);
             return EntityCullDecision::Hidden;
         }
         match self.settings.horizon.entity_culling {
             EntityCullingMode::Off => EntityCullDecision::Bypass,
             EntityCullingMode::Synchronous => {
                 if self.entity_hidden_sync(None, 0, Some(bounds)) {
+                    self.count_cull(0);
                     EntityCullDecision::Hidden
                 } else {
                     EntityCullDecision::CheckVertices
@@ -223,6 +243,7 @@ impl Game<'_> {
                         ) =>
                     {
                         culler.record_entity_culled();
+                        self.count_cull(0);
                         EntityCullDecision::Hidden
                     }
                     Some(_) | None => {

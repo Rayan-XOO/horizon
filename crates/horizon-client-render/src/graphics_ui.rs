@@ -2833,7 +2833,8 @@ mod tests {
     fn entity_culling_modes_are_opt_in_and_cycle_from_its_row() {
         let mut s = Settings::default();
         let item = Item::Horizon(H::EntityCulling);
-        assert_eq!(s.horizon.entity_culling, EntityCullingMode::Off);
+        assert_eq!(s.horizon.entity_culling, EntityCullingMode::Asynchronous);
+        s.horizon.entity_culling = EntityCullingMode::Off;
         assert_eq!(item.label(&s).plain(), "Entity Culling: Off");
         for mode in EntityCullingMode::ALL {
             s.horizon.entity_culling = mode;
@@ -2905,7 +2906,7 @@ mod tests {
         let at = (r[0] + 4.0, r[1] + 4.0);
 
         // 1. Feature without shift (normal click): cycles forward (+1)
-        assert_eq!(s.horizon.entity_culling, EntityCullingMode::Off);
+        s.horizon.entity_culling = EntityCullingMode::Off;
         assert_eq!(
             press_shift(&mut ui, &mut s, at, false),
             [Action::ButtonClick, Action::Changed]

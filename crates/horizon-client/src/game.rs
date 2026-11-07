@@ -3233,6 +3233,10 @@ struct Game<'a> {
     /// `Renderer::pack_shadow_casters` for this frame's entities: (keep what the culler hides,
     /// build the player's model in first person); (false, false) without a shader pack.
     pack_shadow_casters: (bool, bool),
+    /// Occlusion culls this frame: entity models, name tags.
+    cull_counts: std::cell::Cell<[u32; 2]>,
+    /// The last whole frame's: culls (as above) and HUD draw runs, for the FPS line.
+    perf_counts: [u32; 3],
     /// A scripted flight from the control socket (`fly`).
     flight: Option<control::Flight>,
     /// The running agent action from the control socket (game/agent.rs).
@@ -17069,6 +17073,16 @@ impl Game<'_> {
         pr.lap("pr_projection");
         // GUI hooks project against this frame's camera, including its bob/spin and FOV.
         let mut hud = horizon_client::spans::time("hud", || self.hud(size));
+        // Draw runs the HUD batch goes out in: one per blend change (FPS line).
+        self.perf_counts[2] = {
+            let n = hud.vertices.len() as u32;
+            let (mut runs, mut at) = (0u32, 0u32);
+            for (range, _) in &hud.blends {
+                runs += u32::from(range.start > at) + 1;
+                at = range.end;
+            }
+            runs + u32::from(n > at)
+        };
         self.flush_ime(&mut hud);
         self.native_gui_render_post(&mut hud, self.ui.hide_gui, self.focused);
         self.resolve_inline_profiles(&hud.inline_profiles);
@@ -20711,6 +20725,8 @@ impl<'a> Game<'a> {
             async_occlusion_culling_failed: false,
             async_particle_culler: RefCell::new(Default::default()),
             pack_shadow_casters: (false, false),
+            cull_counts: std::cell::Cell::new([0; 2]),
+            perf_counts: [0; 3],
             pending_uploads: Vec::new(),
             frame_graph: Default::default(),
             extras: Default::default(),

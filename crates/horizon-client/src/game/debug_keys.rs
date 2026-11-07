@@ -425,8 +425,9 @@ impl Game<'_> {
                     (self.fps * (1.0 + share)).round() as i32
                 )
             });
+        let [culled, tags, hud_draws] = self.perf_counts;
         d.priority(format!(
-            "{} fps{generated} T: {}{present} @{refresh}Hz",
+            "{} fps{generated} T: {}{present} @{refresh}Hz C: {culled}e {tags}t H: {hud_draws}d",
             self.fps.round() as i32,
             if limit == 260 {
                 "inf".into()

@@ -790,7 +790,8 @@ impl Default for Graphics {
             blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: false,
-            entity_culling: EntityCullingMode::Off,
+            // On by default: occluded mobs and players skip their meshes (crowded lobbies).
+            entity_culling: EntityCullingMode::Asynchronous,
             entity_culling_precheck: 64,
             particle_culling: ParticleCullingMode::Off,
             leaf_culling: LeafCullingMode::Off,
@@ -864,6 +865,7 @@ impl Graphics {
     }
     pub fn parse(text: &str) -> Self {
         let mut g = Self::default();
+        let mut chosen_entity_culling = false;
         for line in text.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -889,7 +891,18 @@ impl Graphics {
                 "blueMapAutoDetect" => g.blue_map.auto_detect = flag(g.blue_map.auto_detect),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "gpuCulling" => g.gpu_culling = flag(g.gpu_culling),
-                "entityCulling" => g.entity_culling = EntityCullingMode::parse(value),
+                // Files from before it was on by default say "off" without anyone
+                // having chosen it: only an opt-in carries over from that key.
+                "entityCulling" if !chosen_entity_culling => {
+                    let mode = EntityCullingMode::parse(value);
+                    if mode != EntityCullingMode::Off {
+                        g.entity_culling = mode;
+                    }
+                }
+                "entityCullingMode" => {
+                    chosen_entity_culling = true;
+                    g.entity_culling = EntityCullingMode::parse(value);
+                }
                 "entityCullingPrecheck" => {
                     g.entity_culling_precheck = number(g.entity_culling_precheck).min(512)
                 }
@@ -987,7 +1000,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\nfastOpaquePass:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCullingMode:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrLighting:{}\nhdrKey:{}\nbatteryMode:{}\nshadowCache:{}\nfastOpaquePass:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1251,6 +1264,10 @@ mod tests {
         );
         assert_eq!(
             Graphics::parse("entityCulling:false\n").entity_culling,
+            EntityCullingMode::Asynchronous
+        );
+        assert_eq!(
+            Graphics::parse("entityCullingMode:off\n").entity_culling,
             EntityCullingMode::Off
         );
         // A map named here (a shared instance's, a pack's) is no map.
