@@ -79,7 +79,7 @@ impl Button {
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|b| b.name() == name)
     }
-    fn bit(self) -> u32 {
+    pub fn bit(self) -> u32 {
         1 << self as u32
     }
     /// What is printed on the button for a pad family (`Auto` reads as Xbox).

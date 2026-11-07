@@ -2133,7 +2133,7 @@ impl Game<'_> {
     /// a search box, the anvil's name, the title screens' and the options'
     /// fields, the LAN port, a dialog's input, the command box and the edit
     /// screens of the jigsaw, structure and test blocks.
-    fn pad_typing(&self) -> bool {
+    pub(super) fn pad_typing(&self) -> bool {
         (self.screen == Screen::Chat && self.title.is_none())
             || self.sign_edit.is_some()
             || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
@@ -2152,6 +2152,10 @@ impl Game<'_> {
     /// Steam's on a Steam Deck (`steam://open/keyboard`, which types into
     /// the window like a real keyboard).
     fn pad_open_keyboard(&mut self) {
+        // Android: the system keyboard (android_ime) is the only one.
+        if cfg!(target_os = "android") {
+            return;
+        }
         // Without xdg-open (macOS, Windows), Horizon's keyboard instead.
         if gamepad::steam_keyboard(self.settings.controller.keyboard)
             && std::process::Command::new("xdg-open")
@@ -2189,7 +2193,7 @@ impl Game<'_> {
 
     /// What a key of the on-screen keyboard does: the same as a typed key in
     /// the field that has focus.
-    fn pad_osk_output(&mut self, out: osk::Output) {
+    pub(super) fn pad_osk_output(&mut self, out: osk::Output) {
         use osk::Output;
         let (key, text) = match &out {
             Output::Text(t) => (None, Some(t.as_str())),

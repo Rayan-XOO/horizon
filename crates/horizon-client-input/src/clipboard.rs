@@ -111,6 +111,28 @@ pub fn helper_clipboard_contents(clipboard: &str) -> String {
     strip_formatting(&clipboard.replace('\r', ""))
 }
 
+/// Android has no arboard backend: the game keeps its own in-memory clipboard there.
+#[cfg(target_os = "android")]
+mod arboard {
+    pub enum Error {
+        ContentNotAvailable,
+        #[allow(dead_code)]
+        Other,
+    }
+    pub struct Clipboard;
+    impl Clipboard {
+        pub fn new() -> Result<Self, Error> {
+            Err(Error::ContentNotAvailable)
+        }
+        pub fn get_text(&mut self) -> Result<String, Error> {
+            Err(Error::ContentNotAvailable)
+        }
+        pub fn set_text(&mut self, _: String) -> Result<(), Error> {
+            Err(Error::Other)
+        }
+    }
+}
+
 /// A clipboard: the system's, or an in-memory one in tests.
 pub trait Clipboard {
     /// `KeyboardHandler.getClipboard`: empty when there is no text.

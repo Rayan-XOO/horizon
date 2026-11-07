@@ -39,11 +39,11 @@ pub(super) struct Pads {
     #[cfg(feature = "controllers")]
     devices: hardware::Devices,
     /// The virtual pad of `horizon-ctl pad`.
-    injected: PadState,
+    pub(super) injected: PadState,
     /// The virtual pad was in use at the last poll.
     virtual_input: bool,
     /// Buttons a `pad ... tap` releases at the next poll.
-    taps: Vec<Button>,
+    pub(super) taps: Vec<Button>,
     edges: Edges,
     activity: gamepad::Activity,
     context: Option<Context>,
@@ -126,7 +126,11 @@ mod hardware {
     use serde_json::{Value, json};
 
     impl Pads {
+        /// On Android, the controllers the activity's input events report (`android_input`).
         pub(super) fn read(&mut self) -> PadState {
+            #[cfg(target_os = "android")]
+            return crate::game::android_input::pad_state();
+            #[cfg(not(target_os = "android"))]
             PadState::default()
         }
         pub(in crate::game) fn release_hardware(&mut self) {}
@@ -264,18 +268,27 @@ impl Game<'_> {
             self.pad_cancel_inputs(event_loop);
         }
         self.pad.context = Some(context);
-        if !self.settings.controller.enabled {
+        // Controllers off: the touch controls still drive the virtual pad, and
+        // its buttons go through the same edge handling as a real pad's.
+        let touch_only = !self.settings.controller.enabled;
+        if touch_only {
             self.pad_output_off();
-            self.pad_cancel_inputs(event_loop);
-            self.pad.state = PadState::default();
-            self.pad.in_use = false;
-            // The keyboard's menu focus follows its widget all the same.
-            self.pad_menu_frame(event_loop);
-            return;
+            if self.pad.injected == PadState::default() && self.pad.taps.is_empty() {
+                self.pad_cancel_inputs(event_loop);
+                self.pad.state = PadState::default();
+                self.pad.in_use = false;
+                // The keyboard's menu focus follows its widget all the same.
+                self.pad_menu_frame(event_loop);
+                return;
+            }
         }
-        let hardware = match self.pad.feed {
-            Some(state) => state,
-            None => self.pad.read(),
+        let hardware = if touch_only {
+            PadState::default()
+        } else {
+            match self.pad.feed {
+                Some(state) => state,
+                None => self.pad.read(),
+            }
         };
         // A Nintendo pad going by its letters is read that way: its own, or the one
         // splitscreen's router feeds this player.
@@ -326,13 +339,23 @@ impl Game<'_> {
         }
         let threshold = self.settings.controller.trigger_threshold;
         let edges = self.pad.edges.update(&state, threshold);
+        // On Android the touch controls drive the virtual pad: only the hardware one counts.
+        let hardware_active = hardware.active(&self.settings.controller);
         if activity && self.pad_focused() {
             self.last_input = Instant::now();
-            self.pad.in_use = true;
+            // Touch is not a controller: no pad cursor, glyphs or pad keyboard for it.
+            if !touch_only && (hardware_active || !cfg!(target_os = "android")) {
+                self.pad.in_use = true;
+            }
+        }
+        if hardware_active && cfg!(target_os = "android") {
+            self.touch.hardware = true;
         }
         self.pad.state = state;
         self.pad_drop_frame();
-        self.pad_output_frame();
+        if !touch_only {
+            self.pad_output_frame();
+        }
         // Damage from any source, here or on a server; nothing counts on
         // the title screen.
         let health = self
