@@ -266,22 +266,30 @@ public class HorizonActivity extends NativeActivity {
 
                 @Override
                 public boolean commitText(CharSequence text, int pos) {
+                    // The committed text takes the place of what was being composed.
+                    replaceComposing(text.toString());
                     composing = "";
-                    if (text.length() > 0) nativeText(text.toString());
                     return true;
                 }
 
                 @Override
                 public boolean setComposingText(CharSequence text, int pos) {
-                    String t = text.toString();
-                    // Compose by sending the difference: deletes then the new tail.
+                    replaceComposing(text.toString());
+                    return true;
+                }
+
+                /** Compose by sending the difference: deletes, one per character the game sees, then the new tail. */
+                private void replaceComposing(String t) {
                     int common = 0;
-                    while (common < t.length() && common < composing.length()
-                            && t.charAt(common) == composing.charAt(common)) common++;
-                    for (int i = common; i < composing.length(); i++) nativeKey(1);
+                    while (common < t.length() && common < composing.length()) {
+                        int c = t.codePointAt(common);
+                        if (c != composing.codePointAt(common)) break;
+                        common += Character.charCount(c);
+                    }
+                    int deletes = composing.codePointCount(common, composing.length());
+                    for (int i = 0; i < deletes; i++) nativeKey(1);
                     if (common < t.length()) nativeText(t.substring(common));
                     composing = t;
-                    return true;
                 }
 
                 @Override
