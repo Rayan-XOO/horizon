@@ -247,6 +247,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         } else if (v == model) {
             slim = !slim;
             updateModel();
+            showPreview();
         } else if (v == save) {
             String n = name.getText().toString().trim();
             if (!validName(n)) {

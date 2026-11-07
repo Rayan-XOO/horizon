@@ -45,6 +45,7 @@ final class Turnip {
 
     static void useSystem(Context c) {
         choice(c).delete();
+        clearFailure(c);
     }
 
     /**
@@ -91,7 +92,14 @@ final class Turnip {
             fos.write(text);
         }
         if (!tmp.renameTo(choice(c))) throw new Exception("rename");
+        clearFailure(c);
         return vulkan.getName();
+    }
+
+    /** A new choice: what happened to the last driver (android_main.rs) no longer applies. */
+    private static void clearFailure(Context c) {
+        new File(c.getFilesDir(), "vulkan-driver.failed").delete();
+        new File(c.getFilesDir(), "vulkan-driver.pending").delete();
     }
 
     private static int rank(String name) {
