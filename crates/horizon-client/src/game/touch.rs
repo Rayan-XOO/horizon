@@ -35,6 +35,7 @@ use std::{collections::HashMap, time::Instant};
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
+    keyboard::KeyCode,
     event::{DeviceId, ElementState, MouseButton, Touch, TouchPhase, WindowEvent},
     event_loop::ActiveEventLoop,
 };
@@ -71,6 +72,10 @@ enum Finger {
     Trigger { i: usize, last: [f64; 2], since: Instant, look: bool },
     /// Dragging a control in the editor, from this offset to its centre.
     Drag(Id, [f32; 2]),
+    /// Dragging the player's own button `usize` in the editor.
+    DragCustom(usize, [f32; 2]),
+    /// Holding the player's own button `usize`.
+    Custom(usize),
     /// Took over a hotbar slot or the keyboard; nothing until it lifts.
     Done,
 }
@@ -315,6 +320,50 @@ impl TouchLayout {
     }
 }
 
+/// The player's own buttons, kept apart from the layout presets.
+const BUTTONS_FILE: &str = "touch_buttons.json";
+
+/// A button the player added: a key (`R`, `key.keyboard.r`) or a chat command
+/// (`/orbital give`), with its label and place.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct CustomButton {
+    x: f32,
+    y: f32,
+    size: f32,
+    label: String,
+    bind: String,
+}
+
+impl CustomButton {
+    /// The key it presses (a bare `R` is `key.keyboard.r`); `None` for a command.
+    fn key(&self) -> Option<KeyCode> {
+        if self.bind.starts_with('/') {
+            return None;
+        }
+        let name = self.bind.to_lowercase();
+        let name = if name.starts_with("key.") { name } else { format!("key.keyboard.{name}") };
+        horizon_client::keybinds::key_code(&name)
+    }
+}
+
+fn load_buttons() -> Vec<CustomButton> {
+    std::fs::read_to_string(BUTTONS_FILE)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_buttons(buttons: &[CustomButton]) {
+    match serde_json::to_string_pretty(buttons) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(BUTTONS_FILE, text) {
+                log::warn!("Horizon: saving {BUTTONS_FILE}: {e}");
+            }
+        }
+        Err(e) => log::warn!("Horizon: {BUTTONS_FILE}: {e}"),
+    }
+}
+
 /// The editor's panel buttons.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum EditAction {
@@ -332,6 +381,8 @@ enum EditAction {
     Custom,
     PassThrough,
     Dpad,
+    AddButton,
+    RemoveButton,
 }
 
 /// The second row: the layout and how buttons share fingers with the camera.
@@ -342,6 +393,9 @@ const PRESET_ACTIONS: [(EditAction, &str); 5] = [
     (EditAction::Custom, "Custom"),
     (EditAction::PassThrough, "Look: on"),
 ];
+
+/// The third row: the player's own buttons.
+const BUTTON_ACTIONS: [(EditAction, &str); 2] = [(EditAction::AddButton, "+ Button"), (EditAction::RemoveButton, "- Button")];
 
 const EDIT_ACTIONS: [(EditAction, &str); 9] = [
     (EditAction::SizeDown, "Size-"),
@@ -356,6 +410,10 @@ const EDIT_ACTIONS: [(EditAction, &str); 9] = [
 ];
 
 pub(super) struct Touches {
+    /// The player's own buttons (`touch_buttons.json`).
+    buttons: Vec<CustomButton>,
+    /// The one of them picked in the editor.
+    selected_button: Option<usize>,
     fingers: HashMap<u64, Finger>,
     /// The joystick knob's offset from the centre, -1..1.
     knob: [f32; 2],
@@ -421,6 +479,8 @@ impl Default for Touches {
             hardware: false,
             mouse: false,
             pointer_captured: None,
+            buttons: if cfg!(target_os = "android") { load_buttons() } else { Vec::new() },
+            selected_button: None,
         }
     }
 }
@@ -436,6 +496,16 @@ impl Gui {
     fn place(&self, layout: &TouchLayout, id: Id) -> ([f32; 2], f32) {
         let s = layout.spec(id);
         ([s.x * self.w, s.y * self.h], s.size)
+    }
+    fn custom(&self, b: &CustomButton) -> ([f32; 2], f32) {
+        ([b.x * self.w, b.y * self.h], b.size)
+    }
+    /// The player's own button under `p`.
+    fn custom_hit(&self, buttons: &[CustomButton], p: [f32; 2]) -> Option<usize> {
+        buttons.iter().position(|b| {
+            let (c, r) = self.custom(b);
+            (p[0] - c[0]).abs().max((p[1] - c[1]).abs()) <= r + 3.0
+        })
     }
     fn hotbar_x(&self) -> f32 {
         (self.w / 2.0 - 91.0).floor()
@@ -499,6 +569,14 @@ impl Gui {
                     .enumerate()
                     .map(move |(i, (a, l))| (a, l, [px0 + i as f32 * (pw + gap), y + 19.0, pw, 16.0])),
             )
+            .chain({
+                let btotal = BUTTON_ACTIONS.len() as f32 * (pw + gap) - gap;
+                let bx0 = ((self.w - btotal) / 2.0).floor();
+                BUTTON_ACTIONS
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(i, (a, l))| (a, l, [bx0 + i as f32 * (pw + gap), y + 38.0, pw, 16.0]))
+            })
     }
     /// The D-pad cell under `p` (x right, y forward), `None` off the pad.
     fn dpad_at(&self, layout: &TouchLayout, p: [f32; 2]) -> Option<[i8; 2]> {
@@ -790,6 +868,10 @@ impl Game<'_> {
 
     /// Every finger lifted at once (the app went to the background): nothing stays held.
     pub(super) fn touch_release_all(&mut self) {
+        let held: Vec<usize> = self.touch.fingers.values().filter_map(|f| if let Finger::Custom(i) = f { Some(*i) } else { None }).collect();
+        for i in held {
+            self.touch_custom(i, false);
+        }
         self.touch.fingers.clear();
         self.touch.knob = [0.0, 0.0];
         self.touch.dpad = None;
@@ -824,6 +906,16 @@ impl Game<'_> {
             return;
         }
         let t = &self.touch;
+        for (i, b) in t.buttons.iter().enumerate() {
+            let (c, r) = gui.custom(b);
+            let down = t.fingers.values().any(|f| matches!(f, Finger::Custom(j) if *j == i));
+            square(batch, atlas, c, r, down, t.layout.opacity);
+            if t.editing && t.selected_button == Some(i) {
+                outline(batch, atlas, c, r + 1.0, 1.0, 0xFFFF_FF55);
+            }
+            let tw = HudBatch::text_width(atlas, &b.label);
+            batch.text(atlas, &b.label, (c[0] - tw / 2.0).round(), (c[1] - 3.5).round(), fade(0xFFFF_FFFF, t.layout.opacity), true);
+        }
         let layout = &t.layout;
         let editing = t.editing;
         if editing {
@@ -1058,6 +1150,25 @@ impl Game<'_> {
     }
 
     fn touch_edit(&mut self, action: EditAction) {
+        match action {
+            EditAction::AddButton => {
+                self.touch.editing = false;
+                self.open_chat_method("/button add ");
+                #[cfg(target_os = "android")]
+                super::android_ime::show(true);
+                return;
+            }
+            EditAction::RemoveButton => {
+                if let Some(i) = self.touch.selected_button.take()
+                    && i < self.touch.buttons.len()
+                {
+                    self.touch.buttons.remove(i);
+                    save_buttons(&self.touch.buttons);
+                }
+                return;
+            }
+            _ => {}
+        }
         let t = &mut self.touch;
         if let Some(id) = t.selected
             && let Some(spec) = t.layout.controls.get_mut(&id)
@@ -1258,14 +1369,24 @@ impl Game<'_> {
                     if let Some(action) = gui.panel_hit(p) {
                         self.touch_edit(action);
                         Finger::Done
+                    } else if let Some(i) = gui.custom_hit(&self.touch.buttons, p) {
+                        self.touch.selected = None;
+                        self.touch.selected_button = Some(i);
+                        let (c, _) = gui.custom(&self.touch.buttons[i]);
+                        Finger::DragCustom(i, [c[0] - p[0], c[1] - p[1]])
                     } else if let Some(control) = gui.hit(&self.touch.layout, p, true) {
+                        self.touch.selected_button = None;
                         self.touch.selected = Some(control);
                         let (c, _) = gui.place(&self.touch.layout, control);
                         Finger::Drag(control, [c[0] - p[0], c[1] - p[1]])
                     } else {
                         self.touch.selected = None;
+                        self.touch.selected_button = None;
                         Finger::Done
                     }
+                } else if let Some(i) = gui.custom_hit(&self.touch.buttons, p) {
+                    self.touch_custom(i, true);
+                    Finger::Custom(i)
                 } else if let Some(control) = gui.hit(&self.touch.layout, p, false)
                     && matches!(control, Id::Attack | Id::Use)
                 {
@@ -1299,6 +1420,12 @@ impl Game<'_> {
                 Some(Finger::Pointer) => send(self, cursor(device_id, pos)),
                 Some(Finger::Stick) => self.touch_stick(&gui, p),
                 Some(Finger::Dpad) => self.touch_dpad(&gui, p, false),
+                Some(Finger::DragCustom(i, off)) => {
+                    if let Some(b) = self.touch.buttons.get_mut(i) {
+                        b.x = ((p[0] + off[0]) / gui.w).clamp(0.0, 1.0);
+                        b.y = ((p[1] + off[1]) / gui.h).clamp(0.0, 1.0);
+                    }
+                }
                 Some(Finger::Drag(control, off)) => {
                     self.touch.dirty = true;
                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
@@ -1367,6 +1494,8 @@ impl Game<'_> {
                     self.touch.aim_frames = 2;
                 }
                 Some(Finger::Press(button, _, _)) => self.pad.injected.set(button, false),
+                Some(Finger::Custom(i)) => self.touch_custom(i, false),
+                Some(Finger::DragCustom(..)) => save_buttons(&self.touch.buttons),
                 Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < HOLD_MS => {
                     // A short tap: keep it down a few frames so a tick sees
                     // one hit (or one use).
@@ -1387,6 +1516,73 @@ impl Game<'_> {
                 _ => {}
             },
         }
+    }
+
+    /// The player's own button `i` pressed or let go: its key goes down
+    /// (held while the finger is) as the keyboard's, its command is sent on press.
+    fn touch_custom(&mut self, i: usize, pressed: bool) {
+        let Some(b) = self.touch.buttons.get(i).cloned() else {
+            return;
+        };
+        match b.key() {
+            Some(key) => {
+                if pressed {
+                    self.physical_keys.insert(key);
+                } else {
+                    self.physical_keys.remove(&key);
+                }
+                self.native_key_event(key, pressed, false);
+            }
+            None if pressed => self.handle_chat_input(&b.bind),
+            None => {}
+        }
+    }
+
+    /// `/button add <label> = <key or /command>`, `/button remove <label>`,
+    /// `/button list`: the player's own touch buttons. Whether it was one.
+    pub(super) fn touch_button_command(&mut self, message: &str) -> bool {
+        let Some(rest) = message.strip_prefix("/button") else {
+            return false;
+        };
+        if !rest.is_empty() && !rest.starts_with(' ') {
+            return false;
+        }
+        let rest = rest.trim();
+        let reply = if let Some(spec) = rest.strip_prefix("add ") {
+            match spec.split_once('=') {
+                Some((label, bind)) if !bind.trim().is_empty() => {
+                    let (label, bind) = (label.trim(), bind.trim());
+                    let label = if label.is_empty() { bind.trim_start_matches('/') } else { label };
+                    let b = CustomButton { x: 0.5, y: 0.45, size: 11.0, label: label.chars().take(8).collect(), bind: bind.to_owned() };
+                    if !bind.starts_with('/') && b.key().is_none() {
+                        format!("Unknown key: {bind}")
+                    } else {
+                        self.touch.buttons.push(b);
+                        save_buttons(&self.touch.buttons);
+                        self.touch.editing = true;
+                        self.touch.selected_button = Some(self.touch.buttons.len() - 1);
+                        format!("Button \"{label}\" added: drag it into place, then Save")
+                    }
+                }
+                _ => "Usage: /button add <label> = <key | /command>   (e.g. /button add Wheel = R)".to_owned(),
+            }
+        } else if let Some(label) = rest.strip_prefix("remove ") {
+            let before = self.touch.buttons.len();
+            self.touch.buttons.retain(|b| b.label != label.trim());
+            save_buttons(&self.touch.buttons);
+            format!("{} button(s) removed", before - self.touch.buttons.len())
+        } else if rest == "list" {
+            let list: Vec<String> = self.touch.buttons.iter().map(|b| format!("{} = {}", b.label, b.bind)).collect();
+            if list.is_empty() { "No buttons".to_owned() } else { list.join(", ") }
+        } else {
+            "/button add <label> = <key | /command>, /button remove <label>, /button list".to_owned()
+        };
+        self.touch_button_reply(reply);
+        true
+    }
+
+    fn touch_button_reply(&mut self, reply: String) {
+        self.system_message(horizon_client::text::Text::literal(reply));
     }
 
     /// Whether a finger other than `id` is turning the view on open screen.

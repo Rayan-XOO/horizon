@@ -736,6 +736,14 @@ impl Game<'_> {
         }
         self.run_as_server_source(line, true)
     }
+    /// An SDK mod's world command: as `native_run_command`, but also in a
+    /// world nobody else has joined (`lan` unset), where the console runs too.
+    pub(super) fn sdk_run_command(&mut self, line: &str) -> bool {
+        if self.lan_acting.is_some() {
+            return false;
+        }
+        self.run_as_server_source(line, true)
+    }
     /// `native_run_command`'s run, `silent` as the source's output is
     /// suppressed. A source that keeps what it is sent isn't silent: it takes
     /// every `sendSuccess` and `sendFailure` line, and it tells no operator

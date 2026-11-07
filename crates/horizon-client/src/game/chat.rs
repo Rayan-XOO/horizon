@@ -1102,6 +1102,9 @@ impl Game<'_> {
         if message.is_empty() || !self.chat_abilities().allows(&message) {
             return;
         }
+        if self.touch_button_command(&message) {
+            return;
+        }
         self.ui.chat.add_recent(&message);
         // On a server (single player's own included) the server runs it,
         // unless a client mod owns the command.

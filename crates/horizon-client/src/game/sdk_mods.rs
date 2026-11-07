@@ -830,7 +830,10 @@ fn serve(game: &mut Game<'_>, id: &str, player: u128, dimension: &str, request: 
         0 => {
             let who = uuid(player);
             for line in r.strs()? {
-                game.native_run_command(&format!("execute as {who} at @s run {}", line.trim_start_matches('/')));
+                let line = format!("execute as {who} at @s run {}", line.trim_start_matches('/'));
+                if !game.sdk_run_command(&line) {
+                    log::warn!("Horizon: mod {id}: command failed: {line}");
+                }
             }
         }
         1 => {
