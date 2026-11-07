@@ -829,7 +829,7 @@ impl Default for Graphics {
             hdr_key: "key.keyboard.unknown".into(),
             battery: false,
             shadow_cache: false,
-            opaque_split: false,
+            opaque_split: cfg!(target_os = "android"),
             api: GraphicsApi::Auto,
             translucent_batching: true,
             hdr_smooth_gradients: true,

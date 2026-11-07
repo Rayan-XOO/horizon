@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-android"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ab_glyph",
  "bytemuck",

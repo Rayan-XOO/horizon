@@ -783,3 +783,82 @@ mod junction_tests {
         assert!(super::mount_point_buffer(&[0; 100]).is_ok());
     }
 }
+
+/// Android's performance hints (ADPF, API 33+): the render thread tells the system how
+/// long each frame took against a target, so the CPU governor picks clocks for the game
+/// before a frame runs late instead of after. A hint, never a cap: frames still run as
+/// fast as they can. Nothing elsewhere, or where the API isn't there.
+pub fn frame_hint(frame: std::time::Duration) {
+    #[cfg(target_os = "android")]
+    adpf::report(frame);
+    #[cfg(not(target_os = "android"))]
+    let _ = frame;
+}
+
+#[cfg(target_os = "android")]
+mod adpf {
+    use std::sync::OnceLock;
+
+    /// 120 frames a second: the target the clocks are chosen for.
+    const TARGET_NS: i64 = 8_333_333;
+
+    type GetManager = unsafe extern "C" fn() -> *mut libc::c_void;
+    type CreateSession =
+        unsafe extern "C" fn(*mut libc::c_void, *const i32, usize, i64) -> *mut libc::c_void;
+    type Report = unsafe extern "C" fn(*mut libc::c_void, i64) -> libc::c_int;
+
+    struct Session {
+        session: usize,
+        report: Report,
+        tid: i32,
+    }
+
+    fn session() -> Option<&'static Session> {
+        static SESSION: OnceLock<Option<Session>> = OnceLock::new();
+        SESSION
+            .get_or_init(|| {
+                // SAFETY: dlopen/dlsym with NUL-terminated names; the symbols, when there,
+                // have the NDK's signatures above; the thread id array lives across the call.
+                unsafe {
+                    let lib = libc::dlopen(c"libandroid.so".as_ptr(), libc::RTLD_NOW);
+                    if lib.is_null() {
+                        return None;
+                    }
+                    let get = libc::dlsym(lib, c"APerformanceHint_getManager".as_ptr());
+                    let create = libc::dlsym(lib, c"APerformanceHint_createSession".as_ptr());
+                    let report =
+                        libc::dlsym(lib, c"APerformanceHint_reportActualWorkDuration".as_ptr());
+                    if get.is_null() || create.is_null() || report.is_null() {
+                        return None;
+                    }
+                    let get: GetManager = std::mem::transmute(get);
+                    let create: CreateSession = std::mem::transmute(create);
+                    let manager = get();
+                    if manager.is_null() {
+                        return None;
+                    }
+                    let tid = libc::gettid();
+                    let session = create(manager, &tid, 1, TARGET_NS);
+                    (!session.is_null()).then(|| Session {
+                        session: session as usize,
+                        report: std::mem::transmute::<*mut libc::c_void, Report>(report),
+                        tid,
+                    })
+                }
+            })
+            .as_ref()
+    }
+
+    pub(super) fn report(frame: std::time::Duration) {
+        let Some(s) = session() else {
+            return;
+        };
+        // SAFETY: gettid has no arguments.
+        if unsafe { libc::gettid() } != s.tid {
+            return;
+        }
+        let ns = i64::try_from(frame.as_nanos()).unwrap_or(i64::MAX).max(1);
+        // SAFETY: a session this module created, never closed.
+        unsafe { (s.report)(s.session as *mut libc::c_void, ns) };
+    }
+}

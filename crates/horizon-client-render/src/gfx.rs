@@ -1519,6 +1519,15 @@ fn requested_split() -> Option<u32> {
         .and_then(|v| v.parse().ok())
         .filter(|&n| (1..=SPRITE_SPLIT).contains(&n))
 }
+/// Fast Opaque Pass on Android (`Renderer::set_opaque_split`).
+static ANDROID_SPLIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Solid terrain in two passes (`Renderer::opaque_split`).
+fn split_solid_on(backend: wgpu::Backend, no_gpu_culling: bool) -> bool {
+    backend == wgpu::Backend::Metal
+        || (cfg!(target_os = "android")
+            && no_gpu_culling
+            && ANDROID_SPLIT.load(std::sync::atomic::Ordering::Relaxed))
+}
 fn adapter_requested_split(info: &wgpu::AdapterInfo, requested: Option<u32>) -> Option<u32> {
     // Metal can fail to sample large mipmapped array textures despite advertising the layer limit.
     requested.or_else(|| (info.backend == wgpu::Backend::Metal).then_some(512))
@@ -4451,7 +4460,10 @@ impl Renderer {
         let flat_wanted = flat::wanted(&adapter, &device);
         // Metal draws solid terrain in two passes (`split_solid`): meshes put all
         // their opaque quads first, so each pass draws its part in a run or two.
-        crate::mesher::group_parts(adapter.get_info().backend == wgpu::Backend::Metal);
+        // Phone GPUs are tilers too (Adreno, Mali, PowerVR): the same grouping, on Android.
+        crate::mesher::group_parts(
+            adapter.get_info().backend == wgpu::Backend::Metal || cfg!(target_os = "android"),
+        );
         // Readable as storage where flat draws run: a shader pack's terrain program reads them.
         let arena = arena::Arena::new(
             &device,
@@ -5201,14 +5213,19 @@ impl Renderer {
     pub fn section_sides(&self) -> bool {
         self.sides_on
     }
-    /// Whether opaque terrain draws first, apart from cutout terrain. The
-    /// renderer now picks this per backend itself; the setting is kept so
-    /// existing option files still load.
+    /// Whether opaque terrain draws first, apart from cutout terrain (Fast Opaque
+    /// Pass): always on Metal, the setting on Android, off elsewhere.
     pub fn opaque_split(&self) -> bool {
-        false
+        self.split_solid()
     }
-    /// Kept for the setting's toggle; see `opaque_split`.
-    pub fn set_opaque_split(&mut self, _on: bool) {}
+    /// Fast Opaque Pass on Android: solid terrain in two passes, the opaque one with
+    /// no discard, so a tiler keeps its hidden surface removal for most of the world.
+    pub fn set_opaque_split(&mut self, on: bool) {
+        ANDROID_SPLIT.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn split_solid(&self) -> bool {
+        split_solid_on(self.info.backend, self.gpu_culling.is_none())
+    }
     /// Switches leaving out solid quads facing away, for A/B checks.
     pub fn set_section_sides(&mut self, on: bool) {
         self.sides_on = on;
@@ -8247,7 +8264,7 @@ impl Renderer {
         // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
         // then the rest; phase 2 likewise. A fading list's quads all draw in the
         // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal;
+        let split_solid = split_solid_on(self.info.backend, self.gpu_culling.is_none());
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -9715,7 +9732,7 @@ impl Renderer {
         // Two solid passes only where a discard costs the GPU its hidden surface
         // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
         // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal;
+        let split_solid = split_solid_on(self.info.backend, self.gpu_culling.is_none());
         let translucent_pipeline = material.map_or(&self.translucent, |(m, _)| &m.translucent);
         let pack_flat = material.and_then(|(m, _)| m.flat.as_ref());
         // A material stage's translucent pass reads a copy of the depth the solid terrain

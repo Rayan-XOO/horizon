@@ -15000,11 +15000,18 @@ impl Game<'_> {
         };
         // The player's own skin, as the inventory's model shows it.
         let sprites = &self.gui.atlas.sprites;
+        // The profile screen's skin (Android) first: the model's skin can still be the
+        // default one while a world loads, and the arm stayed Steve's.
         let Some(r) = self
-            .player_model
-            .as_ref()
-            .and_then(|m| m.skin.as_deref())
+            .local_skin
+            .location()
             .and_then(|skin| sprites.get(skin))
+            .or_else(|| {
+                self.player_model
+                    .as_ref()
+                    .and_then(|m| m.skin.as_deref())
+                    .and_then(|skin| sprites.get(skin))
+            })
             .or_else(|| sprites.get("entity/player/wide/steve"))
             .copied()
         else {
@@ -19859,6 +19866,7 @@ impl Game<'_> {
                     let between = now.saturating_duration_since(self.frame_end);
                     self.frame_ticks = elapsed.as_secs_f32() * 20.0;
                     self.previous = now;
+                    horizon_threads::frame_hint(elapsed);
                     // Arrow-key camera controls belong to gameplay; chat and
                     // other screens use the same keys for their own navigation.
                     if self.screen == Screen::Playing

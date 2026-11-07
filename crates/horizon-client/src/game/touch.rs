@@ -51,12 +51,12 @@ enum Finger {
         moved: bool,
         attacking: bool,
     },
-    /// Holding a controller button; with pass-through on, moving it turns the view.
-    Press(Button, [f64; 2]),
+    /// Holding a controller button; with pass-through on (the bool), moving it turns the view.
+    Press(Button, [f64; 2], bool),
     /// Holding a trigger (0 = use, 1 = attack) from its button; moving the
     /// same finger turns the view like `Look`, and the trigger stays held
     /// until it lifts, wherever it slides.
-    Trigger { i: usize, last: [f64; 2], since: Instant },
+    Trigger { i: usize, last: [f64; 2], since: Instant, look: bool },
     /// Dragging a control in the editor, from this offset to its centre.
     Drag(Id, [f32; 2]),
     /// Took over a hotbar slot or the keyboard; nothing until it lifts.
@@ -112,6 +112,10 @@ struct Spec {
     size: f32,
     opacity: f32,
     visible: bool,
+    /// This button's own choice of whether its finger turns the view (`None`: the
+    /// layout's `pass_through`).
+    #[serde(default)]
+    look: Option<bool>,
 }
 
 /// Which set of controls: the classic one with attack and use buttons, Bedrock
@@ -155,7 +159,7 @@ impl TouchLayout {
     /// the camera switch top right; pushing the stick all the way forward sprints.
     fn bedrock() -> Self {
         let (w, h) = (560.0f32, 270.0f32);
-        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true };
+        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
         let off = |x: f32, y: f32, size: f32| Spec { visible: false, ..at(x, y, size) };
         let bar = (w / 2.0 - 91.0).floor() + 182.0;
         let controls = HashMap::from([
@@ -182,7 +186,7 @@ impl TouchLayout {
     /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
     fn standard() -> Self {
         let (w, h) = (560.0f32, 270.0f32);
-        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true };
+        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
         let bar = (w / 2.0 - 91.0).floor() + 182.0;
         let controls = HashMap::from([
             (Id::Stick, at(44.0, h - 48.0, 32.0)),
@@ -241,8 +245,12 @@ impl TouchLayout {
             Err(e) => log::warn!("Horizon: {LAYOUT_FILE}: {e}"),
         }
     }
+    /// Whether a finger on `id` also turns the view.
+    fn looks(&self, id: Option<Id>) -> bool {
+        id.and_then(|id| self.controls.get(&id)?.look).unwrap_or(self.pass_through)
+    }
     fn spec(&self, id: Id) -> Spec {
-        self.controls.get(&id).copied().unwrap_or(Spec { x: 0.5, y: 0.5, size: 10.0, opacity: 1.0, visible: true })
+        self.controls.get(&id).copied().unwrap_or(Spec { x: 0.5, y: 0.5, size: 10.0, opacity: 1.0, visible: true, look: None })
     }
 }
 
@@ -295,6 +303,8 @@ pub(super) struct Touches {
     /// Sprint toggled on; off again when the joystick is let go.
     sprinting: bool,
     layout: TouchLayout,
+    /// The control the last finger went down on (for its own pass-through choice).
+    pressing: Option<Id>,
     /// The layout editor is open; the selected control.
     editing: bool,
     selected: Option<Id>,
@@ -323,6 +333,7 @@ impl Default for Touches {
             sneaking: false,
             sprinting: false,
             layout: if cfg!(target_os = "android") { TouchLayout::load() } else { TouchLayout::default() },
+            pressing: None,
             editing: false,
             selected: None,
             dirty: false,
@@ -681,7 +692,7 @@ impl Game<'_> {
                 {
                     label = "Show";
                 }
-                if action == EditAction::PassThrough && !layout.pass_through {
+                if action == EditAction::PassThrough && !layout.looks(t.selected) {
                     label = "Look: off";
                 }
                 let current = matches!(
@@ -813,7 +824,17 @@ impl Game<'_> {
                 }
                 t.selected = None;
             }
-            EditAction::PassThrough => t.layout.pass_through = !t.layout.pass_through,
+            // With a control selected, only that one; else every button.
+            EditAction::PassThrough => match t.selected {
+                Some(id) => {
+                    let now = t.layout.looks(Some(id));
+                    if let Some(spec) = t.layout.controls.get_mut(&id) {
+                        spec.look = Some(!now);
+                    }
+                    t.dirty = true;
+                }
+                None => t.layout.pass_through = !t.layout.pass_through,
+            },
             EditAction::Save => {
                 if t.dirty {
                     t.layout.preset = Preset::Custom;
@@ -831,7 +852,7 @@ impl Game<'_> {
     fn touch_press(&mut self, id: Id) -> Finger {
         let pad = |game: &mut Self, button: Button| {
             game.pad.injected.set(button, true);
-            Finger::Press(button, game.touch.press_at)
+            Finger::Press(button, game.touch.press_at, game.touch.layout.looks(game.touch.pressing))
         };
         match id {
             Id::Stick => Finger::Stick,
@@ -948,9 +969,11 @@ impl Game<'_> {
                     && matches!(control, Id::Attack | Id::Use)
                 {
                     let i = if control == Id::Attack { 1 } else { 0 };
-                    Finger::Trigger { i, last: pos, since: Instant::now() }
+                    let look = self.touch.layout.looks(Some(control));
+                    Finger::Trigger { i, last: pos, since: Instant::now(), look }
                 } else if let Some(control) = gui.hit(&self.touch.layout, p, false) {
                     self.touch.press_at = pos;
+                    self.touch.pressing = Some(control);
                     let finger = self.touch_press(control);
                     if matches!(finger, Finger::Stick) {
                         self.touch_stick(&gui, p);
@@ -983,20 +1006,24 @@ impl Game<'_> {
                     self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
                     self.last_input = Instant::now();
                 }
-                Some(Finger::Trigger { i, last, since }) => {
-                    // The attack (or use) button's finger turns the view too.
+                Some(Finger::Trigger { i, last, since, look }) => {
+                    // The attack (or use) button's finger turns the view too, unless
+                    // another finger is already turning it: two fingers' moves added
+                    // together made the view jump.
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
-                    self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since });
-                    if self.touch.layout.pass_through {
+                    self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since, look });
+                    if look && !self.touch_looking(id) {
                         self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
                         self.last_input = Instant::now();
                     }
                 }
-                Some(Finger::Press(button, last)) if self.touch.layout.pass_through => {
+                Some(Finger::Press(button, last, true)) => {
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
-                    self.touch.fingers.insert(id, Finger::Press(button, pos));
-                    self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
-                    self.last_input = Instant::now();
+                    self.touch.fingers.insert(id, Finger::Press(button, pos, true));
+                    if !self.touch_looking(id) {
+                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+                        self.last_input = Instant::now();
+                    }
                 }
                 _ => {}
             },
@@ -1011,7 +1038,7 @@ impl Game<'_> {
                     self.touch.knob = [0.0, 0.0];
                     self.pad.injected.left = [0.0, 0.0];
                 }
-                Some(Finger::Press(button, _)) => self.pad.injected.set(button, false),
+                Some(Finger::Press(button, _, _)) => self.pad.injected.set(button, false),
                 Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < HOLD_MS => {
                     // A short tap: keep it down a few frames so a tick sees
                     // one hit (or one use).
@@ -1028,6 +1055,11 @@ impl Game<'_> {
                 _ => {}
             },
         }
+    }
+
+    /// Whether a finger other than `id` is turning the view on open screen.
+    fn touch_looking(&self, id: u64) -> bool {
+        self.touch.fingers.iter().any(|(f, finger)| *f != id && matches!(finger, Finger::Look { .. }))
     }
 
     fn touch_stick(&mut self, gui: &Gui, p: [f32; 2]) {
