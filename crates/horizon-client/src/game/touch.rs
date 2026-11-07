@@ -1,5 +1,14 @@
 //! Touch controls (Android; ANDROID.md), laid out like Bedrock Edition's.
 //!
+//! The default layout (`Preset::Dpad`) is Bedrock's classic one: a D-pad of
+//! square arrow buttons bottom left (the forward diagonals show while forward
+//! is held, sneak in its centre, a double tap on forward sprints), jump bottom
+//! right, pause, chat and emotes at the top, and the hotbar's "..." button.
+//! Aiming follows `Aim`: `Touch` (Bedrock's Touch mode) breaks and uses at the
+//! touched point with a hold-progress ring around the finger; `Crosshair`
+//! (Bedrock's split controls) acts at the centre crosshair. The joystick
+//! layouts stay as presets. Every icon is drawn here from small pixel grids.
+//!
 //! In menus a finger is the mouse (down = left click, moving drags). In the
 //! world the controls are drawn over the HUD (`draw_touch_controls`): a
 //! joystick, jump, sneak, sprint (a toggle), attack and
@@ -34,7 +43,8 @@ use winit::{
 const HOLD_MS: u128 = 280;
 /// Moved further than this (GUI pixels), a look finger is no tap or hold.
 const SLOP: f64 = 4.0;
-const LAYOUT_FILE: &str = "touch_layout.json";
+/// 0.4.3 starts on the D-pad layout: a new file, the old one stays untouched.
+const LAYOUT_FILE: &str = "touch_layout_v2.json";
 
 /// What a finger is doing, from where it went down.
 #[derive(Clone, Copy, Debug)]
@@ -43,6 +53,8 @@ enum Finger {
     Pointer,
     /// The joystick; the knob's position (GUI pixels).
     Stick,
+    /// On the D-pad (`Id::Dpad`).
+    Dpad,
     /// Turning the view; tap = attack an entity or use, hold = attack.
     Look {
         last: [f64; 2],
@@ -68,6 +80,11 @@ enum Finger {
 #[serde(rename_all = "snake_case")]
 pub(super) enum Id {
     Stick,
+    Dpad,
+    Emote,
+    AimToggle,
+    Mount,
+    F8,
     Jump,
     Sneak,
     Sprint,
@@ -85,8 +102,13 @@ pub(super) enum Id {
     Edit,
 }
 
-const IDS: [Id; 16] = [
+const IDS: [Id; 21] = [
     Id::Stick,
+    Id::Dpad,
+    Id::Emote,
+    Id::AimToggle,
+    Id::Mount,
+    Id::F8,
     Id::Jump,
     Id::Sneak,
     Id::Sprint,
@@ -128,6 +150,19 @@ pub(super) enum Preset {
     Standard,
     Bedrock,
     Custom,
+    /// Bedrock's D-pad (the default).
+    Dpad,
+}
+
+/// Where taps and holds act (Bedrock's Touch and split controls).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Aim {
+    /// At the touched point; no crosshair.
+    #[default]
+    Touch,
+    /// At the centre crosshair.
+    Crosshair,
 }
 
 fn yes() -> bool {
@@ -145,15 +180,50 @@ pub(super) struct TouchLayout {
     /// Off: buttons keep their finger to themselves.
     #[serde(default = "yes")]
     pass_through: bool,
+    #[serde(default)]
+    aim: Aim,
 }
 
 impl Default for TouchLayout {
     fn default() -> Self {
-        Self::standard()
+        Self::dpad()
     }
 }
 
 impl TouchLayout {
+    /// Bedrock's D-pad layout on a 560 x 270 GUI: the pad bottom left (`size` is half a
+    /// cell), jump bottom right, pause, chat and emotes top centre, "..." by the hotbar.
+    fn dpad() -> Self {
+        let (w, h) = (560.0f32, 270.0f32);
+        let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
+        let off = |x: f32, y: f32, size: f32| Spec { visible: false, ..at(x, y, size) };
+        let bar = (w / 2.0 - 91.0).floor() + 182.0;
+        let controls = HashMap::from([
+            (Id::Dpad, at(64.0, h - 64.0, 13.0)),
+            (Id::Stick, off(56.0, h - 60.0, 34.0)),
+            (Id::Jump, at(w - 44.0, h - 52.0, 16.0)),
+            (Id::Sneak, off(w - 86.0, h - 24.0, 12.0)),
+            (Id::Sprint, at(w - 44.0, h - 92.0, 11.0)),
+            (Id::Attack, at(w - 82.0, h - 70.0, 13.0)),
+            (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
+            (Id::Mount, at(w - 78.0, h - 104.0, 10.0)),
+            (Id::AimToggle, at(w - 14.0, 40.0, 9.0)),
+            (Id::Emote, at(w / 2.0 - 60.0, 12.0, 9.0)),
+            (Id::Chat, at(w / 2.0 - 36.0, 12.0, 9.0)),
+            (Id::Drop, at(w / 2.0 - 12.0, 12.0, 9.0)),
+            (Id::Pause, at(w / 2.0 + 12.0, 12.0, 9.0)),
+            (Id::F1, at(w / 2.0 + 36.0, 12.0, 9.0)),
+            (Id::F8, at(w / 2.0 + 60.0, 12.0, 9.0)),
+            (Id::Keyboard, off(w / 2.0 + 84.0, 12.0, 9.0)),
+            (Id::Inventory, at(bar + 12.0, h - 11.0, 10.0)),
+            (Id::F2, off(31.0, 12.0, 8.0)),
+            (Id::F3, off(50.0, 12.0, 8.0)),
+            (Id::F5, at(w - 14.0, 12.0, 9.0)),
+            (Id::Edit, at(w - 36.0, 12.0, 8.0)),
+        ]);
+        Self { opacity: 0.85, controls, preset: Preset::Dpad, pass_through: true, aim: Aim::Touch }
+    }
+
     /// Bedrock Edition's touch layout: no attack or use buttons (tap to use or hit,
     /// hold to break), jump and sneak bottom right, pause and chat top centre,
     /// the camera switch top right; pushing the stick all the way forward sprints.
@@ -162,25 +232,14 @@ impl TouchLayout {
         let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
         let off = |x: f32, y: f32, size: f32| Spec { visible: false, ..at(x, y, size) };
         let bar = (w / 2.0 - 91.0).floor() + 182.0;
-        let controls = HashMap::from([
-            (Id::Stick, at(52.0, h - 56.0, 36.0)),
-            (Id::Jump, at(w - 40.0, h - 50.0, 21.0)),
-            (Id::Sneak, at(w - 86.0, h - 24.0, 14.0)),
-            (Id::Sprint, off(104.0, h - 96.0, 11.0)),
-            (Id::Attack, off(w - 34.0, h - 110.0, 15.0)),
-            (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
-            (Id::Chat, at(w / 2.0 - 12.0, 11.0, 9.0)),
-            (Id::Pause, at(w / 2.0 + 12.0, 11.0, 9.0)),
-            (Id::Keyboard, off(w / 2.0 + 36.0, 11.0, 9.0)),
-            (Id::Inventory, at(bar + 13.0, h - 11.0, 10.0)),
-            (Id::Drop, off(bar + 13.0, h - 34.0, 10.0)),
-            (Id::F1, off(12.0, 12.0, 8.0)),
-            (Id::F2, off(31.0, 12.0, 8.0)),
-            (Id::F3, off(50.0, 12.0, 8.0)),
-            (Id::F5, at(w - 14.0, 12.0, 9.0)),
-            (Id::Edit, at(w - 36.0, 12.0, 8.0)),
-        ]);
-        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true }
+        let mut layout = Self::dpad();
+        let controls = &mut layout.controls;
+        controls.insert(Id::Dpad, off(64.0, h - 64.0, 13.0));
+        controls.insert(Id::Stick, at(60.0, h - 62.0, 34.0));
+        controls.insert(Id::Sneak, at(w - 86.0, h - 24.0, 12.0));
+        let _ = bar;
+        let controls = layout.controls;
+        Self { opacity: 0.85, controls, preset: Preset::Bedrock, pass_through: true, aim: Aim::Touch }
     }
 
     /// Laid out on a 560 x 270 GUI (a 20:9 phone at GUI scale 4).
@@ -190,6 +249,11 @@ impl TouchLayout {
         let bar = (w / 2.0 - 91.0).floor() + 182.0;
         let controls = HashMap::from([
             (Id::Stick, at(44.0, h - 48.0, 32.0)),
+            (Id::Dpad, Spec { visible: false, ..at(62.0, h - 62.0, 13.0) }),
+            (Id::Emote, Spec { visible: false, ..at(w - 78.0, 12.0, 9.0) }),
+            (Id::AimToggle, Spec { visible: false, ..at(w - 14.0, 40.0, 9.0) }),
+            (Id::Mount, Spec { visible: false, ..at(w - 78.0, h - 104.0, 10.0) }),
+            (Id::F8, Spec { visible: false, ..at(109.0, 12.0, 8.0) }),
             (Id::Jump, at(w - 30.0, h - 42.0, 18.0)),
             (Id::Sneak, at(w - 72.0, h - 22.0, 13.0)),
             // Up and right of the joystick, clear of it and the hotbar.
@@ -207,13 +271,14 @@ impl TouchLayout {
             (Id::F5, at(69.0, 12.0, 8.0)),
             (Id::Edit, at(90.0, 12.0, 8.0)),
         ]);
-        Self { opacity: 0.85, controls, preset: Preset::Standard, pass_through: true }
+        Self { opacity: 0.85, controls, preset: Preset::Standard, pass_through: true, aim: Aim::Crosshair }
     }
 
     fn of(preset: Preset) -> Self {
         match preset {
             Preset::Bedrock => Self::bedrock(),
-            _ => Self::standard(),
+            Preset::Standard => Self::standard(),
+            _ => Self::dpad(),
         }
     }
 
@@ -232,6 +297,9 @@ impl TouchLayout {
             layout.preset = preset;
             layout.opacity = saved.opacity.clamp(0.1, 1.0);
             layout.pass_through = saved.pass_through;
+            if text.contains("\"aim\"") {
+                layout.aim = saved.aim;
+            }
         }
         layout
     }
@@ -270,13 +338,17 @@ enum EditAction {
     Bedrock,
     Custom,
     PassThrough,
+    Dpad,
+    Aim,
 }
 
 /// The second row: the layout and how buttons share fingers with the camera.
-const PRESET_ACTIONS: [(EditAction, &str); 4] = [
-    (EditAction::Standard, "Standard"),
-    (EditAction::Bedrock, "Bedrock"),
+const PRESET_ACTIONS: [(EditAction, &str); 6] = [
+    (EditAction::Dpad, "D-pad"),
+    (EditAction::Bedrock, "Joystick"),
+    (EditAction::Standard, "Buttons"),
     (EditAction::Custom, "Custom"),
+    (EditAction::Aim, "Aim: touch"),
     (EditAction::PassThrough, "Look: on"),
 ];
 
@@ -296,6 +368,16 @@ pub(super) struct Touches {
     fingers: HashMap<u64, Finger>,
     /// The joystick knob's offset from the centre, -1..1.
     knob: [f32; 2],
+    /// The D-pad's held direction (x right, y forward), if any.
+    dpad: Option<[i8; 2]>,
+    /// When forward was last let go on the D-pad (a second tap soon after sprints).
+    forward_up: Option<Instant>,
+    /// Touch aiming: the point acted at, -1..1 across the screen (y up).
+    aim_at: Option<[f32; 2]>,
+    /// Frames the aim point stays after a tap (so the tick acts there).
+    aim_frames: u8,
+    /// Frames until the Mount button's dismount sneak lets go.
+    unsneak_frames: u8,
     /// Frames until tapped triggers are released (use, attack).
     trigger_release: [u8; 2],
     /// Sneak toggled on (Bedrock's sneak button toggles).
@@ -329,6 +411,11 @@ impl Default for Touches {
         Self {
             fingers: HashMap::new(),
             knob: [0.0; 2],
+            dpad: None,
+            forward_up: None,
+            aim_at: None,
+            aim_frames: 0,
+            unsneak_frames: 0,
             trigger_release: [0; 2],
             sneaking: false,
             sprinting: false,
@@ -388,6 +475,12 @@ impl Gui {
             .filter(|&id| editing || layout.spec(id).visible)
             .filter_map(|id| {
                 let (c, r) = self.place(layout, id);
+                if id == Id::Dpad {
+                    // Three cells across, each two half-cells and a gap.
+                    let reach = dpad_cell(r) * 1.5;
+                    let d = (p[0] - c[0]).abs().max((p[1] - c[1]).abs());
+                    return (d <= reach).then_some((id, d - reach));
+                }
                 let d = (p[0] - c[0]).hypot(p[1] - c[1]);
                 let reach = if id == Id::Stick && !editing { r * 1.6 } else { r + 4.0 };
                 (d <= reach).then_some((id, d - r))
@@ -402,7 +495,7 @@ impl Gui {
         let total = EDIT_ACTIONS.len() as f32 * (bw + gap) - gap;
         let x0 = ((self.w - total) / 2.0).floor();
         let y = (self.h * 0.32).floor();
-        let pw = 66.0f32;
+        let pw = 56.0f32;
         let ptotal = PRESET_ACTIONS.len() as f32 * (pw + gap) - gap;
         let px0 = ((self.w - ptotal) / 2.0).floor();
         EDIT_ACTIONS
@@ -415,6 +508,16 @@ impl Gui {
                     .enumerate()
                     .map(move |(i, (a, l))| (a, l, [px0 + i as f32 * (pw + gap), y + 19.0, pw, 16.0])),
             )
+    }
+    /// The D-pad cell under `p` (x right, y forward), `None` off the pad.
+    fn dpad_at(&self, layout: &TouchLayout, p: [f32; 2]) -> Option<[i8; 2]> {
+        let (c, r) = self.place(layout, Id::Dpad);
+        let cell = dpad_cell(r);
+        let (fx, fy) = ((p[0] - c[0]) / cell, (c[1] - p[1]) / cell);
+        if fx.abs() > 1.6 || fy.abs() > 1.6 {
+            return None;
+        }
+        Some([fx.round().clamp(-1.0, 1.0) as i8, fy.round().clamp(-1.0, 1.0) as i8])
     }
     fn panel_hit(&self, p: [f32; 2]) -> Option<EditAction> {
         self.panel()
@@ -451,6 +554,226 @@ fn fade(color: u32, a: f32) -> u32 {
     (alpha << 24) | (color & 0x00FF_FFFF)
 }
 
+/// A D-pad cell's pitch for a half-cell of `r`: the square and a gap.
+fn dpad_cell(r: f32) -> f32 {
+    r * 2.0 + 2.0
+}
+
+/// The arc of a ring from the top, clockwise, `frac` of the way round.
+fn arc(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, t: f32, frac: f32, color: u32) {
+    const N: usize = 40;
+    let n = ((N as f32 * frac.clamp(0.0, 1.0)).ceil() as usize).min(N);
+    let at = |i: usize, r: f32| {
+        let a = i as f32 / N as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        [c[0] + r * a.cos(), c[1] + r * a.sin()]
+    };
+    for i in 0..n {
+        batch.fill_quad(atlas, [at(i, r - t), at(i, r), at(i + 1, r), at(i + 1, r - t)], color);
+    }
+}
+
+/// Pixel icons, 9 x 9: `#` is lit. Drawn for Horizon; not taken from any game's textures.
+const ARROW_UP: [&str; 9] = [
+    "....#....",
+    "...###...",
+    "..#####..",
+    ".#######.",
+    "#########",
+    "...###...",
+    "...###...",
+    "...###...",
+    "...###...",
+];
+const ARROW_UP_LEFT: [&str; 9] = [
+    "######...",
+    "#####....",
+    "######...",
+    "###.###..",
+    "##...###.",
+    "#.....###",
+    ".......##",
+    "........#",
+    ".........",
+];
+const JUMP: [&str; 9] = [
+    "....#....",
+    "...###...",
+    "..##.##..",
+    ".##...##.",
+    "##.....##",
+    "....#....",
+    "...###...",
+    "..##.##..",
+    ".##...##.",
+];
+const SNEAK: [&str; 9] = [
+    ".........",
+    "..#####..",
+    ".##...##.",
+    ".#.....#.",
+    ".#.....#.",
+    ".#.....#.",
+    ".##...##.",
+    "..#####..",
+    ".........",
+];
+const PAUSE: [&str; 9] = [
+    ".........",
+    ".##...##.",
+    ".##...##.",
+    ".##...##.",
+    ".##...##.",
+    ".##...##.",
+    ".##...##.",
+    ".##...##.",
+    ".........",
+];
+const CHAT: [&str; 9] = [
+    ".........",
+    "#########",
+    "#.......#",
+    "#.##.##.#",
+    "#.......#",
+    "#########",
+    ".##......",
+    ".#.......",
+    ".........",
+];
+const EMOTE: [&str; 9] = [
+    "..#####..",
+    ".#.....#.",
+    "#..#.#..#",
+    "#.......#",
+    "#.#...#.#",
+    "#..###..#",
+    ".#.....#.",
+    "..#####..",
+    ".........",
+];
+const SWORD: [&str; 9] = [
+    "......###",
+    ".....##.#",
+    "....##.##",
+    "...##.##.",
+    "#.##.##..",
+    ".##.##...",
+    "..###....",
+    ".##.#....",
+    "##...#...",
+];
+const SPRINT: [&str; 9] = [
+    ".........",
+    "#...#....",
+    ".#...#...",
+    "..#...#..",
+    "...#...#.",
+    "..#...#..",
+    ".#...#...",
+    "#...#....",
+    ".........",
+];
+const CROSSHAIR: [&str; 9] = [
+    "....#....",
+    "....#....",
+    ".........",
+    ".........",
+    "##..#..##",
+    ".........",
+    ".........",
+    "....#....",
+    "....#....",
+];
+const MOUNT: [&str; 9] = [
+    ".........",
+    "...##....",
+    "...##....",
+    "..####...",
+    "#########",
+    "#########",
+    ".#.....#.",
+    ".#.....#.",
+    ".........",
+];
+const SCREEN: [&str; 9] = [
+    ".........",
+    "#########",
+    "#.......#",
+    "#.#.#.#.#",
+    "#.......#",
+    "#.#.#.#.#",
+    "#.......#",
+    "#########",
+    ".........",
+];
+const DOTS: [&str; 9] = [
+    ".........",
+    ".........",
+    ".........",
+    ".........",
+    "##.##.##.",
+    "##.##.##.",
+    ".........",
+    ".........",
+    ".........",
+];
+
+/// `rows` turned a quarter `turns` times clockwise, then drawn `size` wide at `c`.
+fn pixels(batch: &mut HudBatch, atlas: &HudAtlas, rows: &[&str; 9], turns: u8, c: [f32; 2], size: f32, color: u32) {
+    let px = size / 9.0;
+    for (y, row) in rows.iter().enumerate() {
+        for (x, b) in row.bytes().enumerate() {
+            if b != b'#' {
+                continue;
+            }
+            let (mut gx, mut gy) = (x, y);
+            for _ in 0..turns % 4 {
+                (gx, gy) = (8 - gy, gx);
+            }
+            batch.fill(atlas, c[0] - size / 2.0 + gx as f32 * px, c[1] - size / 2.0 + gy as f32 * px, px, px, color);
+        }
+    }
+}
+
+/// A Bedrock-style square button: translucent grey with a lighter rim.
+fn square(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, down: bool, a: f32) {
+    let fill = if down { rgba(225, 225, 225, 190) } else { rgba(168, 168, 168, 125) };
+    let (x, y, w) = (c[0] - r, c[1] - r, r * 2.0);
+    let edge = fade(rgba(24, 24, 24, 210), a);
+    // Dark outline with cut corners, the tile inside, a light top-left bevel.
+    batch.fill(atlas, x + 1.0, y, w - 2.0, 1.0, edge);
+    batch.fill(atlas, x + 1.0, y + w - 1.0, w - 2.0, 1.0, edge);
+    batch.fill(atlas, x, y + 1.0, 1.0, w - 2.0, edge);
+    batch.fill(atlas, x + w - 1.0, y + 1.0, 1.0, w - 2.0, edge);
+    batch.fill(atlas, x + 1.0, y + 1.0, w - 2.0, w - 2.0, fade(fill, a));
+    let hi = fade(rgba(255, 255, 255, if down { 150 } else { 90 }), a);
+    batch.fill(atlas, x + 1.0, y + 1.0, w - 2.0, 1.0, hi);
+    batch.fill(atlas, x + 1.0, y + 1.0, 1.0, w - 2.0, hi);
+    let lo = fade(rgba(0, 0, 0, 70), a);
+    batch.fill(atlas, x + 1.0, y + w - 2.0, w - 2.0, 1.0, lo);
+    batch.fill(atlas, x + w - 2.0, y + 1.0, 1.0, w - 2.0, lo);
+}
+
+/// The dark pixel colour of icons on the grey tiles.
+const INK: u32 = 0xF0_1E_1E_1E;
+
+/// The pixel icon of a control on a square button, if it has one.
+fn square_icon(id: Id) -> Option<&'static [&'static str; 9]> {
+    Some(match id {
+        Id::Jump => &JUMP,
+        Id::Sneak => &SNEAK,
+        Id::Pause => &PAUSE,
+        Id::Chat | Id::Keyboard => &CHAT,
+        Id::Emote => &EMOTE,
+        Id::Inventory => &DOTS,
+        Id::Attack => &SWORD,
+        Id::Sprint => &SPRINT,
+        Id::AimToggle => &CROSSHAIR,
+        Id::Mount => &MOUNT,
+        Id::Drop => &SCREEN,
+        _ => return None,
+    })
+}
+
 /// A line `t` wide from `a` to `b`.
 fn line(batch: &mut HudBatch, atlas: &HudAtlas, a: [f32; 2], b: [f32; 2], t: f32, color: u32) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -472,7 +795,19 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
         batch.text(atlas, label, (x - tw / 2.0).round(), (y - 3.5).round(), color, true);
     };
     match id {
-        Id::Stick => {}
+        Id::Stick | Id::Dpad => {}
+        Id::AimToggle => {
+            line(batch, atlas, [x, y - s], [x, y + s], 1.0, color);
+            line(batch, atlas, [x - s, y], [x + s, y], 1.0, color);
+        }
+        Id::Mount => batch.fill(atlas, x - s * 0.8, y - s * 0.2, s * 1.6, s * 0.6, color),
+        Id::F8 => text(batch, "F8"),
+        Id::Emote => {
+            ring(batch, atlas, c, s * 0.9, (s * 0.25).max(1.0), color);
+            batch.fill(atlas, x - s * 0.4, y - s * 0.35, s * 0.2, s * 0.25, color);
+            batch.fill(atlas, x + s * 0.2, y - s * 0.35, s * 0.2, s * 0.25, color);
+            batch.fill(atlas, x - s * 0.4, y + s * 0.25, s * 0.8, s * 0.15, color);
+        }
         Id::Jump => batch.fill_quad(atlas, [[x, y - s], [x + s, y + s * 0.6], [x - s, y + s * 0.6], [x, y - s]], color),
         Id::Sneak => {
             batch.fill_quad(atlas, [[x - s, y - s * 0.7], [x + s, y - s * 0.7], [x, y + s * 0.5], [x, y + s * 0.5]], color);
@@ -595,6 +930,8 @@ impl Game<'_> {
     pub(super) fn touch_release_all(&mut self) {
         self.touch.fingers.clear();
         self.touch.knob = [0.0, 0.0];
+        self.touch.dpad = None;
+        self.touch.aim_at = None;
         self.touch.trigger_release = [0; 2];
         self.touch.sprinting = false;
         let sneaking = self.touch.sneaking;
@@ -640,7 +977,53 @@ impl Game<'_> {
                 a *= 0.35;
             }
             let (c, r) = gui.place(layout, id);
-            if id == Id::Stick {
+            let squared = layout.preset != Preset::Standard;
+            if id == Id::Dpad {
+                let cell = dpad_cell(r);
+                let held = t.dpad;
+                let forward = held.is_some_and(|d| d[1] == 1);
+                for (cx, cy) in [(0i8, 1i8), (0, -1), (-1, 0), (1, 0), (0, 0), (-1, 1), (1, 1)] {
+                    // The forward diagonals only while forward is held, as on Bedrock.
+                    if cy == 1 && cx != 0 && !forward {
+                        continue;
+                    }
+                    let at = [c[0] + f32::from(cx) * cell, c[1] - f32::from(cy) * cell];
+                    let down = if (cx, cy) == (0, 0) { t.sneaking } else { held == Some([cx, cy]) };
+                    square(batch, atlas, at, r, down, a);
+                    let ink = fade(INK, a);
+                    match (cx, cy) {
+                        (0, 0) => pixels(batch, atlas, &SNEAK, 0, at, r * 1.3, ink),
+                        (0, 1) => pixels(batch, atlas, &ARROW_UP, 0, at, r * 1.3, ink),
+                        (1, 0) => pixels(batch, atlas, &ARROW_UP, 1, at, r * 1.3, ink),
+                        (0, -1) => pixels(batch, atlas, &ARROW_UP, 2, at, r * 1.3, ink),
+                        (-1, 0) => pixels(batch, atlas, &ARROW_UP, 3, at, r * 1.3, ink),
+                        (-1, 1) => pixels(batch, atlas, &ARROW_UP_LEFT, 0, at, r * 1.3, ink),
+                        _ => pixels(batch, atlas, &ARROW_UP_LEFT, 1, at, r * 1.3, ink),
+                    }
+                }
+            } else if id == Id::Stick && squared {
+                // A square base with a square knob.
+                square(batch, atlas, c, r, false, a * 0.8);
+                let k = t.knob;
+                let knob = [c[0] + k[0] * r * 0.55, c[1] - k[1] * r * 0.55];
+                let held = t.fingers.values().any(|f| matches!(f, Finger::Stick));
+                square(batch, atlas, knob, r * 0.42, held, a);
+            } else if squared {
+                let down = match id {
+                    Id::Sneak => t.sneaking,
+                    Id::Sprint => t.sprinting,
+                    Id::Jump => self.pad.injected.held(Button::South),
+                    Id::Attack => self.pad.injected.triggers[1] > 0.5,
+                    Id::AimToggle => layout.aim == Aim::Crosshair,
+                    _ => false,
+                };
+                square(batch, atlas, c, r, down, a);
+                let ink = fade(INK, a);
+                match square_icon(id) {
+                    Some(rows) => pixels(batch, atlas, rows, 0, c, r * 1.3, ink),
+                    None => icon(batch, atlas, id, c, r, ink),
+                }
+            } else if id == Id::Stick {
                 disc(batch, atlas, c, r, fade(rgba(0, 0, 0, 80), a));
                 ring(batch, atlas, c, r, 1.5, fade(rgba(255, 255, 255, 130), a));
                 let k = t.knob;
@@ -662,6 +1045,20 @@ impl Game<'_> {
             }
             if editing && t.selected == Some(id) {
                 ring(batch, atlas, c, r + 2.0, 1.5, rgba(255, 220, 60, 255));
+            }
+        }
+        // Touch aiming: Bedrock's ring round a finger held on a block, filling as it breaks.
+        if !editing && let Some((_, scale)) = self.touch_gui() {
+            for f in t.fingers.values() {
+                if let Finger::Look { start, since, moved: false, attacking, .. } = *f {
+                    let c = [(start[0] / f64::from(scale)) as f32, (start[1] / f64::from(scale)) as f32];
+                    let held = since.elapsed().as_millis() as f32 / HOLD_MS as f32;
+                    let frac = if attacking { self.mining.as_ref().map_or(0.0, |m| m.progress) } else { held * 0.15 };
+                    if held > 0.4 {
+                        ring(batch, atlas, c, 15.0, 3.0, rgba(0, 0, 0, 90));
+                        arc(batch, atlas, c, 15.0, 3.0, frac.max(0.02), rgba(255, 255, 255, 220));
+                    }
+                }
             }
         }
         if editing {
@@ -695,9 +1092,13 @@ impl Game<'_> {
                 if action == EditAction::PassThrough && !layout.looks(t.selected) {
                     label = "Look: off";
                 }
+                if action == EditAction::Aim && layout.aim == Aim::Crosshair {
+                    label = "Aim: cross";
+                }
                 let current = matches!(
                     (action, layout.preset),
-                    (EditAction::Standard, Preset::Standard)
+                    (EditAction::Dpad, Preset::Dpad)
+                        | (EditAction::Standard, Preset::Standard)
                         | (EditAction::Bedrock, Preset::Bedrock)
                         | (EditAction::Custom, Preset::Custom)
                 );
@@ -722,14 +1123,24 @@ impl Game<'_> {
                 }
             }
         }
+        if self.touch.unsneak_frames > 0 {
+            self.touch.unsneak_frames -= 1;
+            if self.touch.unsneak_frames == 0 {
+                self.pad.injected.set(Button::RightStick, self.touch.sneaking);
+            }
+        }
+        let touch_aim = self.touch.layout.aim == Aim::Touch;
         let mut attack = false;
         let mut held = [false; 2];
+        let mut aim_start = None;
         for finger in self.touch.fingers.values_mut() {
-            if let Finger::Look { since, moved, attacking, .. } = finger
+            if let Finger::Look { since, moved, attacking, start, .. } = finger
                 && !*moved
+                && !*attacking
                 && since.elapsed().as_millis() >= HOLD_MS
             {
                 *attacking = true;
+                aim_start = Some(*start);
             }
             match finger {
                 Finger::Look { attacking: true, .. } => attack = true,
@@ -738,9 +1149,22 @@ impl Game<'_> {
             }
         }
         held[1] |= attack;
+        if touch_aim && let Some(start) = aim_start {
+            self.touch.aim_at = self.touch_ndc(start);
+        }
+        if !attack && self.touch.aim_at.is_some() {
+            if self.touch.aim_frames > 0 {
+                self.touch.aim_frames -= 1;
+            } else {
+                self.touch.aim_at = None;
+            }
+        }
+        if !touch_aim {
+            self.touch.aim_at = None;
+        }
         // Like vanilla, sprint ends when the player stops moving: here when
         // the joystick is let go.
-        if self.touch.sprinting && !self.touch.fingers.values().any(|f| matches!(f, Finger::Stick)) {
+        if self.touch.sprinting && !self.touch.fingers.values().any(|f| matches!(f, Finger::Stick | Finger::Dpad)) {
             self.touch.sprinting = false;
             self.pad.injected.set(Button::LeftStick, false);
         }
@@ -807,10 +1231,18 @@ impl Game<'_> {
                 t.selected = None;
                 t.dirty = false;
             }
-            EditAction::Standard | EditAction::Bedrock => {
-                let keep = (t.layout.opacity, t.layout.pass_through);
-                t.layout = TouchLayout::of(if action == EditAction::Bedrock { Preset::Bedrock } else { Preset::Standard });
-                (t.layout.opacity, t.layout.pass_through) = keep;
+            EditAction::Aim => {
+                t.layout.aim = if t.layout.aim == Aim::Touch { Aim::Crosshair } else { Aim::Touch };
+                t.layout.save();
+            }
+            EditAction::Standard | EditAction::Bedrock | EditAction::Dpad => {
+                let keep = (t.layout.opacity, t.layout.pass_through, t.layout.aim);
+                t.layout = TouchLayout::of(match action {
+                    EditAction::Bedrock => Preset::Bedrock,
+                    EditAction::Standard => Preset::Standard,
+                    _ => Preset::Dpad,
+                });
+                (t.layout.opacity, t.layout.pass_through, t.layout.aim) = keep;
                 t.selected = None;
                 t.dirty = false;
             }
@@ -856,6 +1288,32 @@ impl Game<'_> {
         };
         match id {
             Id::Stick => Finger::Stick,
+            Id::Dpad => Finger::Dpad,
+            Id::Emote => {
+                self.open_emote_wheel();
+                Finger::Done
+            }
+            Id::AimToggle => {
+                let t = &mut self.touch;
+                t.layout.aim = if t.layout.aim == Aim::Touch { Aim::Crosshair } else { Aim::Touch };
+                t.layout.save();
+                Finger::Done
+            }
+            Id::Mount => {
+                // Riding: get off (sneak); else use what is under the aim (a horse, a boat).
+                if self.riding.is_some() {
+                    self.pad.injected.set(Button::RightStick, true);
+                    self.touch.unsneak_frames = 3;
+                } else {
+                    self.pad.injected.triggers[0] = 1.0;
+                    self.touch.trigger_release[0] = 3;
+                }
+                Finger::Done
+            }
+            Id::F8 => {
+                self.smooth_camera = !self.smooth_camera;
+                Finger::Done
+            }
             Id::Jump => pad(self, Button::South),
             Id::Sneak => {
                 self.touch.sneaking = !self.touch.sneaking;
@@ -974,11 +1432,18 @@ impl Game<'_> {
                 } else if let Some(control) = gui.hit(&self.touch.layout, p, false) {
                     self.touch.press_at = pos;
                     self.touch.pressing = Some(control);
-                    let finger = self.touch_press(control);
-                    if matches!(finger, Finger::Stick) {
-                        self.touch_stick(&gui, p);
+                    if control == Id::Dpad && gui.dpad_at(&self.touch.layout, p) == Some([0, 0]) {
+                        // The centre: sneak, toggled (Bedrock).
+                        self.touch_press(Id::Sneak)
+                    } else {
+                        let finger = self.touch_press(control);
+                        match finger {
+                            Finger::Stick => self.touch_stick(&gui, p),
+                            Finger::Dpad => self.touch_dpad(&gui, p, true),
+                            _ => {}
+                        }
+                        finger
                     }
-                    finger
                 } else if let Some(slot) = gui.hotbar_slot(p) {
                     self.selected = slot;
                     Finger::Done
@@ -990,12 +1455,21 @@ impl Game<'_> {
             TouchPhase::Moved => match self.touch.fingers.get(&id).copied() {
                 Some(Finger::Pointer) => send(self, cursor(device_id, pos)),
                 Some(Finger::Stick) => self.touch_stick(&gui, p),
+                Some(Finger::Dpad) => self.touch_dpad(&gui, p, false),
                 Some(Finger::Drag(control, off)) => {
                     self.touch.dirty = true;
                     if let Some(spec) = self.touch.layout.controls.get_mut(&control) {
                         spec.x = ((p[0] + off[0]) / gui.w).clamp(0.0, 1.0);
                         spec.y = ((p[1] + off[1]) / gui.h).clamp(0.0, 1.0);
                     }
+                }
+                Some(Finger::Look { last, start, since, moved, attacking })
+                    if attacking && self.touch.layout.aim == Aim::Touch =>
+                {
+                    // Breaking: the target follows the finger, the view stays.
+                    self.touch.fingers.insert(id, Finger::Look { last: pos, start: pos, since, moved, attacking });
+                    self.touch.aim_at = self.touch_ndc(pos);
+                    let _ = (last, start);
                 }
                 Some(Finger::Look { last, start, since, moved, attacking }) => {
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
@@ -1038,6 +1512,17 @@ impl Game<'_> {
                     self.touch.knob = [0.0, 0.0];
                     self.pad.injected.left = [0.0, 0.0];
                 }
+                Some(Finger::Dpad) => {
+                    if self.touch.dpad.is_some_and(|d| d == [0, 1]) {
+                        self.touch.forward_up = Some(Instant::now());
+                    }
+                    self.touch.dpad = None;
+                    self.pad.injected.left = [0.0, 0.0];
+                }
+                Some(Finger::Look { attacking: true, .. }) => {
+                    // The aim point stays until the attack trigger is let go.
+                    self.touch.aim_frames = 2;
+                }
                 Some(Finger::Press(button, _, _)) => self.pad.injected.set(button, false),
                 Some(Finger::Trigger { i, since, .. }) if since.elapsed().as_millis() < HOLD_MS => {
                     // A short tap: keep it down a few frames so a tick sees
@@ -1048,6 +1533,10 @@ impl Game<'_> {
                 Some(Finger::Look { moved: false, attacking: false, .. }) if touch.phase == TouchPhase::Ended => {
                     // A tap: attack the entity under the crosshair (Bedrock),
                     // else use; held for a few frames so a tick sees it.
+                    if self.touch.layout.aim == Aim::Touch {
+                        self.touch.aim_at = self.touch_ndc(pos);
+                        self.touch.aim_frames = 4;
+                    }
                     let i = if self.pick_entity_hit().is_some() { 1 } else { 0 };
                     self.pad.injected.triggers[i] = 1.0;
                     self.touch.trigger_release[i] = 3;
@@ -1060,6 +1549,69 @@ impl Game<'_> {
     /// Whether a finger other than `id` is turning the view on open screen.
     fn touch_looking(&self, id: u64) -> bool {
         self.touch.fingers.iter().any(|(f, finger)| *f != id && matches!(finger, Finger::Look { .. }))
+    }
+
+    /// A window position as -1..1 across the screen, y up.
+    fn touch_ndc(&self, pos: [f64; 2]) -> Option<[f32; 2]> {
+        let r = self.renderer.as_ref()?;
+        let (w, h) = (r.config.width.max(1) as f64, r.config.height.max(1) as f64);
+        Some([(pos[0] / w * 2.0 - 1.0) as f32, (1.0 - pos[1] / h * 2.0) as f32])
+    }
+
+    /// Touch aiming: the unit ray through the touched point (`Game::aim`).
+    pub(super) fn touch_aim_dir(&self) -> Option<[f64; 3]> {
+        let [nx, ny] = self.touch.aim_at?;
+        let r = self.renderer.as_ref()?;
+        let aspect = r.config.width.max(1) as f64 / r.config.height.max(1) as f64;
+        let half = (f64::from(self.settings.fov as f32) / 2.0).to_radians().tan();
+        let (y, p) = (f64::from(self.yaw).to_radians(), f64::from(self.pitch).to_radians());
+        let f = [-y.sin() * p.cos(), -p.sin(), y.cos() * p.cos()];
+        let right = [-y.cos(), 0.0, -y.sin()];
+        let up = [-y.sin() * p.sin(), p.cos(), y.cos() * p.sin()];
+        let (sx, sy) = (f64::from(nx) * half * aspect, f64::from(ny) * half);
+        let d: [f64; 3] = std::array::from_fn(|i| f[i] + right[i] * sx + up[i] * sy);
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-9);
+        Some(d.map(|v| v / len))
+    }
+
+    /// Touch aiming hides the crosshair, as Bedrock's Touch mode.
+    pub(super) fn touch_hides_crosshair(&self) -> bool {
+        self.touch_controls_shown() && self.touch.layout.preset != Preset::Standard && self.touch.layout.aim == Aim::Touch
+    }
+
+    /// The D-pad under the finger: the direction it moves; the forward diagonals
+    /// only from forward, as they only show then; a second forward soon after the
+    /// last one sprints.
+    fn touch_dpad(&mut self, gui: &Gui, p: [f32; 2], first: bool) {
+        let cell = gui.dpad_at(&self.touch.layout, p);
+        let now = self.touch.dpad;
+        let next = match cell {
+            None => None,
+            Some([0, 0]) => now,
+            Some([x, 1]) if x != 0 => now.filter(|d| d[1] == 1).map(|_| [x, 1]),
+            Some([x, -1]) if x != 0 => Some([0, -1]),
+            Some(d) => Some(d),
+        };
+        if first
+            && next == Some([0, 1])
+            && self.touch.forward_up.is_some_and(|t| t.elapsed().as_millis() < 300)
+            && !self.touch.sprinting
+        {
+            self.touch.sprinting = true;
+            self.pad.injected.set(Button::LeftStick, true);
+        }
+        if now == Some([0, 1]) && next != Some([0, 1]) && next.is_none_or(|d| d[1] != 1) {
+            self.touch.forward_up = Some(Instant::now());
+        }
+        self.touch.dpad = next;
+        self.pad.injected.left = match next {
+            Some([x, y]) => {
+                let v = [f32::from(x), f32::from(y)];
+                let len = v[0].hypot(v[1]).max(1.0);
+                [v[0] / len, v[1] / len]
+            }
+            None => [0.0, 0.0],
+        };
     }
 
     fn touch_stick(&mut self, gui: &Gui, p: [f32; 2]) {

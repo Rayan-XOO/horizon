@@ -3719,6 +3719,10 @@ impl Game<'_> {
                 pick_view_vector(m.head_yaw, m.head_pitch),
             ));
         }
+        // Touch aiming (Android): the ray through the touched point, not the screen's centre.
+        if let Some(dir) = self.touch_aim_dir() {
+            return Some((self.eye_position()?, dir));
+        }
         Some((self.eye_position()?, pick_view_vector(self.yaw, self.pitch)))
     }
     /// `Player.blockInteractionRange`: the block pick's and mining's reach.
@@ -9250,6 +9254,7 @@ impl Game<'_> {
             if self.camera_type.first_person()
                 && (!spectator || self.spectator_crosshair())
                 && !self.debug_crosshair()
+                && !self.touch_hides_crosshair()
             {
                 let attack = (indicator == 1).then_some(strength);
                 let full = attack.is_some_and(|a| {
