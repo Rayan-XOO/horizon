@@ -3,7 +3,7 @@
 //! The default layout (`Preset::Dpad`) is Bedrock's classic one: a D-pad of
 //! square arrow buttons bottom left (the forward diagonals show while forward
 //! is held, sneak in its centre, a double tap on forward sprints), jump bottom
-//! right, pause, chat and emotes at the top, and the hotbar's "..." button.
+//! right, pause and chat at the top, and the hotbar's "..." button.
 //! Aiming follows `Aim`: `Touch` (Bedrock's Touch mode) breaks and uses at the
 //! touched point with a hold-progress ring around the finger; `Crosshair`
 //! (Bedrock's split controls) acts at the centre crosshair. The joystick
@@ -81,7 +81,6 @@ enum Finger {
 pub(super) enum Id {
     Stick,
     Dpad,
-    Emote,
     AimToggle,
     Mount,
     F8,
@@ -102,10 +101,9 @@ pub(super) enum Id {
     Edit,
 }
 
-const IDS: [Id; 21] = [
+const IDS: [Id; 20] = [
     Id::Stick,
     Id::Dpad,
-    Id::Emote,
     Id::AimToggle,
     Id::Mount,
     Id::F8,
@@ -192,7 +190,7 @@ impl Default for TouchLayout {
 
 impl TouchLayout {
     /// Bedrock's D-pad layout on a 560 x 270 GUI: the pad bottom left (`size` is half a
-    /// cell), jump bottom right, pause, chat and emotes top centre, "..." by the hotbar.
+    /// cell), jump bottom right, pause and chat top centre, "..." by the hotbar.
     fn dpad() -> Self {
         let (w, h) = (560.0f32, 270.0f32);
         let at = |x: f32, y: f32, size: f32| Spec { x: x / w, y: y / h, size, opacity: 1.0, visible: true, look: None };
@@ -208,13 +206,12 @@ impl TouchLayout {
             (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
             (Id::Mount, at(w - 78.0, h - 104.0, 10.0)),
             (Id::AimToggle, at(w - 14.0, 40.0, 9.0)),
-            (Id::Emote, at(w / 2.0 - 60.0, 12.0, 9.0)),
-            (Id::Chat, at(w / 2.0 - 36.0, 12.0, 9.0)),
-            (Id::Drop, at(w / 2.0 - 12.0, 12.0, 9.0)),
-            (Id::Pause, at(w / 2.0 + 12.0, 12.0, 9.0)),
-            (Id::F1, at(w / 2.0 + 36.0, 12.0, 9.0)),
-            (Id::F8, at(w / 2.0 + 60.0, 12.0, 9.0)),
-            (Id::Keyboard, off(w / 2.0 + 84.0, 12.0, 9.0)),
+            (Id::Chat, at(w / 2.0 - 48.0, 12.0, 9.0)),
+            (Id::Drop, at(w / 2.0 - 24.0, 12.0, 9.0)),
+            (Id::Pause, at(w / 2.0, 12.0, 9.0)),
+            (Id::F1, at(w / 2.0 + 24.0, 12.0, 9.0)),
+            (Id::F8, at(w / 2.0 + 48.0, 12.0, 9.0)),
+            (Id::Keyboard, off(w / 2.0 + 72.0, 12.0, 9.0)),
             (Id::Inventory, at(bar + 12.0, h - 11.0, 10.0)),
             (Id::F2, off(31.0, 12.0, 8.0)),
             (Id::F3, off(50.0, 12.0, 8.0)),
@@ -250,7 +247,6 @@ impl TouchLayout {
         let controls = HashMap::from([
             (Id::Stick, at(44.0, h - 48.0, 32.0)),
             (Id::Dpad, Spec { visible: false, ..at(62.0, h - 62.0, 13.0) }),
-            (Id::Emote, Spec { visible: false, ..at(w - 78.0, 12.0, 9.0) }),
             (Id::AimToggle, Spec { visible: false, ..at(w - 14.0, 40.0, 9.0) }),
             (Id::Mount, Spec { visible: false, ..at(w - 78.0, h - 104.0, 10.0) }),
             (Id::F8, Spec { visible: false, ..at(109.0, 12.0, 8.0) }),
@@ -559,204 +555,102 @@ fn dpad_cell(r: f32) -> f32 {
     r * 2.0 + 2.0
 }
 
-/// Pixel icons, 9 x 9: `#` is lit. Drawn for Horizon; not taken from any game's textures.
-const ARROW_UP: [&str; 9] = [
-    "....#....",
-    "...###...",
-    "..#####..",
-    ".#######.",
-    "#########",
-    "...###...",
-    "...###...",
-    "...###...",
-    "...###...",
-];
-const ARROW_UP_LEFT: [&str; 9] = [
-    "######...",
-    "#####....",
-    "######...",
-    "###.###..",
-    "##...###.",
-    "#.....###",
-    ".......##",
-    "........#",
-    ".........",
-];
-const JUMP: [&str; 9] = [
-    "....#....",
-    "...###...",
-    "..##.##..",
-    ".##...##.",
-    "##.....##",
-    "....#....",
-    "...###...",
-    "..##.##..",
-    ".##...##.",
-];
-const SNEAK: [&str; 9] = [
-    ".........",
-    "..#####..",
-    ".##...##.",
-    ".#.....#.",
-    ".#.....#.",
-    ".#.....#.",
-    ".##...##.",
-    "..#####..",
-    ".........",
-];
-const PAUSE: [&str; 9] = [
-    ".........",
-    ".##...##.",
-    ".##...##.",
-    ".##...##.",
-    ".##...##.",
-    ".##...##.",
-    ".##...##.",
-    ".##...##.",
-    ".........",
-];
-const CHAT: [&str; 9] = [
-    ".........",
-    "#########",
-    "#.......#",
-    "#.##.##.#",
-    "#.......#",
-    "#########",
-    ".##......",
-    ".#.......",
-    ".........",
-];
-const EMOTE: [&str; 9] = [
-    "..#####..",
-    ".#.....#.",
-    "#..#.#..#",
-    "#.......#",
-    "#.#...#.#",
-    "#..###..#",
-    ".#.....#.",
-    "..#####..",
-    ".........",
-];
-const SWORD: [&str; 9] = [
-    "......###",
-    ".....##.#",
-    "....##.##",
-    "...##.##.",
-    "#.##.##..",
-    ".##.##...",
-    "..###....",
-    ".##.#....",
-    "##...#...",
-];
-const SPRINT: [&str; 9] = [
-    ".........",
-    "#...#....",
-    ".#...#...",
-    "..#...#..",
-    "...#...#.",
-    "..#...#..",
-    ".#...#...",
-    "#...#....",
-    ".........",
-];
-const CROSSHAIR: [&str; 9] = [
-    "....#....",
-    "....#....",
-    ".........",
-    ".........",
-    "##..#..##",
-    ".........",
-    ".........",
-    "....#....",
-    "....#....",
-];
-const MOUNT: [&str; 9] = [
-    ".........",
-    "...##....",
-    "...##....",
-    "..####...",
-    "#########",
-    "#########",
-    ".#.....#.",
-    ".#.....#.",
-    ".........",
-];
-const SCREEN: [&str; 9] = [
-    ".........",
-    "#########",
-    "#.......#",
-    "#.#.#.#.#",
-    "#.......#",
-    "#.#.#.#.#",
-    "#.......#",
-    "#########",
-    ".........",
-];
-const DOTS: [&str; 9] = [
-    ".........",
-    ".........",
-    ".........",
-    ".........",
-    "##.##.##.",
-    "##.##.##.",
-    ".........",
-    ".........",
-    ".........",
-];
+/// The touch buttons' pixel icons, 16 x 16 (`assets/touch/icons.txt`, drawn for
+/// Horizon; not taken from any game's textures).
+const ICONS_SRC: &str = include_str!("../../assets/touch/icons.txt");
+const ICON_N: usize = 16;
 
-/// `rows` turned a quarter `turns` times clockwise, then drawn `size` wide at `c`.
-fn pixels(batch: &mut HudBatch, atlas: &HudAtlas, rows: &[&str; 9], turns: u8, c: [f32; 2], size: f32, color: u32) {
-    let px = size / 9.0;
+fn icon_rows(name: &str) -> Option<&'static [u16; ICON_N]> {
+    static ICONS: std::sync::OnceLock<std::collections::HashMap<&'static str, [u16; ICON_N]>> = std::sync::OnceLock::new();
+    ICONS
+        .get_or_init(|| {
+            let mut map = std::collections::HashMap::new();
+            let mut lines = ICONS_SRC.lines().filter(|l| !l.starts_with("# "));
+            while let Some(head) = lines.next() {
+                let Some(name) = head.strip_prefix("= ") else { continue };
+                let mut rows = [0u16; ICON_N];
+                for row in rows.iter_mut() {
+                    let line = lines.next().unwrap_or("");
+                    for (x, b) in line.bytes().take(ICON_N).enumerate() {
+                        if b == b'#' {
+                            *row |= 1 << x;
+                        }
+                    }
+                }
+                map.insert(name.trim(), rows);
+            }
+            map
+        })
+        .get(name)
+}
+
+/// Icon `name` turned a quarter `turns` times clockwise, drawn about `size` wide at
+/// `c` on whole screen pixels, so it scales nearest-neighbour and stays sharp.
+fn pixels(batch: &mut HudBatch, atlas: &HudAtlas, name: &str, turns: u8, c: [f32; 2], size: f32, color: u32) {
+    let Some(rows) = icon_rows(name) else { return };
+    // Whole screen pixels per icon pixel.
+    let k = batch.scale.max(1.0);
+    let px = (size * k / ICON_N as f32).round().max(1.0) / k;
+    let x0 = ((c[0] - px * ICON_N as f32 / 2.0) * k).round() / k;
+    let y0 = ((c[1] - px * ICON_N as f32 / 2.0) * k).round() / k;
     for (y, row) in rows.iter().enumerate() {
-        for (x, b) in row.bytes().enumerate() {
-            if b != b'#' {
+        for x in 0..ICON_N {
+            if row & (1 << x) == 0 {
                 continue;
             }
             let (mut gx, mut gy) = (x, y);
             for _ in 0..turns % 4 {
-                (gx, gy) = (8 - gy, gx);
+                (gx, gy) = (ICON_N - 1 - gy, gx);
             }
-            batch.fill(atlas, c[0] - size / 2.0 + gx as f32 * px, c[1] - size / 2.0 + gy as f32 * px, px, px, color);
+            batch.fill(atlas, x0 + gx as f32 * px, y0 + gy as f32 * px, px, px, color);
         }
     }
 }
 
-/// A Bedrock-style square button: translucent grey with a lighter rim.
-fn square(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, down: bool, a: f32) {
-    let fill = if down { rgba(225, 225, 225, 190) } else { rgba(168, 168, 168, 125) };
-    let (x, y, w) = (c[0] - r, c[1] - r, r * 2.0);
-    let edge = fade(rgba(24, 24, 24, 210), a);
-    // Dark outline with cut corners, the tile inside, a light top-left bevel.
+/// A Bedrock-style square tile on whole pixels: a dark outline with cut corners,
+/// translucent grey inside, a light top-left bevel and a darker bottom-right one.
+#[allow(clippy::too_many_arguments)]
+fn tile(batch: &mut HudBatch, atlas: &HudAtlas, x: f32, y: f32, w: f32, h: f32, fill: u32, hi: u32, lo: u32, edge: u32) {
+    let (x, y, w, h) = (x.round(), y.round(), w.round(), h.round());
     batch.fill(atlas, x + 1.0, y, w - 2.0, 1.0, edge);
-    batch.fill(atlas, x + 1.0, y + w - 1.0, w - 2.0, 1.0, edge);
-    batch.fill(atlas, x, y + 1.0, 1.0, w - 2.0, edge);
-    batch.fill(atlas, x + w - 1.0, y + 1.0, 1.0, w - 2.0, edge);
-    batch.fill(atlas, x + 1.0, y + 1.0, w - 2.0, w - 2.0, fade(fill, a));
-    let hi = fade(rgba(255, 255, 255, if down { 150 } else { 90 }), a);
+    batch.fill(atlas, x + 1.0, y + h - 1.0, w - 2.0, 1.0, edge);
+    batch.fill(atlas, x, y + 1.0, 1.0, h - 2.0, edge);
+    batch.fill(atlas, x + w - 1.0, y + 1.0, 1.0, h - 2.0, edge);
+    batch.fill(atlas, x + 1.0, y + 1.0, w - 2.0, h - 2.0, fill);
     batch.fill(atlas, x + 1.0, y + 1.0, w - 2.0, 1.0, hi);
-    batch.fill(atlas, x + 1.0, y + 1.0, 1.0, w - 2.0, hi);
-    let lo = fade(rgba(0, 0, 0, 70), a);
-    batch.fill(atlas, x + 1.0, y + w - 2.0, w - 2.0, 1.0, lo);
-    batch.fill(atlas, x + w - 2.0, y + 1.0, 1.0, w - 2.0, lo);
+    batch.fill(atlas, x + 1.0, y + 2.0, 1.0, h - 3.0, hi);
+    batch.fill(atlas, x + 2.0, y + h - 2.0, w - 3.0, 1.0, lo);
+    batch.fill(atlas, x + w - 2.0, y + 2.0, 1.0, h - 4.0, lo);
+}
+
+/// A Bedrock-style square button of half-size `r` at `c`.
+fn square(batch: &mut HudBatch, atlas: &HudAtlas, c: [f32; 2], r: f32, down: bool, a: f32) {
+    let r = r.round();
+    let fill = if down { rgba(214, 214, 214, 200) } else { rgba(160, 160, 160, 130) };
+    let hi = rgba(255, 255, 255, if down { 120 } else { 95 });
+    let lo = rgba(40, 40, 40, if down { 60 } else { 90 });
+    // Pressed: the bevel flips, as a key pushed in.
+    let (hi, lo) = if down { (lo, hi) } else { (hi, lo) };
+    let edge = fade(rgba(20, 20, 20, 215), a);
+    tile(batch, atlas, c[0] - r, c[1] - r, r * 2.0, r * 2.0, fade(fill, a), fade(hi, a), fade(lo, a), edge);
 }
 
 /// The dark pixel colour of icons on the grey tiles.
 const INK: u32 = 0xF0_1E_1E_1E;
 
 /// The pixel icon of a control on a square button, if it has one.
-fn square_icon(id: Id) -> Option<&'static [&'static str; 9]> {
+fn square_icon(id: Id) -> Option<&'static str> {
     Some(match id {
-        Id::Jump => &JUMP,
-        Id::Sneak => &SNEAK,
-        Id::Pause => &PAUSE,
-        Id::Chat | Id::Keyboard => &CHAT,
-        Id::Emote => &EMOTE,
-        Id::Inventory => &DOTS,
-        Id::Attack => &SWORD,
-        Id::Sprint => &SPRINT,
-        Id::AimToggle => &CROSSHAIR,
-        Id::Mount => &MOUNT,
-        Id::Drop => &SCREEN,
+        Id::Jump => "jump",
+        Id::Sneak => "sneak",
+        Id::Pause => "pause",
+        Id::Chat | Id::Keyboard => "chat",
+        Id::Inventory => "dots",
+        Id::Attack => "sword",
+        Id::Sprint => "sprint",
+        Id::AimToggle => "crosshair",
+        Id::Mount => "mount",
+        Id::Drop => "drop",
         _ => return None,
     })
 }
@@ -789,12 +683,6 @@ fn icon(batch: &mut HudBatch, atlas: &HudAtlas, id: Id, c: [f32; 2], r: f32, col
         }
         Id::Mount => batch.fill(atlas, x - s * 0.8, y - s * 0.2, s * 1.6, s * 0.6, color),
         Id::F8 => text(batch, "F8"),
-        Id::Emote => {
-            ring(batch, atlas, c, s * 0.9, (s * 0.25).max(1.0), color);
-            batch.fill(atlas, x - s * 0.4, y - s * 0.35, s * 0.2, s * 0.25, color);
-            batch.fill(atlas, x + s * 0.2, y - s * 0.35, s * 0.2, s * 0.25, color);
-            batch.fill(atlas, x - s * 0.4, y + s * 0.25, s * 0.8, s * 0.15, color);
-        }
         Id::Jump => batch.fill_quad(atlas, [[x, y - s], [x + s, y + s * 0.6], [x - s, y + s * 0.6], [x, y - s]], color),
         Id::Sneak => {
             batch.fill_quad(atlas, [[x - s, y - s * 0.7], [x + s, y - s * 0.7], [x, y + s * 0.5], [x, y + s * 0.5]], color);
@@ -979,22 +867,33 @@ impl Game<'_> {
                     square(batch, atlas, at, r, down, a);
                     let ink = fade(INK, a);
                     match (cx, cy) {
-                        (0, 0) => pixels(batch, atlas, &SNEAK, 0, at, r * 1.3, ink),
-                        (0, 1) => pixels(batch, atlas, &ARROW_UP, 0, at, r * 1.3, ink),
-                        (1, 0) => pixels(batch, atlas, &ARROW_UP, 1, at, r * 1.3, ink),
-                        (0, -1) => pixels(batch, atlas, &ARROW_UP, 2, at, r * 1.3, ink),
-                        (-1, 0) => pixels(batch, atlas, &ARROW_UP, 3, at, r * 1.3, ink),
-                        (-1, 1) => pixels(batch, atlas, &ARROW_UP_LEFT, 0, at, r * 1.3, ink),
-                        _ => pixels(batch, atlas, &ARROW_UP_LEFT, 1, at, r * 1.3, ink),
+                        (0, 0) => pixels(batch, atlas, "sneak", 0, at, r * 1.2, ink),
+                        (0, 1) => pixels(batch, atlas, "arrow_up", 0, at, r * 1.2, ink),
+                        (1, 0) => pixels(batch, atlas, "arrow_up", 1, at, r * 1.2, ink),
+                        (0, -1) => pixels(batch, atlas, "arrow_up", 2, at, r * 1.2, ink),
+                        (-1, 0) => pixels(batch, atlas, "arrow_up", 3, at, r * 1.2, ink),
+                        (-1, 1) => pixels(batch, atlas, "arrow_up_left", 0, at, r * 1.2, ink),
+                        _ => pixels(batch, atlas, "arrow_up_left", 1, at, r * 1.2, ink),
                     }
                 }
             } else if id == Id::Stick && squared {
                 // A square base with a square knob.
                 square(batch, atlas, c, r, false, a * 0.8);
+                // A sunken well the knob travels in.
+                let w = (r * 0.78).round();
+                let well = [rgba(60, 60, 60, 70), rgba(0, 0, 0, 70), rgba(255, 255, 255, 60), rgba(20, 20, 20, 120)].map(|v| fade(v, a));
+                tile(batch, atlas, c[0] - w, c[1] - w, w * 2.0, w * 2.0, well[0], well[1], well[2], well[3]);
                 let k = t.knob;
-                let knob = [c[0] + k[0] * r * 0.55, c[1] - k[1] * r * 0.55];
+                let knob = [(c[0] + k[0] * r * 0.4).round(), (c[1] - k[1] * r * 0.4).round()];
                 let held = t.fingers.values().any(|f| matches!(f, Finger::Stick));
-                square(batch, atlas, knob, r * 0.42, held, a);
+                let kr = (r * 0.38).round();
+                square(batch, atlas, knob, kr, held, a);
+                // Grip: three short ridges.
+                let g = (kr * 0.25).round().max(1.0);
+                for i in -1..=1 {
+                    let y = (knob[1] + i as f32 * g * 2.0 - g / 2.0).round();
+                    batch.fill(atlas, (knob[0] - kr * 0.5).round(), y, kr, g, fade(rgba(30, 30, 30, 120), a));
+                }
             } else if squared {
                 let down = match id {
                     Id::Sneak => t.sneaking,
@@ -1007,7 +906,7 @@ impl Game<'_> {
                 square(batch, atlas, c, r, down, a);
                 let ink = fade(INK, a);
                 match square_icon(id) {
-                    Some(rows) => pixels(batch, atlas, rows, 0, c, r * 1.3, ink),
+                    Some(rows) => pixels(batch, atlas, rows, 0, c, r * 1.2, ink),
                     None => icon(batch, atlas, id, c, r, ink),
                 }
             } else if id == Id::Stick {
@@ -1278,10 +1177,6 @@ impl Game<'_> {
         match id {
             Id::Stick => Finger::Stick,
             Id::Dpad => Finger::Dpad,
-            Id::Emote => {
-                self.open_emote_wheel();
-                Finger::Done
-            }
             Id::AimToggle => {
                 let t = &mut self.touch;
                 t.layout.aim = if t.layout.aim == Aim::Touch { Aim::Crosshair } else { Aim::Touch };
@@ -1316,17 +1211,16 @@ impl Game<'_> {
             }
             Id::Attack | Id::Use => unreachable!("touch_event starts trigger fingers"),
             Id::Pause => pad(self, Button::Start),
-            Id::Chat => pad(self, Button::DPadRight),
+            // Straight to the chat screen: the pad's chat binding (DPadUp by
+            // default, DPadRight in some layouts) is not a fixed button.
+            Id::Chat | Id::Keyboard => {
+                self.open_chat_method("");
+                #[cfg(target_os = "android")]
+                super::android_ime::show(true);
+                Finger::Done
+            }
             Id::Inventory => pad(self, Button::North),
             Id::Drop => pad(self, Button::East),
-            Id::Keyboard => {
-                // Opens chat; the keyboard follows. Shown again if dismissed.
-                #[cfg(target_os = "android")]
-                if self.touch.ime_shown {
-                    super::android_ime::show(true);
-                }
-                pad(self, Button::DPadRight)
-            }
             Id::F1 => {
                 self.toggle_hide_gui();
                 Finger::Done
