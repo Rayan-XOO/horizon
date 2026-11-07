@@ -16,7 +16,7 @@ mkdir -p "$OUT/stage/lib/arm64-v8a"
 # HorizonActivity (the soft keyboard bridge) -> classes.dex.
 rm -rf "$OUT/java" && mkdir -p "$OUT/java/classes"
 "${JAVAC:-javac}" --release 8 -nowarn -classpath "$PLATFORM" -d "$OUT/java/classes" \
-  $(find packaging/android/java -name '*.java') 2>&1 | grep -v "^warning\|^Note\|^1 warning" || true
+  $(find packaging/android/java -name '*.java')
 "$BT/d8" --min-api 26 --lib "$PLATFORM" --output "$OUT/java" $(find "$OUT/java/classes" -name '*.class')
 rm -rf "$OUT/res" && mkdir -p "$OUT/res"
 "$BT/aapt2" compile --dir packaging/android/res -o "$OUT/res/res.zip"

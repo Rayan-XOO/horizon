@@ -11,7 +11,7 @@ sound is cpal over AAudio. Status: compiles, links and packages; **not yet run o
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
 # Android SDK: cmdline-tools, then
-sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018" "platform-tools"
+sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "platform-tools"
 export ANDROID_HOME=~/android/sdk            # NDK: the newest under $ANDROID_HOME/ndk, or ANDROID_NDK_HOME
 ./packaging/android/build_apk.sh             # -> target/android/horizon.apk (debug-signed)
 PROFILE=release ./packaging/android/build_apk.sh   # slower build, faster game
@@ -164,3 +164,19 @@ The person icon at the top left of the title and pause screens (and the
 The first-run screen follows the system language (Russian or English). The
 derived pack is taken from `HORIZON_DERIVED_URL` set at build time or from
 `files/horizon-derived.zip`. If neither exists, the screen says so.
+
+## Microsoft session regression tests (host JVM)
+
+The tests compile the production `Msa.java` with small Android stubs and an in-process
+fake HTTPS transport. They use only synthetic credentials, never an account or device.
+Download `org.json:json:20240303` from Maven Central (SHA-256
+`3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed`), then run:
+
+```sh
+JAVA_HOME=/path/to/jdk JSON_JAR=/path/to/json-20240303.jar \
+  python3 packaging/android/tests/run_msa_tests.py
+```
+
+The cases cover sign-out during refresh and interactive sign-in, stale/queued UI
+callbacks, a newer sign-in superseding old work, transient polling failures, and
+native publication under the session lock. They do not replace device testing.
