@@ -26,7 +26,8 @@ final class Msa {
         void onError(String message);
     }
 
-    private static volatile boolean cancel;
+    /** The sign-in in progress: starting a new one or cancelling ends the one before. UI thread only writes it. */
+    private static volatile int attempt;
 
     private Msa() {}
 
@@ -108,26 +109,28 @@ final class Msa {
 
     static void signOut(Context c) {
         accountFile(c).delete();
+        // The copy the game reads (android_msa.rs) holds the Minecraft token too.
+        new File(c.getFilesDir(), "sessions/session-android.json").delete();
     }
 
     static void cancel() {
-        cancel = true;
+        attempt++;
     }
 
     static void start(final Context c, final String clientId, final Listener listener) {
-        cancel = false;
+        final int me = ++attempt;
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    listener.onDone(signIn(c, clientId, listener));
+                    listener.onDone(signIn(c, clientId, listener, me));
                 } catch (Exception e) {
-                    if (!cancel) listener.onError(e.getMessage() == null ? "Sign-in failed." : e.getMessage());
+                    if (me == attempt) listener.onError(e.getMessage() == null ? "Sign-in failed." : e.getMessage());
                 }
             }
         }, "horizon-msa").start();
     }
 
-    private static String signIn(Context c, String clientId, Listener listener) throws Exception {
+    private static String signIn(Context c, String clientId, Listener listener, int me) throws Exception {
         String base = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
         JSONObject code = postForm(base + "/devicecode",
                 "client_id=" + enc(clientId) + "&scope=" + enc("XboxLive.signin offline_access"));
@@ -141,10 +144,17 @@ final class Msa {
         JSONObject token = null;
         while (System.currentTimeMillis() < deadline) {
             sleep(interval);
-            if (cancel) throw new Exception(Ui.t("Вход отменён.", "Sign-in cancelled."));
-            JSONObject poll = postForm(base + "/token",
-                    "grant_type=" + enc("urn:ietf:params:oauth:grant-type:device_code")
-                            + "&client_id=" + enc(clientId) + "&device_code=" + enc(device));
+            if (me != attempt) throw new Exception(Ui.t("Вход отменён.", "Sign-in cancelled."));
+            JSONObject poll;
+            try {
+                poll = postForm(base + "/token",
+                        "grant_type=" + enc("urn:ietf:params:oauth:grant-type:device_code")
+                                + "&client_id=" + enc(clientId) + "&device_code=" + enc(device));
+            } catch (java.io.IOException | org.json.JSONException e) {
+                // The network dropped or answered with garbage, likely while the player is in the
+                // browser. The code is still good: keep asking until it expires.
+                continue;
+            }
             String err = poll.optString("error", "");
             if ("authorization_pending".equals(err)) continue;
             if ("slow_down".equals(err)) {
@@ -159,6 +169,7 @@ final class Msa {
         }
         if (token == null) throw new Exception(Ui.t("Код истёк. Начните снова.", "The code expired. Start again."));
         JSONObject account = finish(token.optString("access_token"), token.optString("refresh_token"));
+        if (me != attempt) throw new Exception(Ui.t("Вход отменён.", "Sign-in cancelled."));
         write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
         return account.optString("name");
     }
