@@ -9,8 +9,11 @@
 //!   the mod.
 //! - `check <file> [--json]`: what the registry checks of a submission
 //!   (`.hmod`, `.hnmod`, `.hpack`, resource pack `.zip`, `.hshader`).
+//! - `android [--bundle <mod.hnmod>] [--lib <file.so>]`: a prebuilt native mod
+//!   for Android in `target/horizon-mod/<id>.hnmod` (docs/android-mods.md).
 //! - `registry build|review|check|list`: the registry repository's CI.
 use horizon_mods::{Capability, Content, Manifest, Package, manifest::MANIFEST};
+mod android;
 mod check;
 mod registry;
 
@@ -32,6 +35,7 @@ fn main() -> ExitCode {
         }),
         Some("run") => run(&args[1..]),
         Some("check") => check(&args[1..]),
+        Some("android") => android::main(&args[1..]),
         Some("registry") => registry::main(&args[1..]),
         _ => Err("usage: cargo horizon-mod new <path> [--name \"Name\"] [--template content|native [--horizon <commit>]] | build | run [--game <horizon-client>] [-- <game args>] | check <file> [--kind <kind>] [--key <public key> --signature <file.minisig>] [--json] | registry build|review|check|list".into()),
     };

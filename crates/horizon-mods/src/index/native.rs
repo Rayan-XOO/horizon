@@ -46,6 +46,12 @@ pub struct Manifest {
     /// `horizon` is only the revision it was tested on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<u32>,
+    /// Prebuilt libraries for games that can't build the mod from source
+    /// (Android), by target (`aarch64-linux-android`) → the library's path in
+    /// the bundle, `bin/<target>/<name>`. They speak `horizon-native-abi`
+    /// (docs/android-mods.md), not the mixins.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub binaries: BTreeMap<String, String>,
 }
 
 pub fn revision(value: &str) -> bool {
@@ -53,6 +59,23 @@ pub fn revision(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A prebuilt library's place: `bin/<target>/<file>`, plain names only.
+pub fn binary_path(target: &str, path: &str) -> bool {
+    let plain = |p: &str| {
+        !p.is_empty()
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            && p != "."
+            && p != ".."
+    };
+    let mut parts = path.split('/');
+    plain(target)
+        && parts.next() == Some("bin")
+        && parts.next() == Some(target)
+        && parts.next().is_some_and(plain)
+        && parts.next().is_none()
 }
 
 impl Manifest {
@@ -64,6 +87,10 @@ impl Manifest {
             || !revision(&self.horizon)
             || !revision(&self.mixins)
             || self.hooks == Some(0)
+            || !self
+                .binaries
+                .iter()
+                .all(|(target, path)| binary_path(target, path))
         {
             return Err(
                 "invalid native manifest: schema 1, id, version, game and exact revisions required"
@@ -192,6 +219,9 @@ impl Bundle {
         }
         let prefix = format!("mixins/{}/", manifest.id);
         for name in files.keys().filter(|n| n.as_str() != MANIFEST) {
+            if manifest.binaries.values().any(|b| b == name) {
+                continue;
+            }
             let Some(rest) = name.strip_prefix(&prefix) else {
                 return Err(format!("unexpected native source: {name}"));
             };
@@ -199,9 +229,18 @@ impl Bundle {
                 return Err(format!("unexpected native source: {name}"));
             }
         }
-        let source = files
-            .get(&format!("{prefix}horizon-mixin.toml"))
-            .ok_or("missing horizon-mixin.toml")?;
+        for path in manifest.binaries.values() {
+            if !files.contains_key(path) {
+                return Err(format!("missing prebuilt library {path}"));
+            }
+        }
+        // A bundle of prebuilt libraries only (no sources) is for the games that run them.
+        let Some(source) = files.get(&format!("{prefix}horizon-mixin.toml")) else {
+            if manifest.binaries.is_empty() {
+                return Err("missing horizon-mixin.toml".into());
+            }
+            return Ok(Self { manifest, files });
+        };
         let source: toml::Value =
             toml::from_str(std::str::from_utf8(source).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
@@ -241,6 +280,7 @@ mod tests {
             horizon: "a".repeat(40),
             mixins: "b".repeat(40),
             hooks: None,
+            binaries: Default::default(),
         }
     }
     fn read(name: &str, extras: &[(&str, &[u8])], mixin: &str) -> Result<Bundle, String> {
@@ -409,5 +449,30 @@ capabilities = ["registries"]
             ..manifest()
         };
         assert!(zero.check().is_err());
+    }
+    #[test]
+    fn prebuilt_libraries_sit_under_bin_of_their_target() {
+        let lib = "bin/aarch64-linux-android/libveinminer.so";
+        let with = Manifest {
+            binaries: [("aarch64-linux-android".to_owned(), lib.to_owned())].into(),
+            ..manifest()
+        };
+        assert!(with.check().is_ok());
+        for bad in [
+            "libveinminer.so",
+            "bin/x86_64-linux-android/lib.so",
+            "bin/aarch64-linux-android/../x.so",
+        ] {
+            let m = Manifest {
+                binaries: [("aarch64-linux-android".to_owned(), bad.to_owned())].into(),
+                ..manifest()
+            };
+            assert!(m.check().is_err(), "{bad}");
+        }
+        assert!(
+            !serde_json::to_string(&manifest())
+                .unwrap()
+                .contains("binaries")
+        );
     }
 }

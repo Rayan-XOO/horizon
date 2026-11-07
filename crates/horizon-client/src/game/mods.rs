@@ -465,8 +465,13 @@ impl Game<'_> {
                     .any(|m| m.native.is_some()),
         );
         let native_dir = Self::game_dir().join(mod_list::NATIVE_DIR);
-        let unbuilt = not_built(&native_dir, &built, &self.settings.mods.installed);
-        self.settings.mods.installed.extend(unbuilt);
+        if super::prebuilt_mods::ON {
+            // This game can't be built with mods: it opens the libraries they carry instead.
+            self.start_prebuilt_mods();
+        } else {
+            let unbuilt = not_built(&native_dir, &built, &self.settings.mods.installed);
+            self.settings.mods.installed.extend(unbuilt);
+        }
         let installed = &self.settings.mods.installed;
         self.mods.stopped = installed
             .iter()
