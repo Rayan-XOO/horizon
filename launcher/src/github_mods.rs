@@ -488,6 +488,7 @@ pub fn pack(bundle: &Bundle) -> Result<Vec<u8>, String> {
             .clone()
             .unwrap_or_else(|| native_mods::MIXINS_REV.into()),
         hooks: bundle.hooks,
+        binaries: Default::default(),
     };
     manifest.check()?;
     let mut put = vec![(
