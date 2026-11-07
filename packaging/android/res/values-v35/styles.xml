@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Targeting SDK 35 on Android 15 reads every cutout mode as "always", so the setting on the
+         profile screen did nothing. The profile screen handles no insets, so it opts out too. -->
+    <style name="HorizonGame" parent="@android:style/Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+    <style name="HorizonProfile" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

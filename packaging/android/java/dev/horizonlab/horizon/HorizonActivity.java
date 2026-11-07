@@ -95,6 +95,8 @@ public class HorizonActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        // The setting may have just changed on the profile screen.
+        applyCutout(this);
         renewAccount();
         hideSystemBars();
     }
@@ -106,10 +108,11 @@ public class HorizonActivity extends NativeActivity {
         try {
             String t = new String(java.nio.file.Files.readAllBytes(new java.io.File(a.getFilesDir(), "cutout.txt").toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
             if (t.equals("never")) mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
-            else if (t.equals("always")) mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            else if (t.equals("always") && android.os.Build.VERSION.SDK_INT >= 30) mode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         } catch (Exception ignored) {
         }
         WindowManager.LayoutParams lp = a.getWindow().getAttributes();
+        if (lp.layoutInDisplayCutoutMode == mode) return;
         lp.layoutInDisplayCutoutMode = mode;
         a.getWindow().setAttributes(lp);
     }
