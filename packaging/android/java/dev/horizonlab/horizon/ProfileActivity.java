@@ -2,19 +2,21 @@ package dev.horizonlab.horizon;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
-import android.graphics.Paint;
-import android.graphics.Rect;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputFilter;
+import android.view.Gravity;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.ImageView;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -24,19 +26,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 
 /**
- * Name and skin. The name goes to horizon-player.txt (offline_name.rs: the name
- * used on servers and LAN); the skin, a 64x64 or 64x32 PNG picked with the system file
- * picker, to horizon-skin.png, and its arm model to horizon-skin.txt (game/local_skin.rs).
+ * The launcher, landscape and on one screen: the skin with its picker and arm model, the
+ * name, the account, a big Play button and every setting on the right.
+ *
+ * The name goes to horizon-player.txt (offline_name.rs: the name used on servers and LAN);
+ * the skin, a PNG picked with the system file picker, to horizon-skin.png as a plain 64x64
+ * or 64x32 RGBA PNG, and its arm model to horizon-skin.txt (game/local_skin.rs).
  */
 public class ProfileActivity extends Activity implements View.OnClickListener {
     private static final int PICK = 7;
     private static final int PICK_DRIVER = 8;
+    private static final int MS_LOGIN = 9;
     private File dir;
     private EditText name;
     private TextView message;
-    private ImageView preview;
-    private Button pick, model, save, back, driver, systemDriver, microsoft, signOut;
-    private TextView driverStatus, accountStatus;
+    private SkinView preview;
+    private Button pick, model, play, driver, systemDriver, microsoft, deviceCode, signOut;
+    private TextView driverStatus, accountStatus, accountChip;
     private EditText clientId;
     private LinearLayout codeBox, advancedBox;
     private TextView code, codeHint;
@@ -44,41 +50,162 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     private String verifyUri = "https://www.microsoft.com/link";
     private boolean slim;
 
+    private static final int PANEL = Color.rgb(26, 27, 33);
+    private static final int FIELD = Color.rgb(20, 21, 26);
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         dir = new File(SetupActivity.home(this));
-        LinearLayout card = Ui.card(this);
-        card.addView(Ui.text(this, Ui.t("Профиль", "Profile"), 26, Ui.TEXT, true));
-        card.addView(Ui.text(this, Ui.t("Ник", "Name"), 14, Ui.MUTED, false), Ui.gap(this, 10));
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+                | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+        int p = Ui.dp(this, 12);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.HORIZONTAL);
+        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[] {Color.rgb(22, 30, 30), Ui.BG, Color.rgb(8, 8, 11)}));
+        int pad = Ui.dp(this, 16);
+        root.setPadding(pad, pad, pad, pad);
+
+        // Left: who plays.
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.setPadding(p, p, p, p);
+        left.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = Ui.text(this, "Horizon", 22, Ui.TEXT, true);
+        head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView ver = Ui.text(this, version(), 12, Ui.MUTED, false);
+        head.addView(ver);
+        left.addView(head);
+
+        LinearLayout who = new LinearLayout(this);
+        who.setOrientation(LinearLayout.HORIZONTAL);
+        preview = new SkinView(this);
+        preview.setBackground(Ui.rounded(this, FIELD, 0, 12));
+        int pv = Ui.dp(this, 6);
+        preview.setPadding(pv, pv, pv, pv);
+        who.addView(preview, new LinearLayout.LayoutParams(0, -1, 1));
+        LinearLayout side = new LinearLayout(this);
+        side.setOrientation(LinearLayout.VERTICAL);
+        side.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(0, -1, 1.3f);
+        sideLp.leftMargin = p;
+        side.addView(Ui.text(this, Ui.t("Ник", "Name"), 12, Ui.MUTED, false));
         name = new EditText(this);
         name.setSingleLine(true);
         name.setTextColor(Ui.TEXT);
         name.setHintTextColor(Ui.MUTED);
         name.setHint("Steve_123");
+        name.setTextSize(16);
         name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
-        int p = Ui.dp(this, 12);
-        name.setPadding(p, p, p, p);
-        name.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.EDGE, 8));
+        name.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
+        name.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+        name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         name.setText(readName());
-        card.addView(name);
-        card.addView(Ui.text(this, Ui.t("3–16 символов: латиница, цифры, _", "3–16 characters: letters, digits, _"),
-                12, Ui.MUTED, false));
-        card.addView(Ui.text(this, Ui.t("Скин", "Skin"), 14, Ui.MUTED, false), Ui.gap(this, 14));
-        preview = new ImageView(this);
-        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        preview.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), 0, 10));
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 180));
-        card.addView(preview, lp);
-        pick = Ui.button(this, Ui.t("Выбрать PNG-скин", "Choose a PNG skin"), false);
+        side.addView(name);
+        pick = Ui.button(this, Ui.t("Скин…", "Skin…"), false);
         pick.setOnClickListener(this);
-        card.addView(pick, Ui.gap(this, 10));
+        side.addView(pick, Ui.gap(this, 8));
         slim = readModel();
         model = Ui.button(this, "", false);
         model.setOnClickListener(this);
-        card.addView(model, Ui.gap(this, 8));
-        message = Ui.text(this, "", 13, Ui.WARN, false);
-        card.addView(message, Ui.gap(this, 6));
+        side.addView(model, Ui.gap(this, 6));
+        accountChip = Ui.text(this, "", 12, Ui.MUTED, false);
+        side.addView(accountChip, Ui.gap(this, 6));
+        who.addView(side, sideLp);
+        left.addView(who, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        message = Ui.text(this, "", 12, Ui.WARN, false);
+        message.setMaxLines(3);
+        left.addView(message, Ui.gap(this, 4));
+        play = Ui.button(this, Ui.t("ИГРАТЬ", "PLAY"), true);
+        play.setTextSize(22);
+        play.setLetterSpacing(0.1f);
+        play.setMinHeight(Ui.dp(this, 60));
+        play.setOnClickListener(this);
+        left.addView(play, Ui.gap(this, 6));
+        root.addView(left, new LinearLayout.LayoutParams(0, -1, 1));
+
+        // Right: settings.
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 16), Ui.dp(this, 16));
+        scroll.addView(card);
+        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -1, 1.15f);
+        rightLp.leftMargin = Ui.dp(this, 14);
+        root.addView(scroll, rightLp);
+
+        Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
+        accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
+        card.addView(accountStatus);
+        card.addView(Ui.text(this, Ui.t(
+                "Для лицензионных серверов. Войдите почтой и паролем один раз: дальше вход обновляется сам.",
+                "For licensed servers. Sign in with your email and password once: it renews by itself."),
+                12, Ui.MUTED, false));
+        microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
+        microsoft.setOnClickListener(this);
+        card.addView(microsoft, Ui.gap(this, 8));
+        codeBox = new LinearLayout(this);
+        codeBox.setOrientation(LinearLayout.VERTICAL);
+        codeBox.setPadding(p, p, p, p);
+        codeBox.setBackground(Ui.rounded(this, FIELD, Ui.GREEN_DARK, 10));
+        codeBox.setVisibility(View.GONE);
+        codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
+        codeBox.addView(codeHint);
+        code = Ui.text(this, "", 28, Ui.TEXT, true);
+        code.setGravity(Gravity.CENTER);
+        code.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
+        code.setLetterSpacing(0.12f);
+        code.setTextIsSelectable(true);
+        codeBox.addView(code, Ui.gap(this, 4));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        copy = Ui.button(this, Ui.t("Скопировать код", "Copy code"), false);
+        copy.setOnClickListener(this);
+        browser = Ui.button(this, Ui.t("Открыть браузер", "Open browser"), true);
+        browser.setOnClickListener(this);
+        row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, -2, 1);
+        half2.leftMargin = Ui.dp(this, 8);
+        row.addView(browser, half2);
+        codeBox.addView(row, Ui.gap(this, 8));
+        card.addView(codeBox, Ui.gap(this, 8));
+        signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
+        signOut.setOnClickListener(this);
+        card.addView(signOut, Ui.gap(this, 8));
+        advanced = Ui.button(this, Ui.t("Другой способ входа ▾", "Other sign-in ▾"), false);
+        advanced.setOnClickListener(this);
+        card.addView(advanced, Ui.gap(this, 8));
+        advancedBox = new LinearLayout(this);
+        advancedBox.setOrientation(LinearLayout.VERTICAL);
+        advancedBox.addView(Ui.text(this, Ui.t(
+                "Вход по коду через свой Azure client ID, одобренный Mojang (aka.ms/mce-reviewappid). Нужен, только если вход выше не работает.",
+                "Code sign-in with your own Azure client ID approved by Mojang (aka.ms/mce-reviewappid). Only needed if the sign-in above fails."),
+                12, Ui.MUTED, false));
+        clientId = new EditText(this);
+        clientId.setSingleLine(true);
+        clientId.setTextColor(Ui.TEXT);
+        clientId.setHintTextColor(Ui.MUTED);
+        clientId.setHint("00000000-0000-0000-0000-000000000000");
+        clientId.setText(Msa.clientId(this));
+        clientId.setPadding(p, p, p, p);
+        clientId.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+        clientId.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        advancedBox.addView(clientId, Ui.gap(this, 6));
+        deviceCode = Ui.button(this, Ui.t("Войти по коду", "Sign in with a code"), false);
+        deviceCode.setOnClickListener(this);
+        advancedBox.addView(deviceCode, Ui.gap(this, 6));
+        advancedBox.setVisibility(View.GONE);
+        card.addView(advancedBox, Ui.gap(this, 6));
+
         Ui.section(card, Ui.t("Драйвер Vulkan · экспериментально", "Vulkan driver · experimental"));
         driverStatus = Ui.text(this, Turnip.status(this), 13, Ui.TEXT, false);
         card.addView(driverStatus);
@@ -86,24 +213,29 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             card.addView(Ui.text(this, Ui.t(
                     "Свой драйвер не запустился в прошлый раз, игра вернулась на системный. Попробуйте другую сборку Turnip.",
                     "The custom driver did not start last time, so the game went back to the system one. Try another Turnip build."),
-                    12, Ui.WARN, false), Ui.gap(this, 4));
+                    12, Ui.WARN, false));
         }
         card.addView(Ui.text(this, Ui.t(
-                "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного драйвера. Если игра с ним не стартует, при следующем запуске включится системный.",
+                "Zip с Turnip (libvulkan_freedreno.so). На части Snapdragon быстрее системного. Если игра с ним не стартует, следующий запуск будет на системном.",
                 "A Turnip zip (libvulkan_freedreno.so). Faster than the system driver on some Snapdragons. If the game fails to start with it, the next launch uses the system one."),
-                12, Ui.MUTED, false), Ui.gap(this, 4));
+                12, Ui.MUTED, false));
+        LinearLayout drivers = new LinearLayout(this);
+        drivers.setOrientation(LinearLayout.HORIZONTAL);
         driver = Ui.button(this, Ui.t("Установить Turnip", "Install Turnip"), false);
         driver.setOnClickListener(this);
-        card.addView(driver, Ui.gap(this, 8));
-        systemDriver = Ui.button(this, Ui.t("Системный драйвер", "System driver"), false);
+        systemDriver = Ui.button(this, Ui.t("Системный", "System"), false);
         systemDriver.setOnClickListener(this);
-        card.addView(systemDriver, Ui.gap(this, 8));
+        drivers.addView(driver, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(0, -2, 1);
+        dl.leftMargin = Ui.dp(this, 8);
+        drivers.addView(systemDriver, dl);
+        card.addView(drivers, Ui.gap(this, 8));
         final File safeMode = new File(getFilesDir(), "safe-mode.txt");
         if (safeMode.isFile()) {
             card.addView(Ui.text(this, Ui.t(
                     "Безопасный запуск: Vulkan не стартовал, игра работает на OpenGL ES и может быть медленнее.",
                     "Safe start: Vulkan did not start, so the game runs on OpenGL ES and can be slower."),
-                    12, Ui.WARN, false), Ui.gap(this, 10));
+                    12, Ui.WARN, false), Ui.gap(this, 8));
             Button vulkan = Ui.button(this, Ui.t("Попробовать Vulkan снова", "Try Vulkan again"), false);
             vulkan.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
@@ -115,13 +247,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             });
             card.addView(vulkan, Ui.gap(this, 8));
         }
-        card.addView(Ui.text(this, Ui.t(
-                "Моды: .hnmod со сборкой для Android или .hmod. Также можно положить файл в Android/data/dev.horizonlab.horizon/files/mods/.",
-                "Mods: a .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),
-                12, Ui.MUTED, false), Ui.gap(this, 10));
-        mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
-        mods.setOnClickListener(this);
-        card.addView(mods, Ui.gap(this, 8));
+
         Ui.section(card, Ui.t("Экран", "Screen"));
         Button cutout = Ui.button(this, cutoutLabel(), false);
         cutout.setOnClickListener(new View.OnClickListener() {
@@ -131,84 +257,53 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
                 if (cur.equals("short")) next = "never";
                 else if (cur.equals("never")) next = "always";
                 try {
-                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "cutout.txt").toPath(),
-                            (next + "\n").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    Files.write(new File(getFilesDir(), "cutout.txt").toPath(), (next + "\n").getBytes(StandardCharsets.UTF_8));
                 } catch (Exception ignored) {
                 }
                 HorizonActivity.applyCutout(ProfileActivity.this);
                 ((Button) v).setText(cutoutLabel());
             }
         });
-        card.addView(cutout, Ui.gap(this, 8));
-        Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
-        accountStatus = Ui.text(this, accountLine(), 14, Ui.TEXT, true);
-        card.addView(accountStatus);
+        card.addView(cutout, Ui.gap(this, 4));
+
+        Ui.section(card, Ui.t("Моды", "Mods"));
         card.addView(Ui.text(this, Ui.t(
-                "Нужен только для лицензионных серверов. Войти можно один раз: вход обновляется сам.",
-                "Only needed for licensed servers. Sign in once: it renews by itself."),
-                12, Ui.MUTED, false), Ui.gap(this, 2));
-        codeBox = new LinearLayout(this);
-        codeBox.setOrientation(LinearLayout.VERTICAL);
-        codeBox.setPadding(p, p, p, p);
-        codeBox.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.GREEN_DARK, 10));
-        codeBox.setVisibility(View.GONE);
-        codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
-        codeBox.addView(codeHint);
-        code = Ui.text(this, "", 30, Ui.TEXT, true);
-        code.setGravity(android.view.Gravity.CENTER);
-        code.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
-        code.setLetterSpacing(0.12f);
-        code.setTextIsSelectable(true);
-        codeBox.addView(code, Ui.gap(this, 4));
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        copy = Ui.button(this, Ui.t("Скопировать код", "Copy code"), false);
-        copy.setOnClickListener(this);
-        browser = Ui.button(this, Ui.t("Открыть браузер", "Open browser"), true);
-        browser.setOnClickListener(this);
-        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
-        row.addView(copy, half);
-        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
-        half2.leftMargin = Ui.dp(this, 8);
-        row.addView(browser, half2);
-        codeBox.addView(row, Ui.gap(this, 8));
-        card.addView(codeBox, Ui.gap(this, 8));
-        microsoft = Ui.button(this, Ui.t("Войти через Microsoft", "Sign in with Microsoft"), true);
-        microsoft.setOnClickListener(this);
-        card.addView(microsoft, Ui.gap(this, 8));
-        signOut = Ui.button(this, Ui.t("Выйти из аккаунта", "Sign out"), false);
-        signOut.setOnClickListener(this);
-        signOut.setVisibility(Msa.signedIn(this).isEmpty() ? View.GONE : View.VISIBLE);
-        card.addView(signOut, Ui.gap(this, 8));
-        advanced = Ui.button(this, Ui.t("Дополнительно ▾", "Advanced ▾"), false);
-        advanced.setOnClickListener(this);
-        card.addView(advanced, Ui.gap(this, 8));
-        advancedBox = new LinearLayout(this);
-        advancedBox.setOrientation(LinearLayout.VERTICAL);
-        advancedBox.addView(Ui.text(this, Ui.t(
-                "Azure client ID. Нужен свой, одобренный Mojang для Minecraft (заявка: aka.ms/mce-reviewappid), иначе сервисы Minecraft откажут во входе. Чужие ID не вставляйте.",
-                "Azure client ID. It has to be your own, approved by Mojang for Minecraft (apply at aka.ms/mce-reviewappid), or the Minecraft services refuse the sign-in. Don't paste someone else's ID."),
+                ".hnmod со сборкой для Android или .hmod. Или положите файл в Android/data/dev.horizonlab.horizon/files/mods/.",
+                "A .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),
                 12, Ui.MUTED, false));
-        clientId = new EditText(this);
-        clientId.setSingleLine(true);
-        clientId.setTextColor(Ui.TEXT);
-        clientId.setHintTextColor(Ui.MUTED);
-        clientId.setHint("00000000-0000-0000-0000-000000000000");
-        clientId.setText(Msa.clientId(this));
-        clientId.setPadding(p, p, p, p);
-        clientId.setBackground(Ui.rounded(this, android.graphics.Color.rgb(24, 24, 30), Ui.EDGE, 8));
-        advancedBox.addView(clientId, Ui.gap(this, 6));
-        advancedBox.setVisibility(Msa.clientId(this).isEmpty() ? View.VISIBLE : View.GONE);
-        card.addView(advancedBox, Ui.gap(this, 6));
-        Ui.section(card, "");
-        save = Ui.button(this, Ui.t("Сохранить", "Save"), true);
-        save.setOnClickListener(this);
-        card.addView(save, Ui.gap(this, 12));
-        back = Ui.button(this, Ui.t("Назад", "Back"), false);
-        back.setOnClickListener(this);
-        card.addView(back, Ui.gap(this, 8));
+        mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
+        mods.setOnClickListener(this);
+        card.addView(mods, Ui.gap(this, 8));
+
+        setContentView(root);
+        hideBars();
+        refreshAccount();
         updateModel();
         showPreview();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean focus) {
+        super.onWindowFocusChanged(focus);
+        if (focus) hideBars();
+    }
+
+    private void hideBars() {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.systemBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        }
+    }
+
+    private String version() {
+        try {
+            return "v" + getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private String readName() {
@@ -231,38 +326,75 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     }
 
     private void updateModel() {
-        model.setText(Ui.t("Модель рук: ", "Arms: ") + (slim ? Ui.t("тонкие (Alex)", "slim (Alex)") : Ui.t("классические (Steve)", "classic (Steve)")));
+        model.setText(Ui.t("Руки: ", "Arms: ") + (slim ? Ui.t("тонкие (Alex)", "slim (Alex)") : Ui.t("обычные (Steve)", "classic (Steve)")));
     }
 
     static boolean validName(String n) {
         return n.matches("[A-Za-z0-9_]{3,16}");
     }
 
+    private void refreshAccount() {
+        String n = Msa.signedIn(this);
+        accountStatus.setText(accountLine());
+        signOut.setVisibility(n.isEmpty() ? View.GONE : View.VISIBLE);
+        microsoft.setVisibility(n.isEmpty() ? View.VISIBLE : View.GONE);
+        accountChip.setText(n.isEmpty() ? Ui.t("● Без лицензии (офлайн)", "● Offline (no license)") : Ui.t("● Лицензия: ", "● Licensed: ") + n);
+        accountChip.setTextColor(n.isEmpty() ? Ui.MUTED : Ui.GREEN);
+    }
+
+    /** Saves the name and arm model; false (with a message) for a bad name. */
+    private boolean saveProfile() {
+        String n = name.getText().toString().trim();
+        if (!n.isEmpty() && !validName(n)) {
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Ник: 3–16 символов, только латиница, цифры и _.", "Name: 3–16 characters, letters, digits and _ only."));
+            return false;
+        }
+        try {
+            if (!n.isEmpty() && !n.equals(readName())) {
+                write(new File(dir, "horizon-player.txt"), ("name:" + n + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            saveModel();
+            return true;
+        } catch (Exception e) {
+            message.setText(Ui.t("Не удалось сохранить.", "Could not save."));
+            return false;
+        }
+    }
+
+    private void saveModel() throws Exception {
+        if (readModel() == slim && new File(dir, "horizon-skin.txt").isFile()) return;
+        write(new File(dir, "horizon-skin.txt"), ("model:" + (slim ? "slim" : "classic") + "\n").getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        // Leaving for the game or the file picker keeps what was typed.
+        String n = name.getText().toString().trim();
+        if (n.isEmpty() || validName(n)) saveProfile();
+    }
+
     public void onClick(View v) {
         if (v == pick) {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("image/png");
+            i.setType("image/*");
             startActivityForResult(i, PICK);
         } else if (v == model) {
             slim = !slim;
             updateModel();
             showPreview();
-        } else if (v == save) {
-            String n = name.getText().toString().trim();
-            if (!validName(n)) {
-                message.setText(Ui.t("Ник: 3–16 символов, только латиница, цифры и _.", "Name: 3–16 characters, letters, digits and _ only."));
-                return;
-            }
             try {
-                write(new File(dir, "horizon-player.txt"), ("name:" + n + "\n").getBytes(StandardCharsets.UTF_8));
-                write(new File(dir, "horizon-skin.txt"), ("model:" + (slim ? "slim" : "classic") + "\n").getBytes(StandardCharsets.UTF_8));
-                message.setTextColor(Ui.GREEN);
-                message.setText(Ui.t("Сохранено. Скин сменится сразу, ник — на серверах после перезапуска.",
-                        "Saved. The skin changes right away, the name on servers after a restart."));
-            } catch (Exception e) {
-                message.setText(Ui.t("Не удалось сохранить.", "Could not save."));
+                saveModel();
+            } catch (Exception ignored) {
             }
+        } else if (v == play) {
+            if (!saveProfile()) return;
+            Intent i = new Intent(this, HorizonActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            startActivity(i);
+            finish();
         } else if (v == driver) {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -286,86 +418,89 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         } else if (v == advanced) {
             advancedBox.setVisibility(advancedBox.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
         } else if (v == microsoft) {
-            String id = clientId.getText().toString().trim();
-            if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+            try {
+                startActivityForResult(new Intent(this, MsaLoginActivity.class), MS_LOGIN);
+            } catch (Exception e) {
                 advancedBox.setVisibility(View.VISIBLE);
                 message.setTextColor(Ui.WARN);
-                message.setText(Ui.t("Сначала вставьте свой Azure client ID в «Дополнительно».",
-                        "Paste your own Azure client ID under Advanced first."));
-                return;
+                message.setText(Ui.t("Нет WebView на телефоне: войдите по коду ниже.", "No WebView on this phone: sign in with a code below."));
             }
-            try {
-                Msa.saveClientId(this, id);
-            } catch (Exception e) {
-                message.setText(Ui.t("Не удалось сохранить client ID.", "Could not save the client ID."));
-                return;
-            }
-            message.setTextColor(Ui.WARN);
-            message.setText(Ui.t("Запрашиваем код…", "Requesting a code…"));
-            microsoft.setEnabled(false);
-            Msa.start(this, id, new Msa.Listener() {
-                public void onCode(final String userCode, final String uri) {
-                    runOnUiThread(new Runnable() {
-                        public void run() {
-                            verifyUri = uri;
-                            code.setText(userCode);
-                            codeHint.setText(Ui.t("Откройте ", "Open ") + uri.replace("https://", "")
-                                    + Ui.t(", введите код и войдите. Эта страница сама поймёт, что вы вошли.",
-                                    ", enter the code and sign in. This screen notices by itself."));
-                            copy.setText(Ui.t("Скопировать код", "Copy code"));
-                            codeBox.setVisibility(View.VISIBLE);
-                            microsoft.setText(Ui.t("Ждём вход…", "Waiting for sign-in…"));
-                            message.setText("");
-                        }
-                    });
-                }
-                public void onDone(final String name) {
-                    runOnUiThread(new Runnable() {
-                        public void run() {
-                            accountStatus.setText(accountLine());
-                            codeBox.setVisibility(View.GONE);
-                            signOut.setVisibility(View.VISIBLE);
-                            microsoft.setText(Ui.t("Войти через Microsoft", "Sign in with Microsoft"));
-                            microsoft.setEnabled(true);
-                            message.setTextColor(Ui.GREEN);
-                            message.setText(Ui.t("Вход выполнен: ", "Signed in: ") + name
-                                    + Ui.t(". Перезапустите игру, чтобы зайти на лицензионный сервер.",
-                                    ". Restart the game to join a licensed server."));
-                        }
-                    });
-                }
-                public void onError(final String error) {
-                    runOnUiThread(new Runnable() {
-                        public void run() {
-                            codeBox.setVisibility(View.GONE);
-                            microsoft.setText(Ui.t("Войти через Microsoft", "Sign in with Microsoft"));
-                            microsoft.setEnabled(true);
-                            message.setTextColor(Ui.WARN);
-                            message.setText(error);
-                        }
-                    });
-                }
-            });
+        } else if (v == deviceCode) {
+            startDeviceCode();
         } else if (v == signOut) {
             Msa.cancel();
             Msa.signOut(this);
-            accountStatus.setText(accountLine());
-            signOut.setVisibility(View.GONE);
+            MsaLoginActivity.forgetCookies();
             codeBox.setVisibility(View.GONE);
             microsoft.setEnabled(true);
+            deviceCode.setEnabled(true);
+            refreshAccount();
             message.setTextColor(Ui.GREEN);
-            message.setText(Ui.t("Вышли. Перезапустите игру.", "Signed out. Restart the game."));
+            message.setText(Ui.t("Вышли из аккаунта.", "Signed out."));
         } else if (v == mods) {
             startActivity(new Intent(this, ModImportActivity.class));
-        } else if (v == back) {
-            finish();
         }
+    }
+
+    private final Msa.Listener listener = new Msa.Listener() {
+        public void onCode(String userCode, String uri) {
+            verifyUri = uri;
+            code.setText(userCode);
+            codeHint.setText(Ui.t("Откройте ", "Open ") + uri.replace("https://", "")
+                    + Ui.t(", введите код и войдите. Этот экран сам поймёт, что вы вошли.",
+                    ", enter the code and sign in. This screen notices by itself."));
+            copy.setText(Ui.t("Скопировать код", "Copy code"));
+            codeBox.setVisibility(View.VISIBLE);
+            deviceCode.setText(Ui.t("Ждём вход…", "Waiting for sign-in…"));
+            message.setText("");
+        }
+
+        public void onDone(String n) {
+            codeBox.setVisibility(View.GONE);
+            resetButtons();
+            refreshAccount();
+            message.setTextColor(Ui.GREEN);
+            message.setText(Ui.t("Вход выполнен: ", "Signed in: ") + n);
+        }
+
+        public void onError(String error) {
+            codeBox.setVisibility(View.GONE);
+            resetButtons();
+            message.setTextColor(Ui.WARN);
+            message.setText(error);
+        }
+    };
+
+    private void resetButtons() {
+        microsoft.setText(Ui.t("Войти через Microsoft", "Sign in with Microsoft"));
+        microsoft.setEnabled(true);
+        deviceCode.setText(Ui.t("Войти по коду", "Sign in with a code"));
+        deviceCode.setEnabled(true);
+    }
+
+    private void startDeviceCode() {
+        String id = clientId.getText().toString().trim();
+        if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")) {
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Вставьте свой Azure client ID.", "Paste your own Azure client ID."));
+            return;
+        }
+        try {
+            Msa.saveClientId(this, id);
+        } catch (Exception e) {
+            message.setText(Ui.t("Не удалось сохранить client ID.", "Could not save the client ID."));
+            return;
+        }
+        message.setTextColor(Ui.WARN);
+        message.setText(Ui.t("Запрашиваем код…", "Requesting a code…"));
+        deviceCode.setEnabled(false);
+        microsoft.setEnabled(false);
+        Msa.start(this, id, listener);
     }
 
     private String cutoutMode() {
         try {
-            return new String(java.nio.file.Files.readAllBytes(new java.io.File(getFilesDir(), "cutout.txt").toPath()),
-                    java.nio.charset.StandardCharsets.UTF_8).trim();
+            return new String(Files.readAllBytes(new File(getFilesDir(), "cutout.txt").toPath()), StandardCharsets.UTF_8).trim();
         } catch (Exception e) {
             return "short";
         }
@@ -379,22 +514,39 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     }
 
     private String accountLine() {
-        String name = Msa.signedIn(this);
-        if (name.isEmpty()) return Ui.t("Не подключён", "Not connected");
-        return Ui.t("Аккаунт: ", "Account: ") + name;
+        String n = Msa.signedIn(this);
+        if (n.isEmpty()) return Ui.t("Не подключён", "Not connected");
+        return Ui.t("Аккаунт: ", "Account: ") + n;
     }
 
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == MS_LOGIN) {
+            String c = data == null ? null : data.getStringExtra("code");
+            if (result != RESULT_OK || c == null) {
+                String err = data == null ? null : data.getStringExtra("error");
+                if (err != null && !err.isEmpty()) {
+                    message.setTextColor(Ui.WARN);
+                    message.setText(Ui.t("Вход отменён: ", "Sign-in cancelled: ") + err);
+                }
+                return;
+            }
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Входим в Xbox и Minecraft…", "Signing in to Xbox and Minecraft…"));
+            microsoft.setEnabled(false);
+            microsoft.setText(Ui.t("Входим…", "Signing in…"));
+            Msa.startWithCode(this, c, listener);
+            return;
+        }
         if (result != RESULT_OK || data == null || data.getData() == null) return;
         if (request == PICK_DRIVER) {
             message.setTextColor(Ui.WARN);
             try {
-                String name = Turnip.install(this, data.getData());
+                String n = Turnip.install(this, data.getData());
                 driverStatus.setText(Turnip.status(this));
                 message.setTextColor(Ui.GREEN);
-                message.setText(Ui.t("Драйвер установлен: ", "Driver installed: ") + name
+                message.setText(Ui.t("Драйвер установлен: ", "Driver installed: ") + n
                         + Ui.t(". Полностью закройте игру и откройте снова.", ". Fully close the game and open it again."));
             } catch (Exception e) {
                 message.setText(Ui.t("В архиве нет .so драйвера (нужен zip с libvulkan_freedreno.so).",
@@ -410,24 +562,60 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             int n;
             while ((n = in.read(buf)) > 0) {
                 out.write(buf, 0, n);
-                if (out.size() > 1 << 20) throw new Exception("too big");
+                if (out.size() > 4 << 20) throw new Exception("too big");
             }
-            byte[] png = out.toByteArray();
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeByteArray(png, 0, png.length, o);
-            boolean isPng = png.length > 8 && (png[0] & 0xFF) == 0x89 && png[1] == 'P' && png[2] == 'N' && png[3] == 'G';
-            if (!isPng || o.outWidth != 64 || (o.outHeight != 64 && o.outHeight != 32)) {
-                message.setText(Ui.t("Нужен PNG 64×64 или 64×32.", "A 64×64 or 64×32 PNG is needed."));
+            byte[] png = normalizeSkin(out.toByteArray());
+            if (png == null) {
+                message.setText(Ui.t("Нужен скин: PNG 64×64 или 64×32 (HD 128/256… тоже подойдёт).",
+                        "A skin is needed: a 64×64 or 64×32 PNG (HD 128/256… works too)."));
                 return;
             }
             write(new File(dir, "horizon-skin.png"), png);
+            saveModel();
             message.setTextColor(Ui.GREEN);
-            message.setText(Ui.t("Скин выбран.", "Skin chosen."));
+            message.setText(Ui.t("Скин применён.", "Skin applied."));
             showPreview();
         } catch (Exception e) {
             message.setText(Ui.t("Не удалось прочитать файл.", "Could not read the file."));
         }
+    }
+
+    /**
+     * The picked image as the plain PNG the game reads: 8-bit RGBA, 64x64 or 64x32 (an HD skin
+     * is scaled down pixel for pixel), and a legacy skin's fully opaque hat made see-through
+     * (vanilla's SkinTextureDownloader.doNotchTransparencyHack). Null when it is no skin.
+     */
+    static byte[] normalizeSkin(byte[] bytes) {
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inScaled = false;
+        o.inPremultiplied = false;
+        o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        Bitmap b = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
+        if (b == null) return null;
+        int w = b.getWidth(), h = b.getHeight();
+        if (w < 64 || w > 1024 || w % 64 != 0 || (h != w && h * 2 != w)) return null;
+        if (b.getConfig() != Bitmap.Config.ARGB_8888) b = b.copy(Bitmap.Config.ARGB_8888, true);
+        if (w != 64) b = Bitmap.createScaledBitmap(b, 64, h * 64 / w, false);
+        int[] px = new int[64 * b.getHeight()];
+        b.getPixels(px, 0, 64, 0, 0, 64, b.getHeight());
+        if (b.getHeight() == 32) {
+            boolean opaque = true;
+            for (int y = 0; y < 16 && opaque; y++) {
+                for (int x = 32; x < 64; x++) {
+                    if ((px[y * 64 + x] >>> 24) < 128) {
+                        opaque = false;
+                        break;
+                    }
+                }
+            }
+            if (opaque) for (int y = 0; y < 16; y++) for (int x = 32; x < 64; x++) px[y * 64 + x] = 0;
+        }
+        Bitmap clean = Bitmap.createBitmap(64, b.getHeight(), Bitmap.Config.ARGB_8888);
+        clean.setPremultiplied(false);
+        clean.setPixels(px, 0, 64, 0, 0, 64, b.getHeight());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        if (!clean.compress(Bitmap.CompressFormat.PNG, 100, out)) return null;
+        return out.toByteArray();
     }
 
     private static void write(File f, byte[] bytes) throws Exception {
@@ -435,44 +623,35 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         try (FileOutputStream out = new FileOutputStream(tmp)) {
             out.write(bytes);
         }
-        if (!tmp.renameTo(f)) throw new Exception("rename");
+        if (!tmp.renameTo(f)) {
+            f.delete();
+            if (!tmp.renameTo(f)) throw new Exception("rename");
+        }
     }
 
-    /** The skin's front, flat: head, body, arms and legs (a 16x32 figure). */
     private void showPreview() {
         File f = new File(dir, "horizon-skin.png");
-        Bitmap skin = f.isFile() ? BitmapFactory.decodeFile(f.getPath()) : null;
-        if (skin == null) {
-            preview.setImageDrawable(null);
-            return;
+        Bitmap skin = null;
+        if (f.isFile()) {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inScaled = false;
+            o.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            skin = BitmapFactory.decodeFile(f.getPath(), o);
+            if (skin != null && (skin.getWidth() != 64 || (skin.getHeight() != 64 && skin.getHeight() != 32))) {
+                // An older file the game cannot use either: clean it like a new pick.
+                try {
+                    byte[] png = normalizeSkin(Files.readAllBytes(f.toPath()));
+                    if (png != null) {
+                        write(f, png);
+                        skin = BitmapFactory.decodeByteArray(png, 0, png.length, o);
+                    } else {
+                        skin = null;
+                    }
+                } catch (Exception e) {
+                    skin = null;
+                }
+            }
         }
-        boolean legacy = skin.getHeight() == 32;
-        Bitmap fig = Bitmap.createBitmap(16, 32, Bitmap.Config.ARGB_8888);
-        Canvas c = new Canvas(fig);
-        Paint p = new Paint();
-        p.setFilterBitmap(false);
-        int arm = slim ? 3 : 4;
-        part(c, skin, p, 8, 8, 8, 8, 4, 0);
-        part(c, skin, p, 20, 20, 8, 12, 4, 8);
-        part(c, skin, p, 44, 20, arm, 12, 4 - arm, 8);
-        if (legacy) mirrored(c, skin, p, 44, 20, arm, 12, 12, 8);
-        else part(c, skin, p, 36, 52, arm, 12, 12, 8);
-        part(c, skin, p, 4, 20, 4, 12, 4, 20);
-        if (legacy) mirrored(c, skin, p, 4, 20, 4, 12, 8, 20);
-        else part(c, skin, p, 20, 52, 4, 12, 8, 20);
-        part(c, skin, p, 40, 8, 8, 8, 4, 0);
-        Bitmap big = Bitmap.createScaledBitmap(fig, 16 * 5, 32 * 5, false);
-        preview.setImageBitmap(big);
-    }
-
-    private static void part(Canvas c, Bitmap s, Paint p, int x, int y, int w, int h, int dx, int dy) {
-        c.drawBitmap(s, new Rect(x, y, x + w, y + h), new Rect(dx, dy, dx + w, dy + h), p);
-    }
-
-    private static void mirrored(Canvas c, Bitmap s, Paint p, int x, int y, int w, int h, int dx, int dy) {
-        c.save();
-        c.scale(-1, 1, dx + w / 2f, 0);
-        part(c, s, p, x, y, w, h, dx, dy);
-        c.restore();
+        preview.set(skin, slim);
     }
 }

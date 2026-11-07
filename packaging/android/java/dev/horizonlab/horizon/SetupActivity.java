@@ -292,8 +292,9 @@ public class SetupActivity extends Activity
         }
     }
 
+    /** The game files are ready: the launcher (nick, skin, account, settings, Play). */
     private void launch() {
-        startActivity(new Intent(this, HorizonActivity.class));
+        startActivity(new Intent(this, ProfileActivity.class));
         finish();
     }
 
