@@ -189,7 +189,12 @@ pub(super) fn content_root(
             }
         }
     }
-    match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
+    // HORIZON_CACHE: on Android the overlay is built in internal storage, as the resource packs'
+    // (`packs::cache_dir`): the game folder is shared storage, which refuses the overlay's symlinks.
+    let cache = std::env::var_os("HORIZON_CACHE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| here.join(".horizon-cache"));
+    match mod_content::resource_root(root, &mods, &cache) {
         Ok(out) => {
             if announce {
                 horizon_protocol::mod_list::set_local(announced);
