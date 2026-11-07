@@ -81,13 +81,11 @@ public class HorizonActivity extends NativeActivity {
         final android.content.Context app = getApplicationContext();
         new Thread(new Runnable() {
             public void run() {
-                if (Msa.refresh(app) == null) {
-                    try {
-                        nativeAccountRefreshed();
-                    } catch (Throwable ignored) {
-                    }
+                try {
+                    Msa.refresh(app);
+                } finally {
+                    renewing = false;
                 }
-                renewing = false;
             }
         }, "horizon-msa-refresh").start();
     }

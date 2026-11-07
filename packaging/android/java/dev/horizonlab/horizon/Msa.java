@@ -26,7 +26,25 @@ final class Msa {
         void onError(String message);
     }
 
-    private static volatile boolean cancel;
+    // All session changes, publication and callback delivery share this monitor.
+    // Network requests run outside it so sign-out never waits for the network.
+    private static volatile long generation;
+    private static boolean signingIn;
+    private static final android.os.Handler MAIN = new android.os.Handler(android.os.Looper.getMainLooper());
+
+    private static void deliver(final long expected, final Runnable callback) {
+        MAIN.post(new Runnable() {
+            public void run() {
+                synchronized (Msa.class) {
+                    if (generation == expected) callback.run();
+                }
+            }
+        });
+    }
+
+    private static void checkCurrent(long expected) throws Exception {
+        if (generation != expected) throw new Exception(Ui.t("Вход отменён.", "Sign-in cancelled."));
+    }
 
     private Msa() {}
 
@@ -77,11 +95,18 @@ final class Msa {
      * signed in. Blocking; call it off the UI thread. Returns the error, or null when renewed.
      * A refused refresh token signs the account out (the player has to sign in again).
      */
-    static synchronized String refresh(Context c) {
+    static String refresh(Context c) {
+        final long expected;
+        final String refresh;
+        final String id;
         try {
-            JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
-            String refresh = o.optString("refresh_token", "");
-            String id = clientId(c);
+            synchronized (Msa.class) {
+                if (signingIn) return Ui.t("Дождитесь завершения входа.", "Wait for sign-in to finish.");
+                expected = generation;
+                JSONObject o = new JSONObject(new String(java.nio.file.Files.readAllBytes(accountFile(c).toPath()), StandardCharsets.UTF_8));
+                refresh = o.optString("refresh_token", "");
+                id = clientId(c);
+            }
             if (refresh.isEmpty() || id.isEmpty()) return Ui.t("Нет данных для обновления входа.", "Nothing to renew the sign-in with.");
             JSONObject token = postForm("https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
                     "grant_type=refresh_token&client_id=" + enc(id) + "&refresh_token=" + enc(refresh)
@@ -90,14 +115,26 @@ final class Msa {
             if (access.isEmpty()) {
                 String err = token.optString("error", "");
                 if ("invalid_grant".equals(err)) {
-                    signOut(c);
+                    synchronized (Msa.class) {
+                        checkCurrent(expected);
+                        signOut(c);
+                    }
                     return Ui.t("Вход устарел, войдите в Microsoft ещё раз.", "The sign-in has expired; sign in with Microsoft again.");
                 }
                 return oauth(token);
             }
             String next = token.optString("refresh_token", "");
             JSONObject account = finish(access, next.isEmpty() ? refresh : next);
-            write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
+            synchronized (Msa.class) {
+                checkCurrent(expected);
+                write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
+                // Publish while still holding the session lock: sign-out cannot slip
+                // between the generation check and the native account reload.
+                try {
+                    HorizonActivity.nativeAccountRefreshed();
+                } catch (Throwable ignored) {
+                }
+            }
             return null;
         } catch (java.io.IOException e) {
             return Ui.t("Нет сети, вход обновится позже.", "No network; the sign-in renews later.");
@@ -106,45 +143,79 @@ final class Msa {
         }
     }
 
-    static void signOut(Context c) {
+    static synchronized void signOut(Context c) {
+        ++generation;
+        signingIn = false;
         accountFile(c).delete();
+        new File(c.getFilesDir(), "sessions/session-android.json").delete();
+        // Also remove an interrupted atomic write containing a token.
+        new File(accountFile(c).getPath() + ".tmp").delete();
     }
 
-    static void cancel() {
-        cancel = true;
+    static synchronized void cancel() {
+        ++generation;
+        signingIn = false;
     }
 
     static void start(final Context c, final String clientId, final Listener listener) {
-        cancel = false;
+        final long expected;
+        synchronized (Msa.class) {
+            expected = ++generation;
+            signingIn = true;
+        }
         new Thread(new Runnable() {
             public void run() {
                 try {
-                    listener.onDone(signIn(c, clientId, listener));
-                } catch (Exception e) {
-                    if (!cancel) listener.onError(e.getMessage() == null ? "Sign-in failed." : e.getMessage());
+                    final String name = signIn(c, clientId, listener, expected);
+                    deliver(expected, new Runnable() {
+                        public void run() { listener.onDone(name); }
+                    });
+                } catch (final Exception e) {
+                    deliver(expected, new Runnable() {
+                        public void run() {
+                            listener.onError(e.getMessage() == null ? "Sign-in failed." : e.getMessage());
+                        }
+                    });
+                } finally {
+                    synchronized (Msa.class) {
+                        if (generation == expected) signingIn = false;
+                    }
                 }
             }
         }, "horizon-msa").start();
     }
 
-    private static String signIn(Context c, String clientId, Listener listener) throws Exception {
+    private static String signIn(Context c, String clientId, final Listener listener, final long expected) throws Exception {
+        checkCurrent(expected);
         String base = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
         JSONObject code = postForm(base + "/devicecode",
                 "client_id=" + enc(clientId) + "&scope=" + enc("XboxLive.signin offline_access"));
-        String userCode = code.optString("user_code", "");
+        final String userCode = code.optString("user_code", "");
         String device = code.optString("device_code", "");
         if (userCode.isEmpty() || device.isEmpty()) throw new Exception(oauth(code));
-        String uri = code.optString("verification_uri", "https://www.microsoft.com/link");
-        listener.onCode(userCode, uri);
+        final String uri = code.optString("verification_uri", "https://www.microsoft.com/link");
+        checkCurrent(expected);
+        deliver(expected, new Runnable() {
+            public void run() { listener.onCode(userCode, uri); }
+        });
         int interval = Math.max(1, code.optInt("interval", 5));
         long deadline = System.currentTimeMillis() + code.optLong("expires_in", 900) * 1000L;
         JSONObject token = null;
         while (System.currentTimeMillis() < deadline) {
             sleep(interval);
-            if (cancel) throw new Exception(Ui.t("Вход отменён.", "Sign-in cancelled."));
-            JSONObject poll = postForm(base + "/token",
-                    "grant_type=" + enc("urn:ietf:params:oauth:grant-type:device_code")
-                            + "&client_id=" + enc(clientId) + "&device_code=" + enc(device));
+            checkCurrent(expected);
+            JSONObject poll;
+            try {
+                poll = postForm(base + "/token",
+                        "grant_type=" + enc("urn:ietf:params:oauth:grant-type:device_code")
+                                + "&client_id=" + enc(clientId) + "&device_code=" + enc(device));
+            } catch (java.io.IOException | org.json.JSONException e) {
+                // A browser switch can briefly drop the connection. Keep the valid
+                // device code, but never continue an obsolete attempt.
+                checkCurrent(expected);
+                continue;
+            }
+            checkCurrent(expected);
             String err = poll.optString("error", "");
             if ("authorization_pending".equals(err)) continue;
             if ("slow_down".equals(err)) {
@@ -159,8 +230,11 @@ final class Msa {
         }
         if (token == null) throw new Exception(Ui.t("Код истёк. Начните снова.", "The code expired. Start again."));
         JSONObject account = finish(token.optString("access_token"), token.optString("refresh_token"));
-        write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
-        return account.optString("name");
+        synchronized (Msa.class) {
+            checkCurrent(expected);
+            write(accountFile(c), account.toString().getBytes(StandardCharsets.UTF_8));
+            return account.optString("name");
+        }
     }
 
     private static JSONObject finish(String msAccess, String refresh) throws Exception {
