@@ -1,0 +1,103 @@
+[package]
+name = "horizon-android"
+version = "0.3.8"
+edition.workspace = true
+license.workspace = true
+rust-version = "1.90"
+description = "Horizon on Android: the game (horizon-client's bin) as a NativeActivity cdylib (ANDROID.md)"
+publish = false
+
+[lib]
+# The crate root sits beside horizon-client's main.rs so `mod game;` is the same game.
+name = "horizon"
+path = "../horizon-client/src/android_main.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+horizon-client = { path = "../horizon-client", default-features = false }
+horizon-prepare = { path = "../horizon-prepare" }
+horizon-assets = { path = "../horizon-assets" }
+horizon-client-core = { path = "../horizon-client-core" }
+horizon-client-input = { path = "../horizon-client-input" }
+horizon-client-render = { path = "../horizon-client-render" }
+horizon-command = { path = "../horizon-command" }
+horizon-items = { path = "../horizon-items" }
+horizon-core = { path = "../horizon-core" }
+# The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
+horizon-threads = { path = "../horizon-threads" }
+horizon-hdr = { path = "../horizon-hdr" }
+horizon-world = { path = "../horizon-world" }
+horizon-protocol = { path = "../horizon-protocol" }
+# server.properties, eula.txt and the user lists, shared with horizon-server.
+horizon-server-files = { path = "../horizon-server-files" }
+# The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
+horizon-anticheat = { path = "../horizon-anticheat" }
+# Shader packs: reading them and turning their GLSL into naga modules.
+horizon-shaders = { path = "../horizon-shaders" }
+# Horizon's own shader packs: the format, the stages and the check (docs/shaders.md).
+horizon-shader-api = { path = "../horizon-shader-api" }
+horizon-friends = { path = "../horizon-friends" }
+# Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
+# Their runtime is the `mods` feature.
+horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
+# Prebuilt native mods (`.hnmod` libraries, docs/android-mods.md): where the game opens them.
+horizon-native-abi = { path = "../horizon-native-abi", features = ["host"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
+winit = "0.30.13"
+pollster = "0.4"
+bytemuck = { version = "1.24", features = ["derive"] }
+glam = "0.30"
+png = "0.18"
+sha2 = "0.10.9"
+# Server resource packs are checked and cached by their SHA-1, as vanilla does.
+sha1 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+# hlsl-out: the gfx.rs tests translate every shader as wgpu's DirectX 12 backend does. A normal feature,
+# not a dev-dependency's, so builds, tests and examples share one build of naga, wgpu and this crate.
+naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out"] }
+miniz_oxide = "0.8"
+ab_glyph = "0.2.32"
+log = "0.4"
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+horizon-theme = { path = "../horizon-theme" }
+# Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md); `live` is
+# the anonymous "I'm playing" ping the game sends itself (`heartbeat.rs`).
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
+horizon-bench = { path = "../horizon-bench" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# HTTPS to the Minecraft services (online-mode session join).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+unicode-bidi = "0.3.18"
+# `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
+fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+# Sound: AAudio through cpal (the `audio` feature of horizon-client-render).
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+# The soft keyboard bridge and the activity calls (HorizonActivity.java, game/android_ime.rs).
+jni = "0.21"
+libc = "0.2"
+
+[features]
+default = ["audio"]
+audio = ["horizon-client/audio"]
+# Never on (gilrs has no Android backend); declared so the shared game code's cfg checks know it.
+controllers = []
+rng-trace = []
+windows-mimalloc = []
+windows-segment-heap = []
+
+[package.metadata.android]
+package = "dev.horizonlab.horizon"
+apk_name = "horizon"
+
+[lints]
+workspace = true

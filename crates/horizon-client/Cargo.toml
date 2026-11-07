@@ -43,6 +43,8 @@ horizon-narrator = { path = "../horizon-narrator" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
 # Their runtime is the `mods` feature.
 horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
+# Prebuilt native mods (`.hnmod` libraries, docs/android-mods.md): where the game opens them.
+horizon-native-abi = { path = "../horizon-native-abi", features = ["host"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -105,6 +107,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
 # DirectX 12 driver (`graphicsApi`, graphics.rs).
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android: the NativeActivity glue (no Java), see ANDROID.md.
+winit = { version = "0.30.13", features = ["android-native-activity"] }
 
 [features]
 default = ["audio", "controllers"]

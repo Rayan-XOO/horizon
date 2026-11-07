@@ -37,6 +37,12 @@ bundles (Copyright (c) 2018-2025 Microsoft Corporation, Daan Leijen), both under
 (`LICENSE.txt` and `c_src/mimalloc/v3/LICENSE` in that folder). It holds only the v3 sources. One
 change: `mi_popcount` in `include/mimalloc/bits.h` uses mimalloc's portable bit count on MSVC
 x86/x64 instead of the POPCNT instruction, which CPUs before Nehalem lack (#7264).
+## winit
+
+`third_party/winit` is [winit](https://github.com/rust-windowing/winit) 0.30.13 by the winit
+contributors, with one addition on Android: an input filter that sees each input event first
+(`platform::android::set_input_filter`), for game controllers and the mouse. It is licensed under
+Apache-2.0 (`LICENSE` in that folder).
 
 ## Pixelify Sans
 

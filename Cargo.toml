@@ -9,6 +9,7 @@ members = [
     "crates/horizon-world",
     "crates/horizon-client",
     "crates/horizon-client-lib",
+    "crates/horizon-android",
     "crates/horizon-client-core",
     "crates/horizon-client-input",
     "crates/horizon-client-render",
@@ -33,6 +34,7 @@ members = [
     "crates/horizon-mods",
     "crates/horizon-mod-api-gen",
     "crates/horizon-mod-api-gen/dispatch-tests",
+    "crates/horizon-native-abi",
     "crates/cargo-horizon-mod",
     "crates/horizon-port-pack",
     "crates/horizon-shaders",
@@ -75,6 +77,8 @@ naga = { path = "third_party/naga" }
 # game died before main on CPUs without it (Core 2, #7264; THIRD_PARTY_NOTICES.md). Drop this and
 # the folder once a libmimalloc-sys release has microsoft/mimalloc#1291's fix.
 libmimalloc-sys = { path = "third_party/libmimalloc-sys" }
+# winit with an input filter on Android (gamepad and mouse events; third_party/winit).
+winit = { path = "third_party/winit" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.
