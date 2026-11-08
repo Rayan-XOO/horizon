@@ -45,6 +45,10 @@ fn android_main(app: AndroidApp) {
     }
     let _ = std::fs::create_dir_all(home.join("..").join("cache"));
     let _ = std::env::set_current_dir(&home);
+    // The folders players drop things into, ready in the Files app's Horizon root.
+    for dir in ["saves", "resourcepacks", "mods", "shaderpacks"] {
+        let _ = std::fs::create_dir_all(home.join(dir));
+    }
     logging::init(&home, "Render thread");
     log::info!("Horizon {} (Android) home {}", crash::version(), home.display());
     crash::install(home.clone(), "client");

@@ -57,6 +57,8 @@ struct Shared {
     tap: bool,
     keyboard_used: bool,
     mouse_used: bool,
+    /// Escape (or Back) presses from a hardware keyboard.
+    escapes: u32,
 }
 
 static SHARED: Mutex<Shared> = Mutex::new(Shared {
@@ -74,6 +76,7 @@ static SHARED: Mutex<Shared> = Mutex::new(Shared {
     tap: false,
     keyboard_used: false,
     mouse_used: false,
+    escapes: 0,
 });
 
 fn shared() -> std::sync::MutexGuard<'static, Shared> {
@@ -231,6 +234,19 @@ fn filter(event: &InputEvent<'_>) -> bool {
                 }
                 return true;
             }
+            // A hardware keyboard's Esc: close the
+            // screen or pause, as the touch back does.
+            if has(source, SOURCE_KEYBOARD)
+                && !has(source, SOURCE_MOUSE)
+                && code == Keycode::Escape
+            {
+                let mut s = shared();
+                s.keyboard_used = true;
+                if down && key.repeat_count() == 0 {
+                    s.escapes = 1;
+                }
+                return true;
+            }
             if has(source, SOURCE_KEYBOARD)
                 && !matches!(code, Keycode::Back | Keycode::Home | Keycode::VolumeUp | Keycode::VolumeDown | Keycode::VolumeMute | Keycode::Power)
             {
@@ -341,6 +357,10 @@ impl super::Game<'_> {
             dpi::PhysicalPosition,
             event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
         };
+        let escapes = std::mem::take(&mut shared().escapes);
+        for _ in 0..escapes {
+            self.touch_back();
+        }
         let (keyboard, mouse) = take_used();
         if keyboard || mouse {
             self.touch.hardware = true;

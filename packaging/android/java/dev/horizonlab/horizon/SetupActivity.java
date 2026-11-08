@@ -79,6 +79,21 @@ public class SetupActivity extends Activity
         button = Ui.button(this, Ui.t("Скачать файлы игры", "Download game files"), true);
         button.setOnClickListener(this);
         card.addView(button, Ui.gap(this, 18));
+        Button pick = Ui.button(this, Ui.t("Выбрать horizon-derived.zip", "Pick horizon-derived.zip"), false);
+        pick.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                i.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+                try {
+                    startActivityForResult(i, PICK_ZIP);
+                } catch (android.content.ActivityNotFoundException e) {
+                    showNote(Ui.t("Нет приложения для выбора файлов.", "No file picker app found."));
+                }
+            }
+        });
+        card.addView(pick, Ui.gap(this, 8));
         bar = new Ui.Bar(this);
         bar.setVisibility(View.GONE);
         card.addView(bar, Ui.gap(this, 18));
@@ -119,6 +134,48 @@ public class SetupActivity extends Activity
         if (nativeStatus().contains("\trun\t")) {
             running();
         }
+    }
+
+    private static final int PICK_ZIP = 7;
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PICK_ZIP || result != RESULT_OK || data == null || data.getData() == null) return;
+        final android.net.Uri uri = data.getData();
+        showNote(Ui.t("Копирую архив…", "Copying the archive…"));
+        button.setEnabled(false);
+        new Thread(new Runnable() {
+            public void run() {
+                File tmp = new File(home, "horizon-derived.zip.part");
+                String msg;
+                try (java.io.InputStream in = getContentResolver().openInputStream(uri);
+                     java.io.OutputStream out = new java.io.FileOutputStream(tmp)) {
+                    if (in == null) throw new java.io.IOException(Ui.t("файл не открылся", "the file did not open"));
+                    byte[] buf = new byte[1 << 16];
+                    int n = in.read(buf, 0, 4);
+                    if (n < 4 || buf[0] != 'P' || buf[1] != 'K' || buf[2] != 3 || buf[3] != 4)
+                        throw new java.io.IOException(Ui.t("это не zip-архив", "this is not a zip archive"));
+                    out.write(buf, 0, n);
+                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                    out.flush();
+                    File dst = new File(home, "horizon-derived.zip");
+                    if (dst.exists() && !dst.delete()) throw new java.io.IOException("delete failed");
+                    if (!tmp.renameTo(dst)) throw new java.io.IOException("rename failed");
+                    msg = Ui.t("Архив на месте. Нажмите «Скачать файлы игры».", "The archive is in place. Tap Download game files.");
+                } catch (Exception e) {
+                    tmp.delete();
+                    msg = Ui.t("Не удалось скопировать архив: ", "Could not copy the archive: ") + String.valueOf(e.getMessage() != null ? e.getMessage() : e);
+                }
+                final String m = msg;
+                handler.post(new Runnable() {
+                    public void run() {
+                        showNote(m);
+                        button.setEnabled(true);
+                    }
+                });
+            }
+        }).start();
     }
 
     private void showNote(String s) {

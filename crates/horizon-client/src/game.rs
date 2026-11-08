@@ -8590,6 +8590,14 @@ impl Game<'_> {
         // repeat) flips them when toggling; only releases reach them
         // behind a screen (KeyboardHandler.keyPress).
         let toggle = match key {
+            // A hardware keyboard on Android holds to sneak, as on the
+            // desktop with hold mode: the toggle option is for touch.
+            KeyCode::ShiftLeft if cfg!(target_os = "android") && source == Source::Keyboard => {
+                if repeat {
+                    return Ok(());
+                }
+                Some((0, false))
+            }
             KeyCode::ShiftLeft => Some((0, self.settings.toggle_crouch)),
             KeyCode::ControlLeft => Some((1, self.settings.toggle_sprint)),
             _ => None,

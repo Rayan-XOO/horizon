@@ -516,7 +516,7 @@ impl Gui {
     }
     /// The close (back) button over menus and containers, top right.
     fn close(&self) -> ([f32; 2], f32) {
-        ([self.w - 12.0, 12.0], 9.0)
+        ([self.w - 34.0, 24.0], 10.0)
     }
     /// The profile button (name, skin) on the title and pause screens, top left.
     fn profile(&self) -> ([f32; 2], f32) {
@@ -528,7 +528,8 @@ impl Gui {
     }
     fn close_hit(&self, p: [f32; 2]) -> bool {
         let (c, r) = self.close();
-        (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 5.0
+        // A finger-sized target around the drawn tile.
+        (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 10.0
     }
     /// The control under `p`; hidden ones only in the editor.
     fn hit(&self, layout: &TouchLayout, p: [f32; 2], editing: bool) -> Option<Id> {
@@ -889,10 +890,18 @@ impl Game<'_> {
         let atlas = &self.gui.atlas;
         if self.touch_close_shown() {
             let (c, r) = gui.close();
-            disc(batch, atlas, c, r, rgba(0, 0, 0, 150));
-            outline(batch, atlas, c, r, 1.0, rgba(255, 255, 255, 160));
-            line(batch, atlas, [c[0] - 3.5, c[1] - 3.5], [c[0] + 3.5, c[1] + 3.5], 1.5, 0xFFFF_FFFF);
-            line(batch, atlas, [c[0] - 3.5, c[1] + 3.5], [c[0] + 3.5, c[1] - 3.5], 1.5, 0xFFFF_FFFF);
+            // A Bedrock-style tile: dark rim, gray face, a pixel cross.
+            let (x, y, s) = ((c[0] - r).round(), (c[1] - r).round(), (r * 2.0).round());
+            batch.fill(atlas, x - 1.0, y - 1.0, s + 2.0, s + 2.0, rgba(20, 20, 20, 230));
+            batch.fill(atlas, x, y, s, s, rgba(110, 110, 110, 230));
+            batch.fill(atlas, x, y, s, 1.0, rgba(170, 170, 170, 230));
+            batch.fill(atlas, x, y + s - 1.0, s, 1.0, rgba(60, 60, 60, 230));
+            let (cx, cy) = (c[0].round(), c[1].round());
+            for i in -3..=3 {
+                let d = i as f32;
+                batch.fill(atlas, cx + d - 1.0, cy + d - 1.0, 2.0, 2.0, rgba(32, 32, 32, 255));
+                batch.fill(atlas, cx + d - 1.0, cy - d - 1.0, 2.0, 2.0, rgba(32, 32, 32, 255));
+            }
         }
         if self.touch_profile_shown() {
             let (c, r) = gui.profile();
@@ -1272,7 +1281,13 @@ impl Game<'_> {
             Id::Jump => pad(self, Button::South),
             Id::Sneak => {
                 self.touch.sneaking = !self.touch.sneaking;
-                self.pad.injected.set(Button::RightStick, self.touch.sneaking);
+                if self.settings.controller.toggle_sneak || self.settings.toggle_crouch {
+                    // Toggle mode flips on each press: one tap per change.
+                    self.pad.injected.set(Button::RightStick, true);
+                    self.pad.taps.push(Button::RightStick);
+                } else {
+                    self.pad.injected.set(Button::RightStick, self.touch.sneaking);
+                }
                 Finger::Done
             }
             Id::Sprint => {

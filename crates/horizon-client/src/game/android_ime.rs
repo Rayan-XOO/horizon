@@ -159,3 +159,20 @@ pub(super) fn pointer_capture(on: bool) {
         log::warn!("Horizon: pointer capture: {e}");
     }
 }
+
+/// The soft keyboard's height in window pixels (`nativeImeInset`).
+static IME_INSET: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_dev_horizonlab_horizon_HorizonActivity_nativeImeInset(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    px: jni::sys::jint,
+) {
+    IME_INSET.store(px.max(0), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The soft keyboard's height in window pixels, 0 when hidden.
+pub(super) fn ime_inset() -> f32 {
+    IME_INSET.load(std::sync::atomic::Ordering::Relaxed) as f32
+}

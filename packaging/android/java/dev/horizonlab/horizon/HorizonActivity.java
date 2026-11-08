@@ -30,6 +30,8 @@ public class HorizonActivity extends NativeActivity {
     static native void nativeKey(int key);
     /** The saved Microsoft account was renewed (Msa.refresh). */
     static native void nativeAccountRefreshed();
+    /** The soft keyboard's height in window pixels, 0 when hidden. */
+    static native void nativeImeInset(int px);
 
     private TextSink sink;
     private volatile boolean quitting;
@@ -42,6 +44,28 @@ public class HorizonActivity extends NativeActivity {
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
         renewAccount();
         hideSystemBars();
+        watchKeyboard();
+    }
+
+    /** Tells the game how tall the soft keyboard is, so the chat can sit above it. */
+    @SuppressWarnings("deprecation")
+    private void watchKeyboard() {
+        getWindow().getDecorView().setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            public android.view.WindowInsets onApplyWindowInsets(View v, android.view.WindowInsets in) {
+                int ime;
+                if (android.os.Build.VERSION.SDK_INT >= 30) {
+                    ime = in.getInsets(android.view.WindowInsets.Type.ime()).bottom;
+                } else {
+                    ime = Math.max(0, in.getSystemWindowInsetBottom() - in.getStableInsetBottom());
+                }
+                try {
+                    nativeImeInset(ime);
+                } catch (UnsatisfiedLinkError e) {
+                    // An older library: the chat stays where it is.
+                }
+                return v.onApplyWindowInsets(in);
+            }
+        });
     }
 
     @Override

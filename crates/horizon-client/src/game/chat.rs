@@ -1393,7 +1393,22 @@ impl Game<'_> {
         // The fractional tick makes the smooth chat extra's slide move every
         // frame; vanilla's fade reads it too.
         let now = self.visual_ticks() as f32 + self.clock.fraction() as f32;
+        let lift = if focused { Self::chat_lift(batch) } else { 0.0 };
+        batch.height -= lift;
         self.ui.chat.draw(batch, &self.gui.atlas, now, focused);
+        batch.height += lift;
+    }
+    /// GUI pixels the chat moves up so the soft keyboard leaves it in view.
+    pub(super) fn chat_lift(batch: &HudBatch) -> f32 {
+        #[cfg(target_os = "android")]
+        {
+            let px = super::android_ime::ime_inset();
+            if px > 0.0 && batch.scale > 0.0 {
+                return (px / batch.scale).min(batch.height * 0.6).floor();
+            }
+        }
+        let _ = batch;
+        0.0
     }
     /// `HoverEvent.EntityTooltipInfo.getTooltipLines`: the name when the
     /// event has one, the entity type and the UUID.
@@ -1431,6 +1446,12 @@ impl Game<'_> {
         Some(horizon_protocol::crypto::uuid_string(bits))
     }
     pub(super) fn draw_chat_screen(&mut self, batch: &mut HudBatch) {
+        let lift = Self::chat_lift(batch);
+        batch.height -= lift;
+        self.draw_chat_screen_at(batch);
+        batch.height += lift;
+    }
+    fn draw_chat_screen_at(&mut self, batch: &mut HudBatch) {
         let Some(mut screen) = self.ui.chat_screen.take() else {
             return;
         };
