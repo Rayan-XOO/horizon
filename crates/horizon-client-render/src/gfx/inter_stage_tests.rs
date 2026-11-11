@@ -226,3 +226,130 @@ fn a_front_facing_input_counts_against_the_limit() {
         ]
     );
 }
+
+/// The uniform and storage buffers an entry point uses whose type is not a multiple of 16
+/// bytes: `(compute, "entry: group:binding name (size)")` for each. wgpu refuses such a render
+/// pipeline on a device without `DownlevelFlags::BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`, which
+/// ANGLE is: Samsung's OpenGL ES (Xclipse 550, Galaxy A57) panicked at start-up on `Horizon HDR
+/// emission thresholds`. wgpu-core checks render pipelines only (`create_render_pipeline`), so
+/// compute entry points are listed apart. A runtime-sized array counts one element, as wgpu
+/// counts it.
+fn unaligned_buffers(source: &str) -> Vec<(bool, String)> {
+    let module = naga::front::wgsl::parse_str(source).unwrap();
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    let mut out = Vec::new();
+    for (i, entry) in module.entry_points.iter().enumerate() {
+        let compute = !matches!(
+            entry.stage,
+            naga::ShaderStage::Vertex | naga::ShaderStage::Fragment
+        );
+        let used = info.get_entry_point(i);
+        for (handle, var) in module.global_variables.iter() {
+            let (Some(binding), false) = (&var.binding, used[handle].is_empty()) else {
+                continue;
+            };
+            if !matches!(
+                var.space,
+                naga::AddressSpace::Uniform | naga::AddressSpace::Storage { .. }
+            ) {
+                continue;
+            }
+            let size = module.types[var.ty].inner.size(module.to_ctx());
+            if size % 16 != 0 {
+                out.push((
+                    compute,
+                    format!(
+                        "{}: {}:{} {} ({size} bytes)",
+                        entry.name,
+                        binding.group,
+                        binding.binding,
+                        var.name.as_deref().unwrap_or("?")
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn no_render_pipeline_binds_a_buffer_off_16_bytes() {
+    let composed = composed();
+    let mut sources: Vec<(String, String)> = composed
+        .iter()
+        .map(|(name, _, source)| ((*name).to_owned(), source.clone()))
+        .collect();
+    let mut files = Vec::new();
+    wgsl_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    files.sort();
+    let mut skipped = Vec::new();
+    for file in &files {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let source = std::fs::read_to_string(file).unwrap();
+        if naga::front::wgsl::parse_str(&source).is_ok() {
+            sources.push((name, source));
+        } else if !composed.iter().any(|(_, parts, _)| parts.contains(&&*name)) {
+            skipped.push(name);
+        }
+    }
+    // Every file is checked, alone or in the shader it is part of: none slips past.
+    assert!(skipped.is_empty(), "not checked: {skipped:?}");
+    assert!(
+        sources.len() >= files.len().min(30),
+        "only {} shaders checked of {} files",
+        sources.len(),
+        files.len()
+    );
+    for must in ["terrain.wgsl", "hdr_stats.wgsl", "visibility buffer", "GPU culling occlusion test"] {
+        assert!(sources.iter().any(|(n, _)| n == must), "{must} is not checked");
+    }
+    let (mut render, mut compute) = (Vec::new(), Vec::new());
+    for (shader, source) in &sources {
+        for (is_compute, e) in unaligned_buffers(source) {
+            let line = format!("{shader}::{e}");
+            if is_compute {
+                compute.push(line);
+            } else {
+                render.push(line);
+            }
+        }
+    }
+    render.dedup();
+    compute.dedup();
+    if !compute.is_empty() {
+        println!(
+            "compute entry points (wgpu does not check these):\n{}",
+            compute.join("\n")
+        );
+    }
+    assert!(
+        render.is_empty(),
+        "not a multiple of 16 bytes:\n{}",
+        render.join("\n")
+    );
+}
+
+#[test]
+fn a_two_float_uniform_is_off_16_bytes() {
+    let source = "struct P { a: f32, b: f32 }
+        @group(0) @binding(0) var<uniform> p: P;
+        @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(p.a, p.b, 0.0, 1.0); }";
+    assert_eq!(
+        unaligned_buffers(source),
+        vec![(false, "fs: 0:0 p (8 bytes)".to_owned())]
+    );
+    let padded = "struct W { @align(16) w: array<u32> }
+        @group(0) @binding(0) var<storage, read> l: W;
+        @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+            return vec4<f32>(f32(l.w[i]));
+        }";
+    assert!(unaligned_buffers(padded).is_empty());
+}

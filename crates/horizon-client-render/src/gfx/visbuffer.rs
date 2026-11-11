@@ -206,7 +206,7 @@ impl Visbuffer {
             let pages = pages.next_power_of_two();
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Visibility buffer block tables"),
-                size: u64::from(pages) * self.blocks_per_page * 4,
+                size: (u64::from(pages) * self.blocks_per_page * 4).next_multiple_of(16),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });

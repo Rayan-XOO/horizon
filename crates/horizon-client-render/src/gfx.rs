@@ -1940,6 +1940,22 @@ fn backends_name(backends: wgpu::Backends) -> &'static str {
 fn is_software(kind: wgpu::DeviceType) -> bool {
     kind == wgpu::DeviceType::Cpu
 }
+/// The adapter of `offered` that is a GPU and presents to `surface` (any, offscreen): a
+/// discrete one first, then an integrated one, then any other kind but the CPU.
+fn hardware_adapter(
+    offered: Vec<wgpu::Adapter>,
+    surface: Option<&wgpu::Surface<'_>>,
+) -> Option<wgpu::Adapter> {
+    offered
+        .into_iter()
+        .filter(|a| !is_software(a.get_info().device_type))
+        .filter(|a| surface.is_none_or(|s| a.is_surface_supported(s)))
+        .min_by_key(|a| match a.get_info().device_type {
+            wgpu::DeviceType::DiscreteGpu => 0,
+            wgpu::DeviceType::IntegratedGpu => 1,
+            _ => 2,
+        })
+}
 /// A device and what it came from.
 struct Opened {
     instance: wgpu::Instance,
@@ -2077,6 +2093,16 @@ async fn open_device(
     layers: u32,
 ) -> Result<Opened> {
     let wgpu_backend = std::env::var_os("WGPU_BACKEND").is_some();
+    log::info!(
+        "Horizon renderer: graphics API {} (setting {}{})",
+        api.with_env().label(),
+        api.label(),
+        if std::env::var_os("HORIZON_GRAPHICS_API").is_some() {
+            ", HORIZON_GRAPHICS_API set"
+        } else {
+            ""
+        }
+    );
     let mut first = None;
     for (order, allow_cpu) in device_search(
         api.with_env(),
@@ -2246,17 +2272,48 @@ async fn open_backend(
             Err(e) => return Err(NoDevice::Failed(format!("{name} surface: {e}"))),
         }
     };
-    let adapter = match instance
+    // Every adapter the backend offers goes in the log, so a report shows which one ran when
+    // a phone renders slowly (a GPU idle while the CPU works).
+    let offered = instance.enumerate_adapters(backends).await;
+    for adapter in &offered {
+        let info = adapter.get_info();
+        log::info!(
+            "Horizon renderer: {name} offers {} ({:?}, {:?}, driver {} {})",
+            info.name,
+            info.backend,
+            info.device_type,
+            info.driver,
+            info.driver_info
+        );
+    }
+    let requested = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: surface.as_ref(),
             force_fallback_adapter: false,
             ..Default::default()
         })
-        .await
-    {
-        Ok(adapter) => adapter,
-        Err(e) => return Err(NoDevice::NoAdapter(format!("{name}: {e}"))),
+        .await;
+    // wgpu can rank a software adapter first; a real GPU that presents to the window is taken
+    // over it, a discrete one first.
+    let adapter = match requested {
+        Ok(adapter) if allow_cpu || !is_software(adapter.get_info().device_type) => adapter,
+        Ok(software) => match hardware_adapter(offered, surface.as_ref()) {
+            Some(adapter) => {
+                log::warn!(
+                    "Horizon renderer: {name} ranked the software adapter {} first; using the GPU {}",
+                    software.get_info().name,
+                    adapter.get_info().name
+                );
+                adapter
+            }
+            // Refused just below (only a software adapter), so the next try runs.
+            None => software,
+        },
+        Err(e) => match hardware_adapter(offered, surface.as_ref()) {
+            Some(adapter) => adapter,
+            None => return Err(NoDevice::NoAdapter(format!("{name}: {e}"))),
+        },
     };
     // NoAdapter, so `open_with_retry` asks again: with the non-conformant
     // adapters shown, wgpu ranks a real GPU (hasvk on Ivy Bridge or Haswell)

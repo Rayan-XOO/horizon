@@ -3,9 +3,12 @@
 // before the fragment shader (Vulkan, cull.rs `DepthTest::Early`): one instance
 // per box `cull` listed, its section's box drawn front faces only against phase
 // 1's depth; then `count2`, `scan2` and `scatter2` write phase 2's draws.
-@group(0) @binding(9) var<storage, read> box_list: array<u32>;
+// The word arrays sit in a 16-byte aligned struct, so the bindings' types are 16 bytes:
+// ANGLE takes no buffer type of another size.
+struct BoxWords { @align(16) w: array<u32> }
+@group(0) @binding(9) var<storage, read> box_list: BoxWords;
 @group(0) @binding(10) var<storage, read> box_origins: array<vec4<u32>>;
-@group(0) @binding(11) var<storage, read_write> box_runs: array<u32>;
+@group(0) @binding(11) var<storage, read_write> box_runs: BoxWords;
 @group(0) @binding(12) var<storage, read> box_sections: array<Section>;
 
 // The corners (bit 0: x, bit 1: y, bit 2: z) of the box's 12 triangles,
@@ -22,7 +25,7 @@ struct BoxOut {
 
 @vertex
 fn vs_box(@builtin(vertex_index) v: u32, @builtin(instance_index) t: u32) -> BoxOut {
-    let id = box_list[params.occl.y + t];
+    let id = box_list.w[params.occl.y + t];
     let o = bitcast<vec3<f32>>(box_origins[id].xyz);
     var out: BoxOut;
     out.id = id;
@@ -37,8 +40,8 @@ fn vs_box(@builtin(vertex_index) v: u32, @builtin(instance_index) t: u32) -> Box
 @early_depth_test(force)
 fn fs_box(in: BoxOut) -> @location(0) vec4<f32> {
     let at = in.id * RUN_WORDS + SEEN_WORD;
-    if box_runs[at] != params.occl.x {
-        box_runs[at] = params.occl.x;
+    if box_runs.w[at] != params.occl.x {
+        box_runs.w[at] = params.occl.x;
     }
     return vec4(0.0);
 }

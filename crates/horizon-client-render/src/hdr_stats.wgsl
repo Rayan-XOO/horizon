@@ -19,6 +19,8 @@ struct Params {
     // threshold lies, for bright parts and for all over (hdr.rs `Masks`).
     parts: f32,
     whole: f32,
+    // Up to 16 bytes: ANGLE (Samsung's OpenGL ES) takes no uniform of another size.
+    _pad: vec2<f32>,
 };
 @group(0) @binding(8) var<uniform> params: Params;
 

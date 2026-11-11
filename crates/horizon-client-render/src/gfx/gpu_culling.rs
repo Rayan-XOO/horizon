@@ -561,6 +561,8 @@ impl Grown {
         bytes: u64,
         usage: wgpu::BufferUsages,
     ) -> Option<Self> {
+        // At least one 16-byte step: gpu_occlusion.wgsl binds word arrays as 16-byte types.
+        let bytes = bytes.max(16).next_multiple_of(16);
         Some(Self {
             buffer: try_create(device, label, bytes, usage)?,
             bytes,

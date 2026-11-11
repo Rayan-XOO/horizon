@@ -238,7 +238,7 @@ fn buffer(
 ) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        size: size.max(16),
+        size: size.max(16).next_multiple_of(16),
         // Tests read the tables back.
         usage: usage
             | wgpu::BufferUsages::COPY_DST

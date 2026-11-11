@@ -340,14 +340,17 @@ fn fade_code(w: f32) -> u32 {
 // Flat section draws (gfx/flat.rs): one draw per arena page over the frame's
 // index list. A section's vertices fill whole 256-vertex blocks of its page:
 // the block gives its resident slot, the slot its camera-relative origin.
-@group(1) @binding(0) var<storage, read> block_slots: array<u32>;
+// Each runtime array sits in a 16-byte aligned struct, so the binding's type is 16 bytes:
+// ANGLE (Samsung's OpenGL ES) takes no buffer type of another size.
+struct BlockSlots { @align(16) w: array<u32> }
+@group(1) @binding(0) var<storage, read> block_slots: BlockSlots;
 @group(1) @binding(1) var<storage, read> slot_origins: array<vec4<f32>>;
 @vertex fn vs_terrain_flat(
     @builtin(vertex_index) vertex: u32,
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
-    let origin = slot_origins[block_slots[vertex >> 8u]];
+    let origin = slot_origins[block_slots.w[vertex >> 8u]];
     return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w);
 }
@@ -388,7 +391,7 @@ fn left_out() -> TerrainOut {
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
-    let origin = slot_origins[block_slots[vertex >> 8u]];
+    let origin = slot_origins[block_slots.w[vertex >> 8u]];
     if !opaque_quad(layer, origin.w) { return left_out(); }
     return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w);
@@ -398,7 +401,7 @@ fn left_out() -> TerrainOut {
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> TerrainOut {
-    let origin = slot_origins[block_slots[vertex >> 8u]];
+    let origin = slot_origins[block_slots.w[vertex >> 8u]];
     if opaque_quad(layer, origin.w) { return left_out(); }
     return terrain_vertex(position, terrain_uv(uv, origin.w), layer, color, light, origin.xyz,
         origin.w);
@@ -409,7 +412,8 @@ fn left_out() -> TerrainOut {
 // corner of the quad whose record is at that slot (`PACKED_BASE + 4 * slot + corner`).
 // Either way they come out as the six words of the vertex, so the work after is the same.
 // Binding 19: visbuffer.wgsl, in the same module, takes 2 to 18 of its own group 1.
-@group(1) @binding(19) var<storage, read> arena_page: array<vec2<u32>>;
+struct ArenaPage { @align(16) w: array<vec2<u32>> }
+@group(1) @binding(19) var<storage, read> arena_page: ArenaPage;
 const PACKED_BASE: u32 = 0x10000000u;
 // A vertex's words: position bits, then UV, layer with light, colour.
 struct ArenaCorner {
@@ -417,9 +421,9 @@ struct ArenaCorner {
     r: vec3<u32>,
 }
 fn arena_vertex(v: u32) -> ArenaCorner {
-    let a = arena_page[v * 3u];
-    let b = arena_page[v * 3u + 1u];
-    let c = arena_page[v * 3u + 2u];
+    let a = arena_page.w[v * 3u];
+    let b = arena_page.w[v * 3u + 1u];
+    let c = arena_page.w[v * 3u + 2u];
     return ArenaCorner(vec3(a.x, a.y, b.x), vec3(b.y, c.x, c.y));
 }
 // The offset a block corner adds on one component: `side` on the face's axis (rel 0), `du`
@@ -484,9 +488,9 @@ fn section_corner(vertex: u32) -> SectionCorner {
     }
     let slot = (vertex - PACKED_BASE) >> 2u;
     let corner = vertex & 3u;
-    let a = arena_page[slot * 3u];
-    let b = arena_page[slot * 3u + 1u];
-    let c = arena_page[slot * 3u + 2u];
+    let a = arena_page.w[slot * 3u];
+    let b = arena_page.w[slot * 3u + 1u];
+    let c = arena_page.w[slot * 3u + 2u];
     // `packed::FULL`: the quad's four vertices, word 0 slots on.
     if (c.y & 0x80000000u) != 0u {
         return SectionCorner(arena_vertex(slot + a.x + corner), slot, true);
@@ -528,18 +532,18 @@ fn corner_vertex(c: ArenaCorner, origin: vec4<f32>) -> TerrainOut {
 }
 @vertex fn vs_section_flat(@builtin(vertex_index) vertex: u32) -> TerrainOut {
     let s = section_corner(vertex);
-    let origin = slot_origins[block_slots[s.slot >> 8u]];
+    let origin = slot_origins[block_slots.w[s.slot >> 8u]];
     return corner_vertex(s.c, origin);
 }
 @vertex fn vs_section_flat_opaque(@builtin(vertex_index) vertex: u32) -> TerrainOut {
     let s = section_corner(vertex);
-    let origin = slot_origins[block_slots[s.slot >> 8u]];
+    let origin = slot_origins[block_slots.w[s.slot >> 8u]];
     if !opaque_quad(corner_layer(s.c), origin.w) { return left_out(); }
     return corner_vertex(s.c, origin);
 }
 @vertex fn vs_section_flat_cutout(@builtin(vertex_index) vertex: u32) -> TerrainOut {
     let s = section_corner(vertex);
-    let origin = slot_origins[block_slots[s.slot >> 8u]];
+    let origin = slot_origins[block_slots.w[s.slot >> 8u]];
     if opaque_quad(corner_layer(s.c), origin.w) { return left_out(); }
     return corner_vertex(s.c, origin);
 }

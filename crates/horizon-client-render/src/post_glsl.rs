@@ -222,10 +222,48 @@ fn parse(stage: ShaderStage, text: &str) -> Result<naga::Module, String> {
                 .collect::<Vec<_>>()
                 .join("; ")
         })?;
+    let mut module = module;
+    pad_uniform_blocks(&mut module);
     Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&module)
         .map_err(|e| format!("{:?}", e.into_inner()))?;
     Ok(module)
+}
+
+/// Rounds every uniform block's size up to 16 bytes, as std140 lays a block out: naga sizes a
+/// block of one `float` at 4, and wgpu refuses a pipeline binding a type of a size off 16 bytes
+/// on ANGLE (Samsung's OpenGL ES), whose buffers here are larger than any block anyway
+/// (`UNIFORM_BYTES`).
+fn pad_uniform_blocks(module: &mut naga::Module) {
+    let blocks: Vec<_> = module
+        .global_variables
+        .iter()
+        .filter(|(_, v)| v.space == naga::AddressSpace::Uniform)
+        .map(|(_, v)| v.ty)
+        .collect();
+    for ty in blocks {
+        let old = module.types[ty].clone();
+        let naga::TypeInner::Struct { members, span } = &old.inner else {
+            continue;
+        };
+        if span % 16 == 0 {
+            continue;
+        }
+        let padded = naga::Type {
+            name: old.name.clone(),
+            inner: naga::TypeInner::Struct {
+                members: members.clone(),
+                span: span.next_multiple_of(16),
+            },
+        };
+        if module.types.get(&padded).is_none() {
+            module.types.replace(ty, padded);
+        } else {
+            // The padded block already is a type of the module: the block keeps its size.
+            log::warn!("post shader: uniform block {:?} left at {span} bytes", old.name);
+            debug_assert!(false, "uniform block {:?} not padded", old.name);
+        }
+    }
 }
 
 /// Translates the vertex and fragment shader a pass names (`minecraft:post/invert`).

@@ -101,7 +101,7 @@ fn horizon_material_out(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>,
     @location(2) layer: u32, @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonMaterialOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[vertex >> 8u]];
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots.w[vertex >> 8u]];
     return horizon_material_vertex(position, horizon_terrain_terrain_uv(uv, origin.w), layer,
         color, light, origin.xyz);
 }

@@ -8,6 +8,9 @@ export ANDROID_NDK_HOME="$NDK"
 BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)"
 PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
 PROFILE="${PROFILE:-fast}"
+# The release the APK is (the manifest's versionName), so the game names it in its log and
+# reports (horizon-core release.rs) instead of the crate's version.
+export HORIZON_VERSION="${HORIZON_VERSION:-$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' packaging/android/AndroidManifest.xml)}"
 OUT=target/android
 rm -rf "$OUT/stage" && mkdir -p "$OUT/stage/lib"
 cargo ndk -t arm64-v8a -P 26 -o "$OUT/jni" build -p horizon-android --profile "$PROFILE" ${CARGO_FLAGS:-}

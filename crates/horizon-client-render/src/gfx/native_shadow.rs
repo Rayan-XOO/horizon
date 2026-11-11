@@ -56,7 +56,7 @@ fn horizon_shadow_vertex(pos: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>, @location(2) layer: u32,
     @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonShadowOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots.w[index >> 8u]];
     let atlas = horizon_terrain_terrain_uv(uv, origin.w);
     let pos = horizon_material_displace(position + origin.xyz, atlas, layer, color, light);
     return horizon_shadow_vertex(pos, atlas, layer, color);

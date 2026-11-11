@@ -8,6 +8,7 @@ mod android_setup;
 use horizon_client::game;
 
 use horizon_client::{crash, logging};
+use horizon_client_render::graphics::GraphicsApi;
 use winit::platform::android::activity::AndroidApp;
 
 static MOD_API_LEVEL: [u8; 27] = horizon_mods::api_level::MARK;
@@ -54,7 +55,7 @@ fn android_main(app: AndroidApp) {
     crash::install(home.clone(), "client");
     if let Some(internal) = app.internal_data_path() {
         apply_vulkan_driver(&internal);
-        apply_safe_mode(&internal);
+        apply_safe_mode(&internal, &home);
         android_msa::prepare(&internal, &home);
     }
     let _ = game::ANDROID_APP.set(app.clone());
@@ -127,17 +128,46 @@ fn clear_launch_marks(app: &AndroidApp) {
 /// leaves `launch.pending`; after two such launches in a row the next ones start on
 /// OpenGL ES with GPU occlusion culling off. Some drivers (Adreno 740 on certain firmware,
 /// Mali on old Android) fail inside Vulkan before the first frame. `safe-mode.txt` in
-/// internal storage keeps it on until the profile screen's "Try Vulkan again" deletes it.
-fn apply_safe_mode(internal: &std::path::Path) {
+/// internal storage keeps it on until the profile screen's "Try Vulkan again" deletes it, or
+/// the player picks another graphics API in the video settings than the one that failed
+/// (`safe-mode.txt` names it): that one is tried, and two more failed launches bring safe
+/// start back.
+fn apply_safe_mode(internal: &std::path::Path, home: &std::path::Path) {
     let pending = internal.join("launch.pending");
     let forced = internal.join("safe-mode.txt");
-    let failures: u32 = std::fs::read_to_string(&pending)
+    let mut failures: u32 = std::fs::read_to_string(&pending)
         .ok()
         .and_then(|t| t.trim().parse().ok())
         .unwrap_or(0);
+    let chosen = chosen_api(home);
+    if let Ok(note) = std::fs::read_to_string(&forced) {
+        // A note from before 0.4.6 names no API: only Vulkan picked since lifts it.
+        let failed = note
+            .lines()
+            .find_map(|l| l.strip_prefix("api:"))
+            .map(|name| GraphicsApi::from_name(name).unwrap_or_default());
+        let changed = match failed {
+            Some(failed) => failed != chosen,
+            None => chosen == GraphicsApi::Vulkan,
+        };
+        if chosen != GraphicsApi::OpenGl && changed {
+            log::info!(
+                "Horizon: {} picked in the video settings after safe start; trying it again",
+                chosen.label()
+            );
+            let _ = std::fs::remove_file(&forced);
+            failures = 0;
+        }
+    }
     let safe = forced.exists() || failures >= 2;
     if failures >= 2 && !forced.exists() {
-        let _ = std::fs::write(&forced, b"Vulkan failed to start twice; delete this file to try it again\n");
+        let _ = std::fs::write(
+            &forced,
+            format!(
+                "Vulkan failed to start twice; delete this file to try it again\napi:{}\n",
+                chosen.name()
+            ),
+        );
     }
     if safe && std::env::var_os("HORIZON_GRAPHICS_API").is_none() {
         log::warn!("Horizon: safe start (OpenGL ES, no GPU culling) after {failures} failed launches");
@@ -152,4 +182,12 @@ fn apply_safe_mode(internal: &std::path::Path) {
         std::thread::sleep(std::time::Duration::from_secs(25));
         let _ = std::fs::remove_file(pending);
     });
+}
+
+/// The graphics API the video settings name (horizon-graphics.txt in the game folder, which
+/// `Settings::load` reads beside options.txt), read by the game's own parser: Auto when unset.
+fn chosen_api(home: &std::path::Path) -> GraphicsApi {
+    std::fs::read_to_string(home.join(horizon_client_render::graphics::FILE))
+        .map(|text| horizon_client_render::graphics::Graphics::parse(&text).api)
+        .unwrap_or_default()
 }

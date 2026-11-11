@@ -5,6 +5,8 @@ struct Params {
     stamp: u32,
     // Boxes covering more than this share of the screen count as seen.
     big: f32,
+    // Up to 16 bytes, as gfx/cull.rs's Params: ANGLE takes no buffer type of another size.
+    _pad: vec2<u32>,
 }
 // The leading member of terrain.wgsl's Globals.
 struct Globals {
@@ -25,9 +27,11 @@ struct Test {
 }
 @group(0) @binding(0) var<storage, read> tests: array<Test>;
 // Per test: the stamp of the frame whose test saw the box.
-@group(0) @binding(1) var<storage, read_write> results: array<u32>;
+// In a 16-byte aligned struct, so the binding's type is 16 bytes (ANGLE).
+struct Words { @align(16) w: array<u32> }
+@group(0) @binding(1) var<storage, read_write> results: Words;
 // Phase 2's draws, 5 words each, with instance counts of 0 until seen.
-@group(0) @binding(2) var<storage, read_write> phase2: array<u32>;
+@group(0) @binding(2) var<storage, read_write> phase2: Words;
 // Camera-relative origin of each visible section.
 @group(0) @binding(3) var<storage, read> origins: array<vec4<f32>>;
 @group(0) @binding(4) var<uniform> globals: Globals;
@@ -102,14 +106,14 @@ fn vs_box(@builtin(vertex_index) v: u32, @builtin(instance_index) t: u32) -> Box
 // The box is seen at this fragment: store the stamp, and give its phase 2
 // draws their instance.
 fn see(t: u32) {
-    if results[t] != params.stamp {
-        results[t] = params.stamp;
+    if results.w[t] != params.stamp {
+        results.w[t] = params.stamp;
         let test = tests[t].data;
         for (var k = 0u; k < (test.z & 0xffffu); k++) {
-            phase2[(test.y + k) * 5u + 1u] = 1u;
+            phase2.w[(test.y + k) * 5u + 1u] = 1u;
         }
         for (var k = 0u; k < (test.z >> 16u); k++) {
-            phase2[(test.w + k) * 5u + 1u] = 1u;
+            phase2.w[(test.w + k) * 5u + 1u] = 1u;
         }
     }
 }

@@ -193,7 +193,8 @@ fn buffer(
 ) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        size,
+        // Whole 16-byte steps: cull.wgsl's word arrays bind as 16-byte types (ANGLE).
+        size: size.max(16).next_multiple_of(16),
         usage,
         mapped_at_creation: false,
     })
