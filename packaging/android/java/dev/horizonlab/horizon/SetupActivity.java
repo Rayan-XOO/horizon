@@ -25,6 +25,15 @@ import java.io.File;
 public class SetupActivity extends Activity
         implements View.OnClickListener, DialogInterface.OnClickListener, Runnable {
     static {
+        // Rust threads (the game's main loop included) take their stack size from
+        // RUST_MIN_STACK, read once before the first thread starts. The default 2 MiB
+        // is too small for starting the game (desktops give the main thread 8 MiB).
+        try {
+            android.system.Os.setenv("RUST_MIN_STACK",
+                    android.os.Process.is64Bit() ? "33554432" : "8388608", false);
+        } catch (Exception e) {
+            // keep the default
+        }
         System.loadLibrary("horizon");
     }
 
