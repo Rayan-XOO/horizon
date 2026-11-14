@@ -23,7 +23,10 @@ impl Game<'_> {
     pub(super) fn apply_mouse_look(&mut self) {
         let look = self.look_options();
         let time = self.started.elapsed().as_secs_f64();
-        let pointer = self.captured || self.agent_pointer;
+        // Android: touch turns the view in play whether or not the pointer is held.
+        let pointer = self.captured
+            || self.agent_pointer
+            || (cfg!(target_os = "android") && !self.screen_over_playing());
         let grabbed = pointer
             && self.screen == Screen::Playing
             && (self.player.is_some() || self.studio.flying());
@@ -289,7 +292,12 @@ impl Game<'_> {
         }
         // Outside a run, a window whose grab is the system's holds it exactly while the game
         // has it grabbed; only a run leaves the two apart.
-        if !self.internal_grab() && self.captured != self.capture_mode.is_some() {
+        // Android has no system grab (`capture` holds the pointer without one): nothing to sync,
+        // and grabbing again every frame would drop each frame's first touch or mouse move.
+        if !cfg!(target_os = "android")
+            && !self.internal_grab()
+            && self.captured != self.capture_mode.is_some()
+        {
             let grab = self.captured;
             self.captured = self.capture_mode.is_some();
             self.capture(grab);

@@ -1502,7 +1502,7 @@ impl Game<'_> {
                     self.touch
                         .fingers
                         .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking, uses });
-                    self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+                    self.mouse.add_motion(dx, dy);
                     self.last_input = Instant::now();
                 }
                 Some(Finger::Trigger { i, last, since, look }) => {
@@ -1512,7 +1512,7 @@ impl Game<'_> {
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
                     self.touch.fingers.insert(id, Finger::Trigger { i, last: pos, since, look });
                     if look && !self.touch_looking(id) {
-                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+                        self.mouse.add_motion(dx, dy);
                         self.last_input = Instant::now();
                     }
                 }
@@ -1520,7 +1520,7 @@ impl Game<'_> {
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
                     self.touch.fingers.insert(id, Finger::Press(button, pos, true));
                     if !self.touch_looking(id) {
-                        self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
+                        self.mouse.add_motion(dx, dy);
                         self.last_input = Instant::now();
                     }
                 }
