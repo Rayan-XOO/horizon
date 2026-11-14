@@ -20,6 +20,7 @@
 
 <p align="center">
   <a href="https://github.com/Rayan-XOO/horizon/releases/latest"><b>Скачать APK / Download APK</b></a> ·
+  <a href="https://4pda.to/forum/index.php?showtopic=1128662">4PDA</a> ·
   <a href="#русский">Русский</a> ·
   <a href="#english">English</a>
 </p>
@@ -48,7 +49,7 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
   и выбор, крутят ли кнопки камеру.
 - Вход в Microsoft по коду для лицензионных серверов (нужен свой одобренный Azure client ID), вход обновляется сам.
 - Игра замирает, когда свёрнута, и не тратит батарею.
-- Экранная клавиатура в чате, табличках и полях поиска.
+- Экранная клавиатура в чате, табличках и полях поиска (открывается, только когда нажимаешь на само поле).
 - Файлы игры скачиваются в самом приложении, с докачкой после обрыва.
 - Папка игры видна в «Файлах»: ресурспаки, шейдеры и миры без провода.
 
@@ -124,13 +125,66 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 - Кнопки: прыжок, присед, атака, использование, инвентарь, смена слота.
 - Пауза в правом верхнем углу, кнопка **X** закрывает открытый экран.
 - Кнопки **F1 / F2 / F3 / F5** (скрыть HUD, скриншот, отладка, камера).
-- Экранная клавиатура сама открывается в чате, табличках, поиске и т.д.
+- Экранная клавиатура открывается, когда нажимаешь на поле ввода (поиск, табличка и т.д.), а в чате сразу.
 - Редактор раскладки (шестерёнка): двигай кнопки, меняй размер и прозрачность, сохраняй.
 - Быстрый тап по мобу — атака.
 
+### Моды
+
+На телефоне работают моды `.hnmod` с готовой Android-библиотекой. Поставить мод: открой файл через Horizon («Открыть с помощью» / «Поделиться»), или **Профиль → Установить мод**, или просто положи его в папку `mods` в папке игры. Включить и выключить: **Настройки → Моды**. Готовые моды лежат в [релизах](https://github.com/Rayan-XOO/horizon/releases).
+
+Моды — это нативный код без песочницы, ставь только то, чему доверяешь.
+
+### Как портировать мод с ПК самому
+
+Моды для ПК (Fabric, Forge и т.д.) на телефоне сами по себе не заработают: их надо переписать под Horizon и собрать под Android. Я моды по заявкам не порчу, но это можно сделать самому на компьютере с помощью ИИ-агента для кода: [Claude Code](https://claude.com/claude-code), [Cursor](https://cursor.com), [Codex](https://openai.com/codex) или любого похожего. Агент сам скачает всё нужное, прочитает документацию и соберёт файл.
+
+Что нужно:
+
+- компьютер на Windows, Linux или macOS, несколько гигабайт места и интернет;
+- установленный агент (у большинства есть бесплатный пробный период или дешёвый тариф);
+- исходники мода (ссылка на GitHub/GitLab) или хотя бы его `.jar`.
+
+Как:
+
+1. Создай пустую папку, открой в ней агента.
+2. Вставь промпт ниже, подставив название мода и ссылку на него.
+3. Отвечай агенту, если он что-то спросит, и разрешай ему ставить инструменты (Rust, Android NDK).
+4. Когда он закончит, скинь получившийся `.hnmod` на телефон и установи, как написано выше.
+
+Не всё можно перенести: у модов для Android пока нет доступа ко всему, что умеет игра (подробно, что есть, — в [docs/android-mods.md](docs/android-mods.md)). Агент должен сам сказать, что получилось, а что нет. Если мод сделал не ты, уважай его лицензию: оставь автора и ссылку на оригинал, а выкладывать порт можно, только если лицензия это разрешает.
+
+**Промпт (скопируй целиком):**
+
+```text
+Помоги портировать мод для Minecraft: Java Edition на Horizon для Android (неофициальный порт Horizon, Minecraft Java 26.3 на Rust). Результат: файл .hnmod, который ставится в Horizon на телефоне.
+
+Мод: <НАЗВАНИЕ МОДА>
+Исходники: <ССЫЛКА НА РЕПОЗИТОРИЙ МОДА или путь к .jar>
+
+Порядок работы:
+1. Склонируй https://github.com/Rayan-XOO/horizon (ветка android-port) в эту папку. Прочитай docs/android-mods.md, crates/horizon-native-abi, crates/horizon-mod-sdk и примеры mods/hello-android, mods/entity-culling и mods/orbital-laser (orbital-laser — уже портированный мод, ориентируйся на него).
+2. Скачай исходники мода. Если есть только .jar, декомпилируй его (CFR или Vineflower) только для того, чтобы понять логику.
+3. Прежде чем писать код, дай мне короткий список: что умеет мод, что из этого можно сделать через API Horizon для Android, а что нельзя и почему. Подожди моего ответа.
+4. Напиши мод на Rust как cdylib на horizon-mod-sdk (или на horizon-native-abi, если мод простой). Саму игру Horizon не меняй: всё, что нужно моду (код, текстуры, звуки, данные, язык), должно лежать в его .hnmod.
+5. Не клади в мод файлы Minecraft/Mojang (текстуры, звуки, код игры). Ресурсы бери только из самого мода, сохрани его LICENSE и автора.
+6. Поставь недостающие инструменты: Rust (rustup), rustup target add aarch64-linux-android, cargo install cargo-ndk, Android NDK (задай ANDROID_NDK_HOME), cargo install --path crates/cargo-horizon-mod.
+7. Собери: cargo horizon-mod android (в папке мода). Исправляй ошибки, пока сборка не пройдёт. Готовый файл: target/horizon-mod/<id>.hnmod.
+8. В конце напиши: где лежит .hnmod, что работает, что не перенеслось и почему, и как проверить мод в игре (команды, клавиши, что должно появиться на экране).
+```
+
+Если мод не работает, загляни в **Настройки → Моды**: там написано, почему он не загрузился. Логи можно отправить агенту, он поправит.
+
+### Обновления и новости
+
+- Все версии выходят здесь, на GitHub: [Releases](https://github.com/Rayan-XOO/horizon/releases). Чтобы получать уведомления о новых версиях, нажми вверху **Watch → Custom → Releases**.
+- Новый APK ставится поверх старого, данные и миры остаются.
+- Тема на 4PDA: [Horizon для Android](https://4pda.to/forum/index.php?showtopic=1128662) — там новости, вопросы и помощь.
+- Нашёл баг? Пиши в [Issues](https://github.com/Rayan-XOO/horizon/issues) или в теме на 4PDA и приложи логи (кнопка «Поделиться логами» в лаунчере).
+
 ### Поддерживаемые устройства
 
-Порту нужны **arm64**, **Android 8.0+ (API 26)** и GPU с **Vulkan**.
+Порту нужны **arm64** или 32-битный **ARM (armv7)**, **Android 8.0+ (API 26)** и GPU с **Vulkan** (без него игра пойдёт на OpenGL ES 3).
 Желательно **4 ГБ ОЗУ и больше**: игра занимает около 2,2 ГБ, на слабых телефонах ставьте дальность прорисовки 4–6.
 
 | Устройство / чип | GPU | Статус |
@@ -153,7 +207,7 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 
 **Play Защита пишет, что приложение небезопасно.** Так бывает с любым APK не из Play Маркета. «Подробнее» → «Всё равно установить». Весь код открыт в этом репозитории.
 
-**Какие разрешения нужны?** Интернет и состояние сети (скачать файлы игры), уведомления и фоновая работа (чтобы загрузка не прерывалась в свёрнутом виде). Доступ к памяти не запрашивается: всё хранится в папке приложения.
+**Какие разрешения нужны?** Интернет и состояние сети (скачать файлы игры), уведомления и фоновая работа (чтобы загрузка не прерывалась в свёрнутом виде). «Доступ ко всем файлам» нужен, только если сам захочешь хранить игру в папке `/storage/emulated/0/Horizon`; без него всё лежит в папке приложения.
 
 **Нужна ли лицензия Minecraft?** Да, нужна своя легальная копия Minecraft: Java Edition. В APK нет ни одного файла игры.
 
@@ -195,7 +249,7 @@ The original README lives in [README.upstream.md](README.upstream.md).
   and a switch for whether buttons also turn the camera.
 - Microsoft sign-in by code for licensed servers (needs your own approved Azure client ID); it renews by itself.
 - The game freezes while it's in the background, so it doesn't drain the battery.
-- On-screen keyboard for chat, signs and search fields.
+- On-screen keyboard for chat, signs and search fields (it opens only when you tap the field itself).
 - Game files are downloaded inside the app and resume after interruptions.
 - Game folder shows up in the Files app: resource packs, shaders and worlds without a cable.
 
@@ -271,13 +325,66 @@ To prepare everything on a PC without the on-phone download, see [ANDROID.md](AN
 - Buttons: jump, sneak, attack, use, inventory, next slot.
 - Pause in the top-right corner, **X** closes the open screen.
 - **F1 / F2 / F3 / F5** buttons (hide HUD, screenshot, debug, camera).
-- The on-screen keyboard pops up by itself in chat, signs, search fields, etc.
+- The on-screen keyboard opens when you tap a text field (search, sign, etc.); in chat it opens right away.
 - Layout editor (gear icon): move buttons, resize them, change opacity, save.
 - Quick tap on a mob attacks it.
 
+### Mods
+
+Mods in `.hnmod` files that carry an Android library run on the phone. To install one, open it with Horizon ("Open with" / "Share"), use **Profile → Install a mod**, or drop it into the `mods` folder in the game folder. Turn mods on and off in **Options → Mods**. Ready-made mods are attached to the [releases](https://github.com/Rayan-XOO/horizon/releases).
+
+Mods are native code with no sandbox, so only install ones you trust.
+
+### Porting a PC mod yourself
+
+PC mods (Fabric, Forge and so on) don't just run on the phone: they have to be rewritten for Horizon and built for Android. I don't port mods on request, but you can do it yourself on a computer with an AI coding agent: [Claude Code](https://claude.com/claude-code), [Cursor](https://cursor.com), [Codex](https://openai.com/codex) or anything similar. The agent fetches what it needs, reads the docs and builds the file.
+
+You need:
+
+- a Windows, Linux or macOS computer with a few GB of free space and internet;
+- one of those agents installed;
+- the mod's source (a GitHub/GitLab link) or at least its `.jar`.
+
+Steps:
+
+1. Make an empty folder and open the agent in it.
+2. Paste the prompt below with the mod's name and link filled in.
+3. Answer its questions and let it install tools (Rust, the Android NDK).
+4. When it's done, copy the `.hnmod` to your phone and install it as above.
+
+Not everything can be ported: Android mods don't yet have access to everything the game can do (what's there is listed in [docs/android-mods.md](docs/android-mods.md)), and the agent should tell you what made it and what didn't. If the mod isn't yours, respect its license: keep the author and a link to the original, and only share the port if the license allows it.
+
+**Prompt (copy all of it):**
+
+```text
+Help me port a Minecraft: Java Edition mod to Horizon for Android (an unofficial Android port of Horizon, Minecraft Java 26.3 rewritten in Rust). The result is a .hnmod file that installs in Horizon on the phone.
+
+Mod: <MOD NAME>
+Source: <LINK TO THE MOD'S REPOSITORY or path to the .jar>
+
+How to work:
+1. Clone https://github.com/Rayan-XOO/horizon (branch android-port) into this folder. Read docs/android-mods.md, crates/horizon-native-abi, crates/horizon-mod-sdk and the examples mods/hello-android, mods/entity-culling and mods/orbital-laser (orbital-laser is an already ported mod, use it as the model).
+2. Get the mod's source. If there's only a .jar, decompile it (CFR or Vineflower) just to understand the logic.
+3. Before writing code, give me a short list: what the mod does, what of it the Horizon Android API can do, and what it can't and why. Wait for my answer.
+4. Write the mod in Rust as a cdylib on horizon-mod-sdk (or horizon-native-abi if the mod is simple). Don't change the Horizon game itself: everything the mod needs (code, textures, sounds, data, language files) goes into its .hnmod.
+5. Don't put any Minecraft/Mojang files in the mod (textures, sounds, game code). Take assets only from the mod itself, and keep its LICENSE and author.
+6. Install missing tools: Rust (rustup), rustup target add aarch64-linux-android, cargo install cargo-ndk, the Android NDK (set ANDROID_NDK_HOME), cargo install --path crates/cargo-horizon-mod.
+7. Build: cargo horizon-mod android (in the mod's folder). Fix errors until the build passes. The file ends up in target/horizon-mod/<id>.hnmod.
+8. At the end tell me: where the .hnmod is, what works, what didn't port and why, and how to check the mod in game (commands, keys, what should show up on screen).
+```
+
+If the mod doesn't work, check **Options → Mods**: it says why the mod didn't load. You can hand the logs to the agent and it'll fix it.
+
+### Updates and news
+
+- Every version comes out here on GitHub: [Releases](https://github.com/Rayan-XOO/horizon/releases). To get notified about new versions, click **Watch → Custom → Releases** at the top.
+- A new APK installs over the old one; your data and worlds stay.
+- 4PDA topic (Russian): [Horizon for Android](https://4pda.to/forum/index.php?showtopic=1128662), for news, questions and help.
+- Found a bug? Open an [issue](https://github.com/Rayan-XOO/horizon/issues) or post in the 4PDA topic, and attach logs (the launcher's "Share logs" button).
+
 ### Supported Devices
 
-The port requires **arm64**, **Android 8.0+ (API 26)**, and a GPU with **Vulkan** support.
+The port requires **arm64** or 32-bit **ARM (armv7)**, **Android 8.0+ (API 26)**, and a GPU with **Vulkan** support (without it the game falls back to OpenGL ES 3).
 **4 GB of RAM or more** is recommended: the game takes up about 2.2 GB; on lower-end phones, set the draw distance to 4–6.
 
 | Device / Chip | GPU | Status |
@@ -299,7 +406,7 @@ The port requires **arm64**, **Android 8.0+ (API 26)**, and a GPU with **Vulkan*
 
 **Play Protect says the app is unsafe.** That happens with most APKs from outside the Play Store. Tap "More details" → "Install anyway". All the code is in this repo.
 
-**What permissions does it need?** Internet and network state (to download the game files), notifications and a foreground service (so the download keeps going in the background). No storage permission: everything lives in the app's own folder.
+**What permissions does it need?** Internet and network state (to download the game files), notifications and a foreground service (so the download keeps going in the background). "All files access" only if you choose to keep the game in `/storage/emulated/0/Horizon`; without it everything lives in the app's own folder.
 
 **Do I need to own Minecraft?** Yes, your own legit copy of Minecraft: Java Edition. The APK contains no game files.
 
