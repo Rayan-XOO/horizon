@@ -452,9 +452,8 @@ pub(super) struct Touches {
     /// show for that field until it loses the focus or Done is pressed. A field that takes the
     /// focus by itself as its screen opens doesn't bring the keyboard up.
     ime_armed: bool,
-    /// The screen (and page) a menu tap went down on: a tap that opens another screen whose
-    /// field takes the focus by itself is not a tap on that field.
-    ime_tap_on: String,
+    /// The last menu tap went down inside a text field's box.
+    ime_tap_field: bool,
     /// A controller, keyboard or mouse plays: the controls are hidden until a touch.
     pub(super) hardware: bool,
     /// A mouse has been used: the pointer is captured while playing.
@@ -485,7 +484,7 @@ impl Default for Touches {
             ime_shown: false,
             ime_retap: false,
             ime_armed: false,
-            ime_tap_on: String::new(),
+            ime_tap_field: false,
             hardware: false,
             mouse: false,
             pointer_captured: None,
@@ -854,19 +853,22 @@ impl Game<'_> {
             && (self.title.as_ref().is_some_and(|t| matches!(t.mode, horizon_client::title::Mode::Main)) || (self.player.is_some() && self.screen == super::Screen::Paused))
     }
 
-    /// A text box has focus (the soft keyboard is wanted).
-    /// Which screen, title screen and settings page is up, to tell a tap on a field from a
-    /// tap that opened a new screen.
-    fn ime_screen(&self) -> String {
-        format!(
-            "{} {:?} {:?} {} {}",
-            self.screen.id(),
-            self.title.as_ref().map(|t| std::mem::discriminant(&t.mode)),
-            (self.screen == super::Screen::Options).then(|| self.ui.options.page()),
-            self.sign_edit.is_some(),
-            self.book.is_some(),
-        )
+    /// Whether the pointer (where a tap just went down) is inside a text field's box.
+    fn touch_tap_on_field(&self) -> bool {
+        let targets = self.pad_visible_targets();
+        if super::pad_menu::field_at(&targets, self.cursor) {
+            return true;
+        }
+        self.sign_edit.is_some()
+            && !targets.iter().any(|t| {
+                let [x, y, w, h] = t.rect;
+                t.kind == horizon_client::widgets::Kind::Button
+                    && (x..x + w).contains(&self.cursor.0)
+                    && (y..y + h).contains(&self.cursor.1)
+            })
     }
+
+    /// A text box has focus (the soft keyboard is wanted).
 
     fn touch_text_focused(&self) -> bool {
         use super::Screen;
@@ -1171,14 +1173,17 @@ impl Game<'_> {
                 && self.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
         // The chat opens with the keyboard, as it always has; every other text field waits for
         // a tap with the field focused (the tap that focuses it, or one on it).
+        // Only a tap inside a text field's box brings the keyboard up; a tap anywhere else puts
+        // it away.
         let chat = self.screen == super::Screen::Chat;
-        if !focused {
+        let tap = self.touch.ime_retap.then_some(self.touch.ime_tap_field);
+        if !focused || tap == Some(false) {
             self.touch.ime_armed = false;
-        } else if self.touch.ime_retap && self.touch.ime_tap_on == self.ime_screen() {
+        } else if tap == Some(true) {
             self.touch.ime_armed = true;
         }
         let want = focused && (chat || self.touch.ime_armed);
-        if want != self.touch.ime_shown || (want && self.touch.ime_retap) {
+        if want != self.touch.ime_shown || (want && tap == Some(true)) {
             self.touch.ime_shown = want;
             android_ime::show(want);
         }
@@ -1414,11 +1419,14 @@ impl Game<'_> {
                     Finger::Done
                 } else if !self.touch_controls_shown() {
                     send(self, cursor(device_id, pos));
+                    // Whether the tap lands inside a text field's box, among what the last
+                    // frame drew, before the click changes the screen. A sign has no box:
+                    // anywhere on it but its buttons is the field.
+                    self.touch.ime_tap_field = self.touch_tap_on_field();
                     send(self, click(device_id, ElementState::Pressed));
-                    // Asked again on the next frame: a tap on a text field brings the
-                    // keyboard back after the system's back gesture hid it.
+                    // Asked on the next frame: a tap on a text field brings the keyboard up
+                    // (again, after the system's back gesture hid it), any other tap hides it.
                     self.touch.ime_retap = true;
-                    self.touch.ime_tap_on = self.ime_screen();
                     Finger::Pointer
                 } else if self.touch.editing {
                     if let Some(action) = gui.panel_hit(p) {

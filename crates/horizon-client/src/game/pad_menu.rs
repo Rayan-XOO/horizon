@@ -406,7 +406,7 @@ impl Game<'_> {
         key_focus::keyboard_targets(self.pad_visible_targets(), inventory)
     }
 
-    fn pad_visible_targets(&self) -> Vec<Target> {
+    pub(super) fn pad_visible_targets(&self) -> Vec<Target> {
         let targets = self.pad_all_targets();
         match self.gui_scale() {
             Some(batch) => key_focus::on_screen(targets, (batch.width, batch.height)),
@@ -2666,7 +2666,7 @@ fn osk_auto_opens(
 }
 
 /// Whether a text field in `targets` contains the point `at` (GUI pixels).
-fn field_at(targets: &[Target], at: (f32, f32)) -> bool {
+pub(super) fn field_at(targets: &[Target], at: (f32, f32)) -> bool {
     targets.iter().any(|t| {
         let [x, y, w, h] = t.rect;
         t.kind == Kind::Field && at.0 >= x && at.0 < x + w && at.1 >= y && at.1 < y + h
