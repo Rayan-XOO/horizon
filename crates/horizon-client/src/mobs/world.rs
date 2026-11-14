@@ -30,7 +30,232 @@ pub struct TargetInfo {
     /// `isPassenger`.
     pub passenger: bool,
 }
+thread_local! {
+    static NEAR_BUF_POOL: std::cell::RefCell<Vec<Vec<u32>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What `push_entities` pushes: who, where, whether it rides a vehicle (`Entity.isPassenger`),
+/// whether it shares the pusher's root vehicle (`isPassengerOfSameVehicle`), and whether it is
+/// itself a vehicle.
+pub(super) type PushTarget = (Who, Vec3, bool, bool, bool);
+thread_local! {
+    static PUSH_TARGETS: std::cell::RefCell<Vec<PushTarget>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// This thread's list for `push_entities`, empty: a crowd would otherwise allocate one for
+/// every mob on every tick. Taken out, so a call that reaches it again meanwhile gets its own.
+pub(super) fn take_push_targets() -> Vec<PushTarget> {
+    let mut targets = PUSH_TARGETS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    targets.clear();
+    targets
+}
+/// Keep `targets` for the next [`take_push_targets`].
+pub(super) fn give_push_targets(targets: Vec<PushTarget>) {
+    PUSH_TARGETS.with(|t| *t.borrow_mut() = targets);
+}
+
+pub struct NearIter<'a> {
+    others: &'a [Seen],
+    indices: Option<Vec<u32>>,
+    pos: usize,
+    fallback: Option<std::slice::Iter<'a, Seen>>,
+}
+
+impl<'a> Iterator for NearIter<'a> {
+    type Item = &'a Seen;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(indices) = &self.indices
+            && self.pos < indices.len()
+        {
+            let idx = indices[self.pos];
+            self.pos += 1;
+            return Some(&self.others[idx as usize]);
+        }
+        if let Some(all) = &mut self.fallback {
+            return all.next();
+        }
+        None
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if let Some(indices) = &self.indices {
+            let rem = indices.len().saturating_sub(self.pos);
+            (rem, Some(rem))
+        } else if let Some(all) = &self.fallback {
+            all.size_hint()
+        } else {
+            (0, Some(0))
+        }
+    }
+}
+
+impl Drop for NearIter<'_> {
+    fn drop(&mut self) {
+        if let Some(mut buf) = self.indices.take() {
+            buf.clear();
+            NEAR_BUF_POOL.with(|pool| {
+                if let Ok(mut pool) = pool.try_borrow_mut()
+                    && pool.len() < 8
+                {
+                    pool.push(buf);
+                }
+            });
+        }
+    }
+}
+
+/// Chunk and section cache for raycast block traversals.
+/// Caches the current section to avoid section index checks and hashmap lookups
+/// for consecutive voxels in the same 16x16x16 section.
+#[derive(Default)]
+struct RaycastBlockCache<'b> {
+    chunks: [Option<((i32, i32), Option<&'b crate::chunk::Chunk>)>; 4],
+    section_key: (i32, i32, i32),
+    section: Option<&'b crate::chunk::Section>,
+    section_uniform_air: bool,
+}
+
+impl<'a> MobWorld<'a> {
+    /// Creates a lightweight view for creature despawn evaluation without entity collections.
+    pub fn despawn_view(&self) -> MobWorld<'a> {
+        MobWorld {
+            others: &[],
+            others_grid: None,
+            others_index: None,
+            others_villagers: None,
+            others_solid: None,
+            player: None,
+            teams: std::sync::Arc::clone(&self.teams),
+            ..self.clone()
+        }
+    }
+}
+
+/// Single non-spectator player position helper for creature ticking despawn checks.
+pub fn single_player_pos(players: impl IntoIterator<Item = (Vec3, bool)>) -> Option<Option<Vec3>> {
+    let mut non_spec = players.into_iter().filter(|(_, spec)| !*spec);
+    match (non_spec.next(), non_spec.next()) {
+        (Some((pos, _)), None) => Some(Some(pos)),
+        (None, _) => Some(None),
+        _ => None,
+    }
+}
+
+impl<'b> RaycastBlockCache<'b> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            chunks: [None, None, None, None],
+            section_key: (i32::MIN, i32::MIN, i32::MIN),
+            section: None,
+            section_uniform_air: false,
+        }
+    }
+
+    #[inline]
+    fn block(&mut self, world: &'b crate::world::World, x: i32, y: i32, z: i32) -> BlockStateId {
+        let (cx, cy, cz) = (x >> 4, y >> 4, z >> 4);
+        if (cx, cy, cz) == self.section_key {
+            if self.section_uniform_air {
+                return world.air;
+            }
+            if let Some(sec) = self.section {
+                return BlockStateId(sec.get(crate::chunk::index(x & 15, y, z & 15)));
+            }
+            return world.air;
+        }
+
+        self.section_key = (cx, cy, cz);
+        let slot = ((cx as usize).wrapping_mul(5) ^ (cz as usize)) & 3;
+        let chunk = match self.chunks[slot] {
+            Some(((ccx, ccz), c)) if ccx == cx && ccz == cz => c,
+            _ => {
+                let c = world.chunks.get(&(cx, cz)).map(|c| c.as_ref());
+                self.chunks[slot] = Some(((cx, cz), c));
+                c
+            }
+        };
+
+        match chunk {
+            Some(c) => match c.section_index(y) {
+                Some(s) => {
+                    let sec = c.sections[s].as_ref();
+                    self.section = Some(sec);
+                    self.section_uniform_air = sec.is_uniform(world.air.0);
+                    if self.section_uniform_air {
+                        world.air
+                    } else {
+                        BlockStateId(sec.get(crate::chunk::index(x & 15, y, z & 15)))
+                    }
+                }
+                None => {
+                    self.section = None;
+                    self.section_uniform_air = true;
+                    world.air
+                }
+            },
+            None => {
+                self.section = None;
+                self.section_uniform_air = true;
+                world.air
+            }
+        }
+    }
+}
+
 impl MobWorld<'_> {
+    /// `Level.getEntity(uuid)`: the entity a UUID a mob stored names, while it
+    /// is in the level. Nothing when this world keeps no entity UUIDs, or when
+    /// nothing loaded answers to it.
+    pub fn who_by_uuid(&self, uuid: [i32; 4]) -> Option<Who> {
+        self.who_lookup?.who_by_uuid(uuid)
+    }
+    /// `LivingEntity.setPosToBed` / `AbstractBedBlock.getSleepHeight`: the
+    /// same part selection and outline-height math as Game's bed route.
+    pub(super) fn sleeping_position(&self, head: [i32; 3]) -> Option<Vec3> {
+        use crate::bed_geometry::{SleepOn, pos_to_bed, shape_top, slept_on};
+        let state = self.world.block(head[0], head[1], head[2]);
+        let facts = self.facts.get(state);
+        if !facts.has_class("AbstractBedBlock") {
+            return None;
+        }
+        let part = self.prop(head[0], head[1], head[2], "part")?;
+        if !matches!(part, "head" | "foot") {
+            return None;
+        }
+        let facing = self.prop(head[0], head[1], head[2], "facing")?;
+        if !matches!(facing, "north" | "south" | "east" | "west") {
+            return None;
+        }
+        let forward = crate::stand_up::bed_forward(Some(facing));
+        let foot = [head[0] - forward[0], head[1], head[2] - forward[2]];
+        let on = slept_on(
+            &facts.name,
+            Some(part),
+            Some((
+                self.block_name(foot[0], foot[1], foot[2]),
+                self.prop(foot[0], foot[1], foot[2], "part"),
+            )),
+        )?;
+        let at = match on {
+            SleepOn::Head => head,
+            SleepOn::Foot => foot,
+        };
+        let outline = self.facts.get(self.world.block(at[0], at[1], at[2]));
+        // Bed outlines are static. Without an offset context, do not invent
+        // a position for a custom outline that requires one.
+        if outline.outline_offset {
+            return None;
+        }
+        let boxes: Vec<[f64; 6]> = outline
+            .outline
+            .iter()
+            .map(|b| std::array::from_fn(|i| f64::from(at[i % 3]) + b[i]))
+            .collect();
+        shape_top(&boxes, f64::from(at[1])).map(|height| pos_to_bed(head, height))
+    }
     /// The biome's base temperature at a position.
     pub fn temperature(&self, x: i32, y: i32, z: i32) -> f32 {
         self.world
@@ -136,13 +361,25 @@ impl MobWorld<'_> {
             binding: self.collision,
             subject: None,
         };
+        let mut cache = RaycastBlockCache::new();
         let result = traverse_blocks(from, to, 512, |p: BlockPos| {
-            let state = self.world.block(p.x, p.y, p.z);
+            let state = cache.block(self.world, p.x, p.y, p.z);
             if fluids_block && self.facts.get(state).fluid != Fluid::None {
                 return Some(());
             }
-            if self.facts.is_air(state) {
+            if cache.section_uniform_air || self.facts.is_air(state) {
                 return None;
+            }
+            if !self.collision.may_collide(state) {
+                return None;
+            }
+            // Scaffolding, liquids (a strider stands on lava) and powder snow
+            // take the entity's context; every other state has its cached shape.
+            let is_contextual = context.is_some() && self.collision.has_context_rule(state);
+            if !is_contextual
+                && let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state)
+            {
+                return shape.clip(from, to, p).map(|_| ());
             }
             let shape = match &context {
                 Some(context) => self
@@ -156,6 +393,46 @@ impl MobWorld<'_> {
             shape.clip(from, to, p).map(|_| ())
         });
         matches!(result, Ok(None))
+    }
+    /// Level.clip with OUTLINE shapes and no fluids for a mob (`getShape`
+    /// with its random offset, `CollisionContext.of(mob)`): the block the
+    /// segment first hits, if it does.
+    pub fn outline_hit(&self, from: Vec3, to: Vec3) -> Option<[i32; 3]> {
+        use horizon_world::collision_context::EntityContextKind;
+        let mut cache = RaycastBlockCache::new();
+        let result = traverse_blocks(from, to, 512, |p: BlockPos| {
+            let state = cache.block(self.world, p.x, p.y, p.z);
+            if cache.section_uniform_air || self.facts.is_air(state) {
+                return None;
+            }
+            let f = self.facts.get(state);
+            let o = if f.outline_offset {
+                f.offset_at(p.x, p.z)
+            } else {
+                [0.0; 3]
+            };
+            let o = Vec3::new(o[0], o[1], o[2]);
+            let declared = self
+                .collision
+                .cached_shapes()
+                .context_outline_shape(state, EntityContextKind::Living);
+            let hit = match declared {
+                Some(shape) => {
+                    VoxelShape::clip_boxes(shape.boxes().iter().map(|b| b.move_by(o)), from, to, p)
+                }
+                None => VoxelShape::clip_boxes(
+                    f.outline.iter().map(|b| {
+                        Aabb::new(Vec3::new(b[0], b[1], b[2]), Vec3::new(b[3], b[4], b[5]))
+                            .move_by(o)
+                    }),
+                    from,
+                    to,
+                    p,
+                ),
+            };
+            hit.map(|_| [p.x, p.y, p.z])
+        });
+        result.ok().flatten()
     }
     /// Level.clip with VISUAL shapes and no fluids: true on a miss.
     pub fn visual_clear_between(&self, from: Vec3, to: Vec3) -> bool {
@@ -172,7 +449,8 @@ impl MobWorld<'_> {
             binding: self.collision,
             subject: None,
         };
-        let state = |x, y, z| self.world.block(x, y, z);
+        let cache = std::cell::RefCell::new(RaycastBlockCache::new());
+        let state = |x, y, z| cache.borrow_mut().block(self.world, x, y, z);
         visual_clip(self.facts, self.collision, &mut scene, &state, from, to)
     }
     /// Level.clip with COLLIDER shapes and no fluids: where the segment
@@ -183,10 +461,17 @@ impl MobWorld<'_> {
             binding: self.collision,
             subject: None,
         };
+        let mut cache = RaycastBlockCache::new();
         let result = traverse_blocks(from, to, 512, |p: BlockPos| {
-            let state = self.world.block(p.x, p.y, p.z);
-            if self.facts.is_air(state) {
+            let state = cache.block(self.world, p.x, p.y, p.z);
+            if cache.section_uniform_air || self.facts.is_air(state) {
                 return None;
+            }
+            if !self.collision.may_collide(state) {
+                return None;
+            }
+            if let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state) {
+                return shape.clip(from, to, p).map(|hit| hit.location);
             }
             let shape = self
                 .collision
@@ -204,10 +489,17 @@ impl MobWorld<'_> {
             binding: self.collision,
             subject: None,
         };
+        let mut cache = RaycastBlockCache::new();
         let result = traverse_blocks(from, to, 512, |p: BlockPos| {
-            let state = self.world.block(p.x, p.y, p.z);
-            if self.facts.is_air(state) {
+            let state = cache.block(self.world, p.x, p.y, p.z);
+            if cache.section_uniform_air || self.facts.is_air(state) {
                 return None;
+            }
+            if !self.collision.may_collide(state) {
+                return None;
+            }
+            if let Ok(Some(shape)) = self.collision.cached_shapes().cached_shape(state) {
+                return shape.clip(from, to, p).map(|_| [p.x, p.y, p.z]);
             }
             let shape = self
                 .collision
@@ -252,7 +544,7 @@ impl MobWorld<'_> {
     }
     /// Level.canSeeSky: sky light 15 at the position (no roof above).
     pub fn can_see_sky(&self, x: i32, y: i32, z: i32) -> bool {
-        if self.nether {
+        if !self.dimension_type.height.has_skylight {
             return false;
         }
         self.world.light(x, y, z) >> 4 == 15
@@ -271,6 +563,21 @@ impl MobWorld<'_> {
         }
         Some(biome.temperature_at(BlockPos::new(x, y, z), self.sea_level) >= 0.15)
     }
+    /// `Entity.isInClouds`: a dimension whose `visual/cloud_color` is
+    /// transparent has no clouds, else the cloud band is the four blocks from
+    /// `visual/cloud_height` up, and a box that reaches it is in the clouds.
+    pub fn in_clouds(&self, y: f64, height: f64) -> bool {
+        let dimension = self.dimension_type;
+        if dimension.cloud_color_alpha == 0.0 {
+            return false;
+        }
+        let bottom = dimension.cloud_height;
+        if y + height < f64::from(bottom) {
+            return false;
+        }
+        // `cloudBottom + 4.0F`, added in f32 as vanilla does.
+        y <= f64::from(bottom + 4.0)
+    }
     /// Level.isRainingAt: the precipitation at the position is rain, not snow
     /// or none.
     pub fn raining_at(&self, x: i32, y: i32, z: i32) -> bool {
@@ -285,7 +592,12 @@ impl MobWorld<'_> {
         // DimensionType.getBrightness with ambient light 0 (overworld) / 0.1 (nether).
         let f = level / 15.0;
         let base = f / (4.0 - 3.0 * f);
-        if self.nether { 0.1 + base * 0.9 } else { base }
+        // The End's ambient light (0.25) is not applied here, as before.
+        if self.level == horizon_core::LevelKey::NETHER {
+            0.1 + base * 0.9
+        } else {
+            base
+        }
     }
     pub fn sky_darken(&self) -> i32 {
         if self.daylight { 0 } else { 11 }
@@ -331,24 +643,49 @@ impl MobWorld<'_> {
     }
     /// The other mobs whose boxes may meet `area` (callers test the boxes),
     /// in snapshot order: through the grid when there is one, else all.
-    pub fn others_near(&self, area: Aabb) -> impl Iterator<Item = &Seen> {
-        let mut near = Vec::new();
+    pub fn others_near(&self, area: Aabb) -> NearIter<'_> {
+        let mut buf = NEAR_BUF_POOL.with(|pool| {
+            pool.try_borrow_mut()
+                .ok()
+                .and_then(|mut p| p.pop())
+                .unwrap_or_default()
+        });
         let indexed = self
             .others_grid
-            .is_some_and(|grid| grid.candidates(area, &mut near));
-        let all = (!indexed).then(|| self.others.iter());
-        near.into_iter()
-            .map(|i| &self.others[i as usize])
-            .chain(all.into_iter().flatten())
+            .is_some_and(|grid| grid.candidates(area, &mut buf));
+        if indexed {
+            NearIter {
+                others: self.others,
+                indices: Some(buf),
+                pos: 0,
+                fallback: None,
+            }
+        } else {
+            buf.clear();
+            NEAR_BUF_POOL.with(|pool| {
+                if let Ok(mut pool) = pool.try_borrow_mut()
+                    && pool.len() < 8
+                {
+                    pool.push(buf);
+                }
+            });
+            NearIter {
+                others: self.others,
+                indices: None,
+                pos: 0,
+                fallback: Some(self.others.iter()),
+            }
+        }
     }
     pub fn seen(&self, id: u32) -> Option<&Seen> {
-        match self.others_index {
+        let own = match self.others_index {
             Some(index) => index
                 .get(&id)
                 .and_then(|&i| self.others.get(i as usize))
                 .filter(|s| s.id == id),
             None => self.others.iter().find(|s| s.id == id),
-        }
+        };
+        own.or_else(|| self.foreign?.seen(id))
     }
     /// Living mobs of the given species within `range` of `from`, nearest first.
     pub fn nearby<'s>(
@@ -364,7 +701,7 @@ impl MobWorld<'_> {
             Vec3::new(from.x - r, from.y - r, from.z - r),
             Vec3::new(from.x + r, from.y + r, from.z + r),
         );
-        let mut v: Vec<&Seen> = self
+        let mut v: Vec<(f64, &Seen)> = self
             .others_near(area)
             .filter(|s| {
                 s.alive
@@ -373,17 +710,15 @@ impl MobWorld<'_> {
                     && (s.position.z - from.z).abs() <= range
             })
             .filter(move |s| pred(s))
+            .map(|s| {
+                let d = (s.position.x - from.x).powi(2)
+                    + (s.position.y - from.y).powi(2)
+                    + (s.position.z - from.z).powi(2);
+                (d, s)
+            })
             .collect();
-        v.sort_by(|a, b| {
-            let da = (a.position.x - from.x).powi(2)
-                + (a.position.y - from.y).powi(2)
-                + (a.position.z - from.z).powi(2);
-            let db = (b.position.x - from.x).powi(2)
-                + (b.position.y - from.y).powi(2)
-                + (b.position.z - from.z).powi(2);
-            da.total_cmp(&db)
-        });
-        v.into_iter()
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v.into_iter().map(|(_, s)| s)
     }
 }
 
@@ -420,6 +755,9 @@ pub fn visual_clip<W: DynamicCollisionWorld>(
                 .clip(from, to)
                 .map(|_| [p.x, p.y, p.z]);
         }
+        if let Ok(Some(shape)) = collision.cached_shapes().cached_shape(id) {
+            return shape.clip(from, to, p).map(|_| [p.x, p.y, p.z]);
+        }
         let shape = collision.collision_shape(scene, id, [p.x, p.y, p.z]).ok()?;
         shape.clip(from, to, p).map(|_| [p.x, p.y, p.z])
     });
@@ -454,10 +792,10 @@ pub(crate) fn with_built_test_world_rules(
     build: impl FnOnce(&mut crate::world::World, &horizon_world::registry::BlockRegistry),
     f: impl FnOnce(&MobWorld<'_>, &super::MobTypes),
 ) -> bool {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.local/horizon-client")
-        .join(horizon_core::VANILLA_VERSION);
-    with_resource_test_world(&root, others, mob_griefing, mob_drops, build, f)
+    let Some(resources) = TestResources::vanilla() else {
+        return false;
+    };
+    run_test_world(resources, others, mob_griefing, mob_drops, build, f)
 }
 /// The same mob world loaded from a content mod's resource root.
 #[cfg(test)]
@@ -469,26 +807,101 @@ pub(crate) fn with_resource_test_world(
     build: impl FnOnce(&mut crate::world::World, &horizon_world::registry::BlockRegistry),
     f: impl FnOnce(&MobWorld<'_>, &super::MobTypes),
 ) -> bool {
-    if !root.join("entity-types.json").exists() || !root.join("movement-properties.nbt").exists() {
+    // A mod's root is a scratch folder the test wrote: read it as it is now.
+    let Some(resources) = TestResources::load(root) else {
         return false;
+    };
+    run_test_world(&resources, others, mob_griefing, mob_drops, build, f)
+}
+/// What every mob test world reads from its resource root. Tests only read
+/// it (each builds its own `World` over it), so the vanilla root's copy is
+/// loaded once per test process: the load took most of a mob test's time.
+#[cfg(test)]
+struct TestResources {
+    assets: crate::assets::Assets,
+    facts: BlockFacts,
+    motion: crate::motion::MotionResources,
+    data: super::MobData,
+    types: super::MobTypes,
+    biomes: crate::biome::Biomes,
+    items: crate::items::Items,
+    collision: std::sync::Arc<BlockCollisionRegistry<'static>>,
+    suffocation: horizon_world::suffocation::SuffocationRegistry<'static>,
+}
+#[cfg(test)]
+impl TestResources {
+    /// `None` when `root` has no prepared vanilla data.
+    fn load(root: &std::path::Path) -> Option<Self> {
+        if !root.join("entity-types.json").exists()
+            || !root.join("movement-properties.nbt").exists()
+        {
+            return None;
+        }
+        let assets = crate::assets::Assets::load(root).unwrap();
+        let registry = assets.registry;
+        let facts = BlockFacts::load(root, registry).unwrap();
+        let motion = crate::motion::MotionResources::load(root, &assets).unwrap();
+        let data = super::MobData::load(root, &facts);
+        let types = super::MobTypes::load(root).unwrap();
+        let biomes = crate::biome::Biomes::load(root).unwrap();
+        let items = crate::items::Items::load(
+            root,
+            registry,
+            &facts,
+            &horizon_world::loot::PackOverlay::NONE,
+        )
+        .unwrap();
+        let collision = std::sync::Arc::new(crate::collisions::load(root, registry).unwrap());
+        let suffocation =
+            super::suffocation::bind(collision.clone(), &motion.causes_suffocation).unwrap();
+        Some(Self {
+            assets,
+            facts,
+            motion,
+            data,
+            types,
+            biomes,
+            items,
+            collision,
+            suffocation,
+        })
     }
-    let assets = crate::assets::Assets::load(root).unwrap();
+    /// The checkout's prepared vanilla data, loaded on first use; `None`
+    /// when it is missing.
+    fn vanilla() -> Option<&'static Self> {
+        static VANILLA: std::sync::OnceLock<Option<TestResources>> = std::sync::OnceLock::new();
+        VANILLA
+            .get_or_init(|| {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION);
+                Self::load(&root)
+            })
+            .as_ref()
+    }
+}
+/// Runs `f` over a fresh `World` (`build` places its blocks) on `resources`.
+#[cfg(test)]
+fn run_test_world(
+    resources: &TestResources,
+    others: &[Seen],
+    mob_griefing: bool,
+    mob_drops: bool,
+    build: impl FnOnce(&mut crate::world::World, &horizon_world::registry::BlockRegistry),
+    f: impl FnOnce(&MobWorld<'_>, &super::MobTypes),
+) -> bool {
+    let TestResources {
+        assets,
+        facts,
+        motion,
+        data,
+        types,
+        biomes,
+        items,
+        collision,
+        suffocation,
+    } = resources;
     let registry = assets.registry;
-    let facts = BlockFacts::load(root, registry).unwrap();
-    let motion = crate::motion::MotionResources::load(root, &assets).unwrap();
-    let data = super::MobData::load(root, &facts);
-    let types = super::MobTypes::load(root).unwrap();
-    let biomes = crate::biome::Biomes::load(root).unwrap();
-    let items = crate::items::Items::load(
-        root,
-        registry,
-        &facts,
-        &horizon_world::loot::PackOverlay::NONE,
-    )
-    .unwrap();
-    let collision = std::sync::Arc::new(crate::collisions::load(root, registry).unwrap());
-    let suffocation =
-        crate::mobs::suffocation::bind(collision.clone(), &motion.causes_suffocation).unwrap();
     let air = registry.default_state("minecraft:air").unwrap();
     let mut world = crate::world::World::new(air, 0);
     build(&mut world, registry);
@@ -497,18 +910,20 @@ pub(crate) fn with_resource_test_world(
         teams: Default::default(),
         world: &world,
         registry,
-        facts: &facts,
+        facts,
         fluid_tables: &motion.fluids,
         movement: &motion.blocks,
-        collision: &collision,
-        suffocation: &suffocation,
-        data: &data,
+        collision,
+        suffocation,
+        data,
         player: None,
         controlling_player_movement: None,
         nearest_player: None,
         others,
         dragon: None,
         leash_boats: &[],
+        who_lookup: None,
+        foreign: None,
         others_grid: None,
         others_index: None,
         others_villagers: None,
@@ -519,24 +934,24 @@ pub(crate) fn with_resource_test_world(
         day_time: 18000,
         raining: false,
         thundering: false,
-        nether: false,
+        level: horizon_core::LevelKey::OVERWORLD,
         block_tags: &items.block_tags,
         landing: &motion.landing,
-        biomes: &biomes,
+        biomes,
         mob_griefing,
         universal_anger: false,
         mob_drops,
         max_entity_cramming: 24,
         difficulty: super::spawning::LocalDifficulty::new(2, 18000, 0, 0.0),
-        end: false,
+        dimension_type: horizon_world::dimension_type::DimensionFacts::overworld(),
         world_seed: 0,
         sea_level: 63,
-        items: Some(&items),
+        items: Some(items),
         lid_openers: &lid_openers,
         mod_effects: None,
         border: None,
     };
-    f(&w, &types);
+    f(&w, types);
     true
 }
 /// A player standing at `position` in survival, as mobs see one.

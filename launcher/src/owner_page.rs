@@ -8,19 +8,10 @@ impl Launcher {
     /// Whether the screen covers the window: no owner, and either Play was refused or the player
     /// hasn't read it yet. The data question comes first.
     pub(crate) fn asking_owner(&self) -> bool {
-        (self.owner_shown() == Some(false) || sign_in_preview())
+        (self.owner == Some(false) || sign_in_preview())
             && (self.owner_screen_open || !self.settings.owner_notice_seen || sign_in_preview())
             && !self.asking_consent()
             && self.opening.is_none()
-    }
-
-    /// `owner` as the window shows it: the developer option that lets offline names play without
-    /// an owner (`dev_options`) hides the gate, as if the keychain hadn't answered yet.
-    pub(crate) fn owner_shown(&self) -> Option<bool> {
-        match self.owner {
-            Some(false) if self.settings.dev_offline => None,
-            owner => owner,
-        }
     }
 
     /// Opens the screen and starts the sign-in on it.
@@ -83,10 +74,6 @@ impl Launcher {
             .child(line(
                 "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
                 n.ink_soft,
-            ))
-            .child(line(
-                "Your worlds, offline names and settings stay where they are.",
-                n.muted,
             ));
         let raised = || {
             div()
@@ -101,6 +88,8 @@ impl Launcher {
         body = match state {
             Shown::Code(uri, user_code) => {
                 let copy = user_code.to_string();
+                let (private_uri, link_uri, other_uri) =
+                    (uri.to_string(), uri.to_string(), uri.to_string());
                 body.child(
                     raised()
                         .flex()
@@ -142,6 +131,49 @@ impl Launcher {
                                         gpui::ClipboardItem::new_string(copy.clone()),
                                     )
                                 }),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(4.))
+                        .when(!microsoft::has_private_window(), |col| {
+                            col.child(shell::text(theme::night::CAPTION, shell::c(n.muted)).child(
+                                tr("Open this link in a private window to pick another account."),
+                            ))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(if microsoft::has_private_window() {
+                                    shell::action("owner-private", shell::Action::Quiet, &t)
+                                        .child(shell::label(tr("Open in private window")))
+                                        .on_click(move |_, _, cx| {
+                                            microsoft::open_private(&private_uri, cx)
+                                        })
+                                } else {
+                                    shell::action("owner-copy-link", shell::Action::Quiet, &t)
+                                        .child(shell::label(tr("Copy link")))
+                                        .on_click(move |_, _, cx| {
+                                            copy_to_clipboard(
+                                                cx,
+                                                gpui::ClipboardItem::new_string(link_uri.clone()),
+                                            )
+                                        })
+                                })
+                                .child(
+                                    shell::action("owner-other", shell::Action::Quiet, &t)
+                                        .child(shell::label(tr(
+                                            "Use a different Microsoft account",
+                                        )))
+                                        .on_click(move |_, _, cx| {
+                                            microsoft::use_different_account(&other_uri, cx)
+                                        }),
+                                ),
                         ),
                 )
             }
@@ -280,14 +312,13 @@ impl Launcher {
                     )))
                     .child(ui::text(14., FontWeight::NORMAL, ink::BODY).child(tr(
                         "No Minecraft install needed: Horizon downloads it from Mojang for your account.",
-                    )))
-                    .child(ui::text(14., FontWeight::NORMAL, ink::QUIET).child(tr(
-                        "Your worlds, offline names and settings stay where they are.",
-                    ))),
+))),
             );
         card = match state {
             Shown::Code(uri, user_code) => {
                 let copy = user_code.to_string();
+                let (private_uri, link_uri, other_uri) =
+                    (uri.to_string(), uri.to_string(), uri.to_string());
                 card.child(
                     panel()
                         .flex()
@@ -320,6 +351,57 @@ impl Launcher {
                                 copy_to_clipboard(cx, gpui::ClipboardItem::new_string(copy.clone()))
                             },
                         )),
+                )
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(4.))
+                        .when(!microsoft::has_private_window(), |col| {
+                            col.child(ui::text(13., FontWeight::NORMAL, ink::QUIET).child(tr(
+                                "Open this link in a private window to pick another account.",
+                            )))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .child(if microsoft::has_private_window() {
+                                    ui::quiet(
+                                        "owner-private",
+                                        tr("Open in private window"),
+                                        32.,
+                                        &t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| microsoft::open_private(&private_uri, cx),
+                                    )
+                                } else {
+                                    ui::quiet("owner-copy-link", tr("Copy link"), 32., &t).on_click(
+                                        move |_, _, cx| {
+                                            copy_to_clipboard(
+                                                cx,
+                                                gpui::ClipboardItem::new_string(link_uri.clone()),
+                                            )
+                                        },
+                                    )
+                                })
+                                .child(
+                                    ui::quiet(
+                                        "owner-other",
+                                        tr("Use a different Microsoft account"),
+                                        32.,
+                                        &t,
+                                    )
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            microsoft::use_different_account(&other_uri, cx)
+                                        },
+                                    ),
+                                ),
+                        ),
                 )
             }
             Shown::Starting(what) => card

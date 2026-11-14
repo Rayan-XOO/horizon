@@ -15,6 +15,7 @@ use horizon_client::{
     items::ItemStack,
     lan::data::component_nbt,
     mod_api::{NativeCommandInfo, NativeCommandResult},
+    server::user_lists::{NameAndId, WhiteEntry},
     text::Text,
 };
 use horizon_protocol::packets::play::{self, Clientbound as C};
@@ -24,7 +25,6 @@ use std::{collections::HashMap, path::PathBuf};
 /// A sidebar a server mod shows one player (`native_sidebar`): its title and
 /// up to 15 lines, top first, each a text on the left and, where the score's
 /// number would be, an optional text on the right. API 49.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct NativeSidebar {
     pub(crate) title: Text,
@@ -88,8 +88,15 @@ fn usage_nodes(usage: &str) -> Result<Vec<(String, Value, bool)>, String> {
             if optional_seen {
                 return Err(format!("`{usage}`: `{word}` follows an optional argument"));
             }
-            let literal = !word.is_empty()
-                && word
+            // A command's name may start with slashes (WorldEdit's `//set`
+            // is the root `/set`); the typed line arrives without its first slash.
+            let checked = if out.is_empty() {
+                word.trim_start_matches('/')
+            } else {
+                word
+            };
+            let literal = !checked.is_empty()
+                && checked
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c));
             if !literal {
@@ -124,11 +131,71 @@ fn usage_nodes(usage: &str) -> Result<Vec<(String, Value, bool)>, String> {
     Ok(out)
 }
 
+/// A usage's root as the tree keys it (its slashes kept).
+fn usage_root(usage: &str) -> &str {
+    usage.split(' ').next().unwrap_or_default()
+}
+
+/// The words a line types, its root without the slashes a usage may start with.
+fn typed_words(line: &str) -> Vec<&str> {
+    line.split(' ')
+        .enumerate()
+        .map(|(i, w)| if i == 0 { w.trim_start_matches('/') } else { w })
+        .collect()
+}
+
+/// The literal words a usage starts with (`eco give` for `eco give <player:player>`), its root
+/// without slashes.
+fn literal_words(usage: &str) -> Vec<&str> {
+    usage
+        .split_whitespace()
+        .take_while(|w| !w.starts_with(['<', '[']))
+        .enumerate()
+        .map(|(i, w)| if i == 0 { w.trim_start_matches('/') } else { w })
+        .collect()
+}
+
+/// The usage a line runs: among the usages whose literal words start the line and whose arguments
+/// take its words, the one with the most literal words (the first of equals). None when no usage
+/// takes the line.
+fn usage_for_line<'h>(usages: &'h [NativeCommand], line: &str) -> Option<&'h NativeCommand> {
+    let typed = typed_words(line);
+    let mut best: Option<(usize, &NativeCommand)> = None;
+    for usage in usages {
+        let Ok(nodes) = usage_nodes(&usage.usage) else {
+            continue;
+        };
+        let literal = literal_words(&usage.usage);
+        let required = nodes.iter().filter(|n| !n.2).count();
+        let greedy = nodes.iter().any(|n| n.1["properties"]["type"] == "greedy");
+        let fits = typed.len() >= required && (typed.len() <= nodes.len() || greedy);
+        let starts =
+            literal.len() <= typed.len() && literal.iter().zip(&typed).all(|(a, b)| a == b);
+        if fits && starts && best.is_none_or(|(n, _)| literal.len() > n) {
+            best = Some((literal.len(), usage));
+        }
+    }
+    best.map(|(_, usage)| usage)
+}
+
+/// The roots of the mods' commands that have a permission node on some usage, sorted.
+fn permission_roots(usages: &[NativeCommand]) -> Vec<String> {
+    let mut roots: Vec<String> = usages
+        .iter()
+        .filter(|u| u.permission.is_some())
+        .map(|u| usage_root(&u.usage).to_owned())
+        .collect();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 /// Native mods' commands as a root in the commands report's format
 /// (`lan::commands`, which sends each player what their level allows), and
 /// each command's level: the lowest of its usages. A node is runnable where
 /// only optional arguments follow it. A command vanilla has (`vanilla`
-/// answers) or a usage that doesn't parse is left out, with why.
+/// answers) or a usage that doesn't parse is left out, with why, unless the
+/// usage replaces vanilla's (`NativeCommand::replace_vanilla`).
 pub(super) fn command_tree(
     commands: &[NativeCommand],
     vanilla: impl Fn(&str) -> bool,
@@ -144,7 +211,7 @@ pub(super) fn command_tree(
                 continue;
             }
         };
-        if vanilla(&nodes[0].0) {
+        if vanilla(&nodes[0].0) && !command.replace_vanilla {
             problems.push(format!("`{}`: vanilla has /{}", command.usage, nodes[0].0));
             continue;
         }
@@ -275,6 +342,18 @@ fn vanilla_command_info(d: &Dispatcher, label: &str) -> Option<NativeCommandInfo
 fn server_player(host: &LanHost, g: &horizon_client::lan::guest::Guest) -> NativeServerPlayer {
     // Abilities.invulnerable, flying and mayfly, as `ServerPlayer.onUpdateAbilities` sends them.
     let abilities = g.ability_flags();
+    // LivingEntity.DATA_LIVING_ENTITY_FLAGS: 1 while using, 2 when it is the off hand's item.
+    let using_item = g.living_flags & 1 != 0;
+    let using_slot = if g.living_flags & 2 != 0 {
+        super::shield::OFFHAND_SLOT
+    } else {
+        g.selected
+    };
+    let blocking = using_item
+        && g.inventory
+            .get(using_slot)
+            .and_then(|s| s.as_ref())
+            .is_some_and(|s| &*s.item == "minecraft:shield");
     NativeServerPlayer {
         uuid: g.uuid,
         name: g.name.clone(),
@@ -302,12 +381,17 @@ fn server_player(host: &LanHost, g: &horizon_client::lan::guest::Guest) -> Nativ
         selected_slot: g.selected as u8,
         nickname: host.hub.nicknames.get(&g.uuid).cloned(),
         hidden: host.hub.hidden.get(&g.uuid).copied(),
+        fake: g.fake,
+        using_item,
+        blocking,
+        sprinting: g.sprinting,
+        gliding: g.fall_flying,
     }
 }
 
 /// Helpers for server mods, kept as stable as the hook points.
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "native mod API (docs/native-mods.md)")]
 impl Game<'_> {
     /// The players on this server, in the order they joined. Empty on a
     /// client and in a world nobody else can join.
@@ -326,6 +410,16 @@ impl Game<'_> {
     /// the acting player; false when they aren't on.
     pub(super) fn native_tell(&mut self, uuid: u128, line: Text) -> bool {
         self.native_send(uuid, system_chat(&line))
+    }
+    /// A line in chat as that player, disguised: no signature, named as the player is shown, to
+    /// every player who shows chat (a mod's character, a bot's line). `line` keeps its styling,
+    /// so click and hover events work as in `native_tell`. False when the player isn't on, and
+    /// inside a player's hook, where the hub is out of reach. API 606.
+    pub(super) fn native_chat_as(&self, uuid: u128, line: Text) -> bool {
+        let Some(host) = &self.lan else {
+            return false;
+        };
+        host.hub.chat_as(uuid, component_nbt(&line.component()))
     }
     /// A line over that player's hotbar (the action bar), also inside a
     /// player's hook for the acting player; false when they aren't on. API 21.
@@ -495,7 +589,7 @@ impl Game<'_> {
     /// another id (hide them again from `native_player_logged_in`). Only
     /// where no player's state is swapped in, as `native_run_command`; false
     /// there, when `viewer` isn't on and for their own entity. API
-    /// @API:hide_entity_from@.
+    /// 523.
     pub(super) fn native_hide_entity_from(
         &mut self,
         viewer: u128,
@@ -534,7 +628,7 @@ impl Game<'_> {
     /// later (they join, a vanish ends), so it is kept until a mod sets it
     /// again or the server stops, also if they leave and come back. Only
     /// where no player's state is swapped in, as `native_run_command`; false
-    /// there and when they aren't on. API @API:set_list_name@.
+    /// there and when they aren't on. API 552.
     pub(super) fn native_set_list_name(&mut self, uuid: u128, name: Option<&Text>) -> bool {
         let Some(host) = &mut self.lan else {
             return false;
@@ -556,7 +650,7 @@ impl Game<'_> {
     /// or the nickname. Kept until a mod sets it again or the server stops,
     /// also if they leave and come back. Only where no player's state is
     /// swapped in, as `native_run_command`; false there and when they aren't
-    /// on. API @API:set_display_name@.
+    /// on. API 551.
     pub(super) fn native_set_display_name(&mut self, uuid: u128, name: Option<&Text>) -> bool {
         let Some(host) = &mut self.lan else {
             return false;
@@ -583,7 +677,7 @@ impl Game<'_> {
     /// mod sets it again or the server stops, also if they leave and come
     /// back. Only where no player's state is swapped in, as
     /// `native_run_command`; false there, when they aren't on and for a tag
-    /// that isn't one. API @API:set_name_tag@.
+    /// that isn't one. API 553.
     pub(super) fn native_set_name_tag(&mut self, uuid: u128, tag: Option<&str>) -> bool {
         if tag.is_some_and(|t| {
             t.is_empty() || t.len() > 16 || !t.bytes().all(|b| b.is_ascii_graphic())
@@ -608,7 +702,7 @@ impl Game<'_> {
             host.hub
                 .chat_filter
                 .as_ref()
-                .is_none_or(|g| !g.filter.matches(text)),
+                .is_none_or(|g| !g.matches(text)),
         )
     }
     /// A system line in every player's chat and the server's log.
@@ -624,13 +718,130 @@ impl Game<'_> {
         } else {
             log::info!("{plain}");
         }
+        self.send_system_line(&line);
+    }
+    /// A system line in every player's chat, as `native_broadcast` sends it
+    /// but neither in the server's log nor past the mods' `broadcast_message`
+    /// hook (a mod's own line, which it logs itself). API 608.
+    pub(super) fn native_broadcast_quiet(&self, line: Text) {
+        self.send_system_line(&line);
+    }
+    fn send_system_line(&self, line: &Text) {
         let Some(host) = &self.lan else {
             return;
         };
-        let packet = system_chat(&line);
+        let packet = system_chat(line);
         for g in host.hub.guests.iter().filter(|g| g.placed) {
             host.hub.send_to(g.conn, &packet);
         }
+    }
+    /// The open world's folder name, which is the level name the server
+    /// opened (`level-name` in server.properties on a dedicated server).
+    /// None when no world is open. API 617.
+    pub(super) fn native_level_name(&self) -> Option<String> {
+        self.world_root.file_name()?.to_str().map(str::to_owned)
+    }
+    /// The dimension a world folder holds: `world` is `minecraft:overworld`,
+    /// `world_nether` `minecraft:the_nether`, `world_the_end` `minecraft:the_end`
+    /// (the folder names Bukkit's default worlds use). None for any other
+    /// name. API 617.
+    pub(super) fn native_dimension_of_world(&self, world: &str) -> Option<String> {
+        dimension_of_world(world).map(str::to_owned)
+    }
+    /// The world folder name that holds `dimension` (the reverse of
+    /// `native_dimension_of_world`); None for any other dimension id. API 617.
+    pub(super) fn native_world_of_dimension(&self, dimension: &str) -> Option<String> {
+        world_of_dimension(dimension).map(str::to_owned)
+    }
+    /// The server's motd from server.properties, as the list ping shows it;
+    /// empty when no server runs. API 608.
+    pub(super) fn native_motd(&self) -> String {
+        self.lan
+            .as_ref()
+            .map(|lan| lan.hub.lan.shared.motd())
+            .unwrap_or_default()
+    }
+    /// Whether the dedicated server runs in online mode (`online-mode` of server.properties):
+    /// its players sign in with their accounts. None off a dedicated server and before it listens.
+    /// API 641.
+    pub(super) fn native_online_mode(&self) -> Option<bool> {
+        Some(online_mode_of(&self.dedicated_lan()?.shared.config))
+    }
+    /// The port the dedicated server listens on: `server-port` of server.properties, or the
+    /// `--port` it was started with. None off a dedicated server and before it listens.
+    /// API 641.
+    pub(super) fn native_server_port(&self) -> Option<u16> {
+        Some(self.dedicated_lan()?.port)
+    }
+    /// How the dedicated server takes its players from a proxy: `"velocity"` when it signs the
+    /// forwarded player information with `forwarding.secret` (offline mode behind Velocity),
+    /// `"none"` when it doesn't; None off a dedicated server and before it listens. The secret
+    /// itself is never returned. API 641.
+    pub(super) fn native_proxy_forwarding(&self) -> Option<&'static str> {
+        Some(proxy_forwarding_of(&self.dedicated_lan()?.shared.config))
+    }
+    /// The listening socket of a dedicated server; None on any other side and before it listens.
+    fn dedicated_lan(&self) -> Option<&horizon_client::lan::Lan> {
+        self.options.dedicated.as_ref()?;
+        Some(&self.lan.as_ref()?.hub.lan)
+    }
+    /// Whether a player has played on the open world before: their player
+    /// data file is there (`players/data/<uuid>.dat`). False when no world
+    /// is open. API 608.
+    pub(super) fn native_has_played_before(&self, uuid: u128) -> bool {
+        !self.world_root.as_os_str().is_empty()
+            && horizon_client::lan::playerdata::path(&self.world_root, uuid).is_file()
+    }
+
+    /// Writes a line to the server's log at `level` (`INFO`, `WARN` or
+    /// `ERROR`), in the console's format on a dedicated server. API 583.
+    pub(super) fn native_log(&self, level: &str, line: &str) {
+        if self.options.dedicated.is_some() {
+            super::dedicated::log(level, line);
+        } else {
+            match level {
+                "WARN" => log::warn!("{line}"),
+                "ERROR" => log::error!("{line}"),
+                _ => log::info!("{line}"),
+            }
+        }
+    }
+    /// Adds a player to the dedicated server's whitelist (`whitelist add`
+    /// in the console, the file saved as it does). True when they were not
+    /// on it; false when no dedicated server runs or they already are.
+    /// API 586.
+    pub(super) fn native_whitelist_add(&self, uuid: u128, name: &str) -> bool {
+        let Some(lists) = &self.server_lists else {
+            return false;
+        };
+        let user = NameAndId {
+            id: uuid,
+            name: name.to_owned(),
+        };
+        let mut l = lists.lock().unwrap();
+        if l.white.contains(&user) {
+            return false;
+        }
+        l.white.add(WhiteEntry { user });
+        true
+    }
+    /// Removes a player from the dedicated server's whitelist (`whitelist
+    /// remove`); with the whitelist on, the players no longer on it are
+    /// disconnected. True when they were on it; false when no dedicated
+    /// server runs or they were not. API 586.
+    pub(super) fn native_whitelist_remove(&mut self, uuid: u128, name: &str) -> bool {
+        let Some(lists) = self.server_lists.clone() else {
+            return false;
+        };
+        let user = NameAndId {
+            id: uuid,
+            name: name.to_owned(),
+        };
+        let removed = lists.lock().unwrap().white.remove(&user);
+        if removed {
+            self.kick_unlisted_players(&lists);
+        }
+        removed
     }
     /// Posts a line to the dedicated server's event stream (`GET /api/v1/events`)
     /// as an `announce` event, which horizon-server's Discord bridge relays when
@@ -696,7 +907,13 @@ impl Game<'_> {
             selected_slot: self.selected as u8,
             nickname: hub.as_ref().and_then(|h| h.nickname.clone()),
             hidden: hub.as_ref().and_then(|h| h.hidden),
+            fake: false,
             address: hub.map(|h| h.address).unwrap_or_default(),
+            using_item: self.using.is_some(),
+            blocking: self.using.is_some()
+                && self.held().is_some_and(|s| &*s.item == "minecraft:shield"),
+            sprinting: p.sprinting,
+            gliding: p.fall_flying,
         })
     }
     /// The permission level of a player who is on the server or joining it:
@@ -706,7 +923,7 @@ impl Game<'_> {
     /// player it hears, whose level is set by then: a login gate needs no
     /// `ops.json` of its own. Inside a player's hook, with the hub out of
     /// reach, only that player is found. None for a player who isn't on, and
-    /// on a client. API @API:player_permission@.
+    /// on a client. API 485.
     pub(super) fn native_player_permission(&self, player: u128) -> Option<u8> {
         if let Some((uuid, level)) = self.native_login_permission
             && uuid == player
@@ -771,7 +988,7 @@ impl Game<'_> {
     /// anything else to vanilla's. The lines it answers with come back in
     /// `output` and reach no one else, operators included. Only where
     /// `native_run_command` runs: inside a player's hook nothing runs. API
-    /// @API:run_command_captured@.
+    /// 502.
     pub(super) fn native_run_command_captured(&mut self, line: &str) -> NativeCommandResult {
         let mut out = NativeCommandResult::default();
         if self.lan_acting.is_some() || self.lan.is_none() {
@@ -810,14 +1027,14 @@ impl Game<'_> {
     /// `Bukkit.dispatchCommand` from the console): a command a mod registered
     /// goes to the mods (`native_perform_console_command`), anything else to
     /// vanilla's. Whether it ran: a mod took it, or vanilla's ran without
-    /// failing. No output, as `native_run_command`. API @API:run_mod_command@.
+    /// failing. No output, as `native_run_command`. API 503.
     pub(super) fn native_run_mod_command(&mut self, line: &str) -> bool {
         self.native_run_command_captured(line).ran
     }
     /// The server's command `label` names (Bukkit's `CommandMap.getCommand`):
     /// one a mod registered (`native_register_commands`), else vanilla's, an
     /// alias resolved (`tp` gives `teleport`). None when there is none.
-    /// API @API:command_info@.
+    /// API 461.
     pub(super) fn native_command_info(&self, label: &str) -> Option<NativeCommandInfo> {
         let label = label.strip_prefix('/').unwrap_or(label);
         if let Some(host) = &self.lan
@@ -847,7 +1064,7 @@ impl Game<'_> {
     /// `output`. `native_player_command` doesn't hear it. Where
     /// `native_run_command` runs, or inside that player's own hook (then the
     /// lines join the hook's feedback); elsewhere, or for a player not on the
-    /// server, nothing runs. API @API:run_command_as@.
+    /// server, nothing runs. API 501.
     pub(super) fn native_run_command_as(&mut self, uuid: u128, line: &str) -> NativeCommandResult {
         let mut out = NativeCommandResult::default();
         let line = line.strip_prefix('/').unwrap_or(line).to_owned();
@@ -1038,7 +1255,6 @@ fn add_to(
 /// state is swapped in. Only plain stacks count; the inventory's 36 slots
 /// and the off hand, never the armour. Each change reaches the player's
 /// screen as any change to their inventory does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// The main hand's stack: its item, count, and whether it is plain. On a
     /// client, the player's own.
@@ -1198,7 +1414,6 @@ fn orb_meets(position: [f64; 3], min: [f64; 3], max: [f64; 3]) -> bool {
 }
 
 /// Experience for server mods. API 101.
-#[allow(dead_code)]
 impl Game<'_> {
     /// The experience orbs of the server level `dimension` whose box meets
     /// the box `min`..`max`, in the level's order: what a mod reads before it
@@ -1222,7 +1437,7 @@ impl Game<'_> {
             .map(|o| NativeExperienceOrb {
                 id: o.id,
                 position: [o.position.x, o.position.y, o.position.z],
-                value: o.value,
+                value: o.points(),
                 count: o.count,
             })
             .filter(|o| orb_meets(o.position, min, max))
@@ -1251,7 +1466,9 @@ impl Game<'_> {
         let Some(orb) = self.orbs.iter_mut().find(|o| o.id == id) else {
             return false;
         };
-        orb.value = value.unwrap_or(orb.value);
+        if let Some(value) = value {
+            orb.value = value.min(i32::MAX as u32) as i32;
+        }
         orb.count = count.unwrap_or(orb.count);
         orb.age = age.unwrap_or(orb.age);
         true
@@ -1287,7 +1504,7 @@ impl Game<'_> {
     /// they are the acting player (the host, or a guest swapped in), else a
     /// guest's through `as_guest`, only where no other player is swapped in.
     /// False when it didn't run: no such player here, or dead.
-    fn native_as_player(&mut self, uuid: u128, f: impl FnOnce(&mut Self)) -> bool {
+    pub(super) fn native_as_player(&mut self, uuid: u128, f: impl FnOnce(&mut Self)) -> bool {
         if uuid == self.native_acting_id() {
             if self
                 .player
@@ -1317,6 +1534,43 @@ impl Game<'_> {
         self.lan = Some(host);
         ran
     }
+}
+
+/// The default worlds' folder names and the dimension each holds.
+const DEFAULT_WORLDS: [(&str, &str); 3] = [
+    ("world", "minecraft:overworld"),
+    ("world_nether", "minecraft:the_nether"),
+    ("world_the_end", "minecraft:the_end"),
+];
+
+/// The online mode a dedicated server's network config carries: it has an
+/// `OnlineMode` key (and so signs its logins) only in online mode.
+fn online_mode_of(config: &horizon_client::lan::NetConfig) -> bool {
+    config.online.is_some()
+}
+
+/// The proxy forwarding a dedicated server's network config carries: the secret
+/// is set only offline behind a proxy (game/dedicated.rs `forwarding_secret`).
+fn proxy_forwarding_of(config: &horizon_client::lan::NetConfig) -> &'static str {
+    if config.forwarding_secret.is_some() {
+        "velocity"
+    } else {
+        "none"
+    }
+}
+
+fn dimension_of_world(world: &str) -> Option<&'static str> {
+    DEFAULT_WORLDS
+        .iter()
+        .find(|(name, _)| *name == world)
+        .map(|(_, dimension)| *dimension)
+}
+
+fn world_of_dimension(dimension: &str) -> Option<&'static str> {
+    DEFAULT_WORLDS
+        .iter()
+        .find(|(_, id)| *id == dimension)
+        .map(|(name, _)| *name)
 }
 
 fn system_chat(line: &Text) -> C {
@@ -1354,16 +1608,7 @@ impl Game<'_> {
                 .iter()
                 .any(|c| c.usage.split(' ').next() == Some(name.as_str()))
         });
-        for command in &commands {
-            let root = command.usage.split(' ').next().unwrap_or_default();
-            if let Some(node) = &command.permission
-                && levels.contains_key(root)
-                && !host.native_command_nodes.iter().any(|(r, _)| r == root)
-            {
-                host.native_command_nodes
-                    .push((root.to_owned(), node.clone()));
-            }
-        }
+        // Each usage keeps its own node and level (`usage_for_line`, `permission_roots`).
         host.native_usages = commands
             .into_iter()
             .filter(|c| {
@@ -1388,7 +1633,7 @@ impl Game<'_> {
     /// commands players may run are rebuilt, and every player on the server is
     /// sent their tree again, after `native_player_commands_sent`. Nothing
     /// happens where no world is open to players, and nothing for a server
-    /// whose mods never call it. API @API:refresh_commands@.
+    /// whose mods never call it. API 447.
     pub(super) fn native_refresh_commands(&mut self) {
         self.native_commands_refresh = true;
     }
@@ -1410,18 +1655,20 @@ impl Game<'_> {
             let above = host.hub.command_names_above(conn);
             let mut kept = names.clone();
             let mut hidden = above.clone();
-            // A mod's command with a permission node: the node decides.
+            // A mod's command with a permission node on some usage: its root is shown when any
+            // usage is allowed.
             let level = host.hub.guest(conn).map_or(0, |g| g.permission);
-            for (root, node) in &host.native_command_nodes {
-                let needs = Self::native_command_level(host, root).unwrap_or(4);
-                let allowed = self.has_permission_at(uuid, node, needs, level);
-                let shown = kept.contains(root);
-                if allowed && !shown && hidden.contains(root) {
-                    hidden.retain(|n| n != root);
-                    kept.push(root.clone());
+            for root in permission_roots(&host.native_usages) {
+                let allowed = host.native_usages.iter().any(|u| {
+                    usage_root(&u.usage) == root.as_str() && self.usage_allowed(uuid, u, level)
+                });
+                let shown = kept.contains(&root);
+                if allowed && !shown && hidden.contains(&root) {
+                    hidden.retain(|n| n != &root);
+                    kept.push(root);
                 } else if !allowed && shown {
-                    kept.retain(|n| n != root);
-                    hidden.push(root.clone());
+                    kept.retain(|n| n != &root);
+                    hidden.push(root);
                 }
             }
             let placed = host.hub.guest(conn).is_some_and(|g| g.placed);
@@ -1469,38 +1716,74 @@ impl Game<'_> {
     /// slash), when a mod registered it.
     pub(super) fn native_command_level(host: &LanHost, line: &str) -> Option<u8> {
         let name = line.split(' ').next().unwrap_or_default();
-        host.native_commands.as_ref()?.get(name).copied()
+        let commands = host.native_commands.as_ref()?;
+        commands
+            .get(name)
+            .or_else(|| commands.get(&format!("/{name}")))
+            .copied()
     }
 
-    /// The permission node of a mod's command (`line`, without its slash),
-    /// when it has one (`NativeCommand::permission`).
+    /// The permission node of the usage a mod's command line runs
+    /// (`line`, without its slash), when it has one (`NativeCommand::permission`).
+    /// Where no usage takes the line, the root's first node.
     pub(super) fn native_command_node<'h>(host: &'h LanHost, line: &str) -> Option<&'h str> {
-        let name = line.split(' ').next().unwrap_or_default();
-        host.native_command_nodes
-            .iter()
-            .find(|(root, _)| root == name)
-            .map(|(_, node)| node.as_str())
+        match usage_for_line(&host.native_usages, line) {
+            Some(usage) => usage.permission.as_deref(),
+            None => {
+                let root = typed_words(line).first().copied().unwrap_or_default();
+                host.native_usages
+                    .iter()
+                    .filter(|u| usage_root(&u.usage).trim_start_matches('/') == root)
+                    .find_map(|u| u.permission.as_deref())
+            }
+        }
+    }
+
+    /// Whether `uuid` at `permission` may run `usage`: its node decides when it has one (asked with
+    /// the usage's level), else the usage's level.
+    fn usage_allowed(&self, uuid: u128, usage: &NativeCommand, permission: u8) -> bool {
+        match &usage.permission {
+            Some(node) => self.has_permission_at(uuid, node, usage.level, permission),
+            None => usage.level <= permission,
+        }
+    }
+
+    /// Whether `uuid` at `permission` may run `line`: as the usage it matches, or, where no usage
+    /// takes its words, as any usage of its root.
+    fn line_allowed(
+        &self,
+        uuid: u128,
+        usages: &[NativeCommand],
+        line: &str,
+        permission: u8,
+    ) -> bool {
+        match usage_for_line(usages, line) {
+            Some(usage) => self.usage_allowed(uuid, usage, permission),
+            None => {
+                let root = typed_words(line).first().copied().unwrap_or_default();
+                usages.iter().any(|u| {
+                    usage_root(&u.usage).trim_start_matches('/') == root
+                        && self.usage_allowed(uuid, u, permission)
+                })
+            }
+        }
     }
 
     /// A guest's command for the mods, inside their swap
-    /// (`run_guest_command`): true when one ran it. A command with a
+    /// (`run_guest_command`): true when one ran it. A usage with a
     /// permission node asks `native_has_permission` instead of comparing
     /// levels.
     pub(super) fn perform_native_command(&mut self, conn: u32, permission: u8, line: &str) -> bool {
         let Some(host) = &self.lan else {
             return false;
         };
-        let Some(level) = Self::native_command_level(host, line) else {
+        if Self::native_command_level(host, line).is_none() {
             return false;
-        };
+        }
         let Some(g) = host.hub.guest(conn) else {
             return false;
         };
-        let allowed = match Self::native_command_node(host, line) {
-            Some(node) => self.has_permission_at(g.uuid, node, level, permission),
-            None => level <= permission,
-        };
-        if !allowed {
+        if !self.line_allowed(g.uuid, &host.native_usages, line, permission) {
             return false;
         }
         let player = NativeServerPlayer {
@@ -1710,6 +1993,40 @@ mod tests {
     }
 
     #[test]
+    fn each_usage_runs_with_its_own_node() {
+        let commands = [
+            NativeCommand::new("eco").permission("eco.see"),
+            NativeCommand::op("eco give <player:player> <amount:integer>", 3)
+                .permission("eco.give"),
+            NativeCommand::op("eco reset", 4),
+        ];
+        let usage = |line: &str| usage_for_line(&commands, line).map(|u| u.usage.clone());
+        let node = |line: &str| usage_for_line(&commands, line).and_then(|u| u.permission.clone());
+        assert_eq!(usage("eco").as_deref(), Some("eco"));
+        assert_eq!(
+            usage("/eco give bob 5").as_deref(),
+            Some("eco give <player:player> <amount:integer>")
+        );
+        assert_eq!(usage("eco give bob"), None, "too few words");
+        assert_eq!(usage("eco bob"), None, "the root takes no word");
+        assert_eq!(node("eco give bob 5").as_deref(), Some("eco.give"));
+        assert_eq!(node("eco reset"), None, "a usage without a node");
+        assert_eq!(permission_roots(&commands), ["eco"]);
+    }
+
+    #[test]
+    fn a_replacing_usage_takes_a_vanilla_name() {
+        let (t, levels, problems) =
+            tree(&[NativeCommand::new("give <x:integer>").replace_vanilla(true)]);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(levels["give"], 0);
+        assert_eq!(
+            t["children"]["give"]["children"]["x"]["parser"],
+            "brigadier:integer"
+        );
+    }
+
+    #[test]
     fn bad_usages_and_vanilla_names_are_left_out() {
         let (t, levels, problems) = tree(&[
             NativeCommand::new("give <x:integer>"),
@@ -1851,5 +2168,38 @@ mod tests {
         let (ran, lines) = run("time query time", true);
         assert!(ran && lines.is_empty(), "{lines:?}");
         assert!(game.console_broadcast.is_none());
+    }
+
+    #[test]
+    fn default_worlds_map_both_ways() {
+        assert_eq!(
+            dimension_of_world("world_nether"),
+            Some("minecraft:the_nether")
+        );
+        assert_eq!(
+            world_of_dimension("minecraft:the_end"),
+            Some("world_the_end")
+        );
+        assert_eq!(dimension_of_world("frontier"), None);
+        assert_eq!(world_of_dimension("minecraft:overworld"), Some("world"));
+        assert_eq!(world_of_dimension("world"), None);
+    }
+
+    #[test]
+    fn server_settings_follow_the_network_config() {
+        use horizon_client::lan::{NetConfig, OnlineMode};
+        let mut config = NetConfig::loopback(25565, String::new(), 20);
+        // online-mode=false, no proxy: no key, no forwarding secret.
+        assert!(!online_mode_of(&config));
+        assert_eq!(proxy_forwarding_of(&config), "none");
+        // online-mode=false behind Velocity: the secret is set.
+        config.forwarding_secret = Some(b"secret".to_vec());
+        assert!(!online_mode_of(&config));
+        assert_eq!(proxy_forwarding_of(&config), "velocity");
+        // online-mode=true: the server's key, and forwarding stays off.
+        config.forwarding_secret = None;
+        config.online = Some(std::sync::Arc::new(OnlineMode::generate(false).unwrap()));
+        assert!(online_mode_of(&config));
+        assert_eq!(proxy_forwarding_of(&config), "none");
     }
 }

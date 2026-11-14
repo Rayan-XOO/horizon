@@ -68,7 +68,13 @@ fn client_pose(m: &Mob, game_time: i64) -> (i64, bool) {
 /// The camel's `LAST_POSE_CHANGE_TICK` as the server sends it: in game time
 /// (a mob counts its own age), negative while sitting.
 pub fn synced_pose_tick(m: &Mob, game_time: i64) -> i64 {
-    let tick = (game_time - pose_time(m)).max(0);
+    // `egg_time` is a mob age: the game time of the last tick tells which
+    // game time that age was, however long the mob has not ticked since.
+    let now = m
+        .extra
+        .pose_epoch
+        .map_or(game_time, |epoch| epoch + i64::from(m.age));
+    let tick = (now - pose_time(m)).max(0);
     if sitting(m) { -tick.max(1) } else { tick }
 }
 /// `Entity.onSyncedDataUpdated` for the pose tick of a client mob: its sign
@@ -78,16 +84,25 @@ pub fn set_synced_pose_tick(m: &mut Mob, tick: i64) {
     m.extra.pose_change_tick = tick;
     m.extra.camel_sitting = tick < 0;
 }
-/// Put a camel loaded from `LastPoseTick` (kept in `pose_change_tick`) on
-/// the mob's own clock: the pose changed `game_time - |tick|` ticks ago. A
-/// save without the tag leaves it standing for good.
+/// A mob's age counts up by one in its tick; a camel also notes the game time
+/// that age matches.
+pub fn tick_age(m: &mut Mob, game_time: i64) {
+    m.age += 1;
+    if is_camel(m.species()) {
+        note_tick(m, game_time);
+    }
+}
+fn note_tick(m: &mut Mob, game_time: i64) {
+    m.extra.pose_epoch = Some(game_time - i64::from(m.age));
+}
+/// `Camel.getPoseTime`: put the loaded `LastPoseTick` on the mob's own
+/// clock. Zero is game-time zero, and a future tick has negative elapsed
+/// time; neither is an instruction to start a new standing transition.
 pub fn finish_load(m: &mut Mob, game_time: i64) {
     let tick = m.extra.pose_change_tick;
-    if tick == 0 {
-        return stand_up_instantly(m);
-    }
-    let since = (game_time - tick.abs()).clamp(0, i64::from(i32::MAX / 2));
+    let since = (game_time - tick.abs()).min(i64::from(i32::MAX / 2));
     m.extra.egg_time = (i64::from(m.age) - since) as i32;
+    note_tick(m, game_time);
 }
 /// `Camel.getDefaultDimensions`: the standing box, the type's or a baby's
 /// `BABY_STANDING_DIMENSIONS` (width and height).
@@ -317,14 +332,16 @@ impl Goal for RandomSitting {
         MOVE
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        // checkExtraStartConditions: not leashed, and no controlling
-        // passenger, a player's or a mob's (a husk on its back).
+        // checkExtraStartConditions: not leashed, no controlling passenger
+        // (a player's or a mob's, a husk on its back), and room for the pose
+        // it would take (`Camel.canCamelChangePose`).
         !m.fluids.in_water
             && pose_time(m) >= 400
             && m.extra.leash.is_none()
             && m.on_ground
             && m.rider.is_none()
             && !super::riders::mob_controlled(m, cx.w)
+            && can_change_pose(m, cx.w)
             && m.random.next_int_bound(4).unwrap_or(1) == 0
     }
     fn can_continue(&mut self, _m: &mut Mob, _cx: &mut Cx) -> bool {
@@ -680,5 +697,148 @@ mod tests {
         let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
         finish_load(&mut m, 5000);
         assert!(!refuse_to_move(&m));
+    }
+
+    /// A loaded camel that has not ticked yet saves the game time it was
+    /// loaded with, however much game time passes (`Camel.addAdditionalSaveData`
+    /// writes the synced value unchanged).
+    #[test]
+    fn a_camel_that_does_not_tick_saves_its_loaded_pose_tick() {
+        let mut m = camel();
+        register(&mut m);
+        let types = types(&m);
+        for tick in [200, -200, 0] {
+            let (tag, _) = horizon_world::nbt::parse_snbt(&format!(
+                "{{id:\"minecraft:camel\",Pos:[0.0d,0.0d,0.0d],LastPoseTick:{tick}L}}"
+            ))
+            .unwrap();
+            let mut m = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();
+            finish_load(&mut m, 5000);
+            for now in [5000, 5007, 6000] {
+                assert_eq!(synced_pose_tick(&m, now), tick, "{tick} at {now}");
+            }
+            // Ticking keeps it: age and game time advance together.
+            tick_age(&mut m, 5001);
+            assert_eq!(synced_pose_tick(&m, 5001), tick);
+        }
+    }
+
+    /// `Camel.canMate`: both sides answer `AbstractHorse.canParent` — not a
+    /// vehicle or a passenger and at full health (a camel's `isTamed` is
+    /// always true, so only those two can fail). A hurt or ridden camel must
+    /// not start breeding even while it is in love.
+    #[test]
+    fn a_wounded_or_ridden_camel_does_not_breed() {
+        let mut pair = None;
+        let ran = with_test_world(&[], |_, types| {
+            let kind = Arc::new(types.types["minecraft:camel"].clone());
+            let make = |id: u32, x: f64| {
+                let mut m = Mob::new(id, kind.clone(), Vec3::new(x, 64.0, 0.5), 0.0);
+                register(&mut m);
+                m.extra.in_love = 600;
+                m.on_ground = true;
+                m
+            };
+            pair = Some((make(1, 0.5), make(2, 2.5)));
+        });
+        let _ = ran;
+        let Some((mut a, b)) = pair else {
+            return;
+        };
+        let partner = b.seen(None);
+        let mut events = Vec::new();
+        let mut lr = horizon_core::random::LegacyRandom::new(0);
+        let ran = with_test_world(&[partner], |w, _| {
+            let mut cx = Cx {
+                w,
+                lr: &mut lr,
+                events: &mut events,
+            };
+            let mut breed = Breed::new(1.0);
+            assert!(
+                breed.can_use(&mut a, &mut cx),
+                "two healthy camels should breed"
+            );
+            let max = a.attrs.max_health;
+            a.health = max - 1.0;
+            assert!(
+                !breed.can_use(&mut a, &mut cx),
+                "a wounded camel should not breed"
+            );
+            a.health = max;
+            a.extra.rider = Some(3);
+            assert!(
+                !breed.can_use(&mut a, &mut cx),
+                "a ridden camel should not breed"
+            );
+        });
+        let _ = ran;
+    }
+
+    /// `CamelAi.RandomSitting.checkExtraStartConditions` ends with
+    /// `body.canCamelChangePose()`. `Camel.canCamelChangePose` is
+    /// `wouldNotSuffocateAtTargetPose(STANDING)` while it sits: the standing
+    /// box is 2.375 tall against the sitting pose's 0.945, so a sitting camel
+    /// under a two-block ceiling has no room to stand and must not try.
+    #[test]
+    fn a_camel_changes_pose_only_when_the_other_pose_fits() {
+        let ran = crate::mobs::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                for x in -1..=1 {
+                    for z in -1..=1 {
+                        world.chunks.insert(
+                            (x, z),
+                            std::sync::Arc::new(crate::chunk::Chunk::empty(x, z)),
+                        );
+                    }
+                }
+                let stone = registry.default_state("minecraft:stone").unwrap();
+                for x in -2..=2 {
+                    for z in -2..=2 {
+                        world.set(x, 63, z, stone).unwrap();
+                    }
+                }
+                // In the standing camel's box (y 64..66.375) but above the
+                // sitting one (y 64..64.945): blocks standing only.
+                world.set(0, 65, 0, stone).unwrap();
+            },
+            |w, types| {
+                let kind = std::sync::Arc::new(types.types["minecraft:camel"].clone());
+                let sitting_camel = |id: u32, x: f64| {
+                    let mut m = Mob::new(id, kind.clone(), Vec3::new(x, 64.0, 0.5), 0.0);
+                    register(&mut m);
+                    m.extra.camel_sitting = true;
+                    // 20 seconds in the pose (`getPoseTime() >= 20 * 20`).
+                    m.extra.egg_time = (i64::from(m.age) - 401) as i32;
+                    m.on_ground = true;
+                    m.random.set_seed(1234 + i64::from(id));
+                    m
+                };
+                // Under the ceiling, and out in the open.
+                let mut blocked = sitting_camel(1, 0.5);
+                let mut open = sitting_camel(2, 5.5);
+                let mut events = Vec::new();
+                let mut lr = horizon_core::random::LegacyRandom::new(0);
+                let mut cx = Cx {
+                    w,
+                    lr: &mut lr,
+                    events: &mut events,
+                };
+                let mut goal = RandomSitting;
+                // The random gate fires within a few asks when it is reached.
+                for _ in 0..200 {
+                    assert!(
+                        !goal.can_use(&mut blocked, &mut cx),
+                        "a sitting camel stood up into the ceiling"
+                    );
+                }
+                assert!(
+                    (0..200).any(|_| goal.can_use(&mut open, &mut cx)),
+                    "with room to stand the goal should fire"
+                );
+            },
+        );
+        let _ = ran;
     }
 }

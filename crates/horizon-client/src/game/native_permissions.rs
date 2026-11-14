@@ -6,7 +6,6 @@
 use super::Game;
 
 // Native mods use these; nothing in Horizon calls the helper itself.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Whether `player` has the permission node `node`: what the mods'
     /// `native_permission_check` answers, or, when none does, whether the
@@ -15,7 +14,7 @@ impl Game<'_> {
     /// level; 0 is everyone). The level is the one the server holds for a
     /// player who is on or joining; inside a player's hook, with the hub out
     /// of reach, the acting player's. Anyone else, and every player on a
-    /// client, counts as level 0. API @API:permission_check@.
+    /// client, counts as level 0. API 473.
     pub(super) fn native_has_permission(
         &self,
         player: u128,
@@ -24,6 +23,27 @@ impl Game<'_> {
     ) -> bool {
         self.has_permission_at(player, node, default_level, self.permission_level(player))
     }
+    /// The permission node `node` as the mods set it, three-valued as Bukkit's
+    /// `Permissible.isPermissionSet` and `hasPermission` tell apart: Some(true)
+    /// when a permissions mod sets it, Some(false) when one sets it to false,
+    /// None when none does (not set), so a mod applies its own default and
+    /// parent nodes where nothing is set. `native_permission_check` answers it,
+    /// asked with a `default_level` of 0 (the operator level is not applied
+    /// here; read it with `native_player_permission`). Works for a player on
+    /// the server or not. Server-side. API 631.
+    pub(super) fn native_player_permission_value(&self, player: u128, node: &str) -> Option<bool> {
+        let mut result = None;
+        self.native_permission_check(player, node, 0, &mut result);
+        result
+    }
+    /// A player's primary group: the first permission group the mods name for them
+    /// (`native_permission_groups`), or None when none names one. Server-side.
+    /// API 582.
+    pub(super) fn native_primary_group(&self, player: u128) -> Option<String> {
+        let mut groups = Vec::new();
+        self.native_permission_groups(player, &mut groups);
+        groups.into_iter().next()
+    }
     /// Sends a player their command tree again, the mods asked anew
     /// (`native_player_commands_sent`, its v2 and the permission nodes of
     /// the mods' commands), as Bukkit's `Player.updateCommands`: after a
@@ -31,7 +51,7 @@ impl Game<'_> {
     /// tick, so it works from any server hook, the player's own included
     /// (from the commands-sent hooks themselves it would send it every tick).
     /// True when the player is on (or is the acting player); false for
-    /// anyone else and on a client. API @API:resend_commands@.
+    /// anyone else and on a client. API 499.
     pub(super) fn native_resend_commands(&mut self, player: u128) -> bool {
         let on = self.lan_acting_uuid == Some(player)
             || self

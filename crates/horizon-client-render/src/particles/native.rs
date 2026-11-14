@@ -37,6 +37,17 @@ impl Clone for Box<dyn Controller> {
     }
 }
 
+impl super::ParticleOptions {
+    /// A native mod's `SimpleParticleType`: the sprite set of
+    /// `assets/<namespace>/particles/<path>.json`, drawn as a plain billboard.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            mod_particle: Some(name.into()),
+            ..Self::simple(super::ParticleType::Smoke)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -113,6 +124,7 @@ mod tests {
             facts: &facts,
             collision: &collision,
             player: None,
+            cached_chunk: std::cell::Cell::new(None),
         };
         let mut e = engine();
         let mut p = e
@@ -131,21 +143,39 @@ mod tests {
         p.size = 0.1;
         e.particles.push(p.clone());
         let mut vertices = Vec::new();
-        e.render(DVec3::ZERO, 0.0, 0.0, 0.5, &|_| 0, &mut vertices);
+        e.render(
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            0.5,
+            &|_| 0,
+            &mut vertices,
+        );
         assert_eq!(vertices.len(), 4);
         assert!(vertices.iter().all(
             |v| v.color >> 24 == 127 && v.layer & crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY != 0
         ));
         e.particles[0].set_visible(false);
         vertices.clear();
-        e.render(DVec3::ZERO, 0.0, 0.0, 0.5, &|_| 0, &mut vertices);
+        e.render(
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            0.5,
+            &|_| 0,
+            &mut vertices,
+        );
         assert!(vertices.is_empty());
         assert_eq!(e.particles[0].age, 2);
         e.pending.push(copy);
         e.reload(Path::new(""), &HashMap::new(), &HashSet::new());
         assert!(e.pending.is_empty());
         vertices.clear();
-        e.render(DVec3::ZERO, 0.0, 0.0, 0.5, &|_| 0, &mut vertices);
+        e.render(
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            0.5,
+            &|_| 0,
+            &mut vertices,
+        );
         assert!(vertices.is_empty());
         e.tick_particle(&mut p, &level);
         assert!(p.removed);

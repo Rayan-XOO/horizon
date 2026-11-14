@@ -84,6 +84,25 @@ pub struct Rates {
     /// Hosts one address may hold open at once (`RELAY_MAX_HOSTS_PER_ADDRESS`);
     /// an IPv6 /48 (one site, 65536 homes) may hold [`SITE_HOSTS`] times as many.
     pub hosts_per_address: usize,
+    /// Connections of any kind one address may hold open at once
+    /// (`RELAY_MAX_OPEN_PER_ADDRESS`), an IPv6 /48 [`SITE_HOSTS`] times as many. Without it one
+    /// client could fill the relay's global cap with silent connections, each held for the
+    /// first-line wait. A host keeps one connection per guest it plays with, hence the margin.
+    pub open_per_address: usize,
+    /// Unknown codes a minute (and the burst) from one site, an IPv4 /24 or an IPv6 /48, checked
+    /// before the global budget, so emptying that takes many sites rather than one home's /64s.
+    pub site_unknown_per_min: f64,
+    pub site_unknown_burst: f64,
+    /// Unknown short codes one nameplate may receive a minute (and the burst), from every address
+    /// at once: what one address set can take of the global budget for a single short code. Only
+    /// unknown short codes spend it; a wrong secret for a code that exists is the host's limit.
+    pub nameplate_unknown_per_min: f64,
+    pub nameplate_unknown_burst: f64,
+    /// Registrations a minute (and the burst) from one site, an IPv4 /24 or an IPv6 /48: one /48
+    /// holds 65 536 /64s, each with its own `register_per_min`, and every finished host keeps its
+    /// nameplate taken for `ended_kept`.
+    pub site_register_per_min: f64,
+    pub site_register_burst: f64,
 }
 impl Default for Rates {
     fn default() -> Self {
@@ -96,6 +115,13 @@ impl Default for Rates {
             unknown_window: Duration::from_secs(600),
             block: Duration::from_secs(600),
             hosts_per_address: 4,
+            open_per_address: 64,
+            site_unknown_per_min: 24.0,
+            site_unknown_burst: 6.0,
+            nameplate_unknown_per_min: 5.0,
+            nameplate_unknown_burst: 10.0,
+            site_register_per_min: 30.0,
+            site_register_burst: 10.0,
         }
     }
 }
@@ -117,6 +143,25 @@ fn host_keys(ip: IpAddr, per_address: usize) -> Vec<((IpAddr, u8), usize)> {
     keys
 }
 
+/// The site an address belongs to for the unknown-code budget: its IPv4 /24, or its IPv6 /48.
+pub fn site_key(ip: IpAddr) -> IpAddr {
+    match address_key(ip) {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            IpAddr::V4(std::net::Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0))
+        }
+    }
+}
+
+struct Site {
+    unknown: Bucket,
+    seen: Instant,
+}
+
 struct Address {
     register: Bucket,
     join: Bucket,
@@ -135,6 +180,14 @@ pub struct Limiter {
     /// Open hosts by address key (and IPv6 site); never swept, each count
     /// is given back by [`Limiter::close_host`].
     hosts: HashMap<(IpAddr, u8), usize>,
+    /// Open connections, counted the same way and given back by [`Limiter::close_connection`].
+    open: HashMap<(IpAddr, u8), usize>,
+    /// Unknown-code budgets by [`site_key`], swept with the addresses.
+    sites: HashMap<IpAddr, Site>,
+    /// Unknown-code budgets by nameplate, swept with the sites.
+    nameplates: HashMap<String, Site>,
+    /// Registration budgets by [`site_key`] (in `Site::unknown`), swept with the sites.
+    site_registers: HashMap<IpAddr, Site>,
 }
 impl Limiter {
     pub fn new(rates: Rates, enabled: bool) -> Self {
@@ -144,7 +197,103 @@ impl Limiter {
             addresses: HashMap::new(),
             last_sweep: Instant::now(),
             hosts: HashMap::new(),
+            open: HashMap::new(),
+            sites: HashMap::new(),
+            nameplates: HashMap::new(),
+            site_registers: HashMap::new(),
         }
+    }
+    /// Count one more connection open from `ip`, unless its address (or IPv6 site) holds as many
+    /// as it may already: then the caller closes it at once.
+    pub fn open_connection(&mut self, ip: IpAddr) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let keys = host_keys(ip, self.rates.open_per_address);
+        if keys
+            .iter()
+            .any(|(k, cap)| self.open.get(k).copied().unwrap_or(0) >= *cap)
+        {
+            return false;
+        }
+        for (k, _) in keys {
+            *self.open.entry(k).or_insert(0) += 1;
+        }
+        true
+    }
+    /// A connection [`Limiter::open_connection`] let in has closed.
+    pub fn close_connection(&mut self, ip: IpAddr) {
+        if !self.enabled {
+            return;
+        }
+        for (k, _) in host_keys(ip, self.rates.open_per_address) {
+            if let Some(n) = self.open.get_mut(&k) {
+                *n -= 1;
+                if *n == 0 {
+                    self.open.remove(&k);
+                }
+            }
+        }
+    }
+    fn site(&mut self, ip: IpAddr, now: Instant) -> &mut Site {
+        let r = &self.rates;
+        let site = self.sites.entry(site_key(ip)).or_insert_with(|| Site {
+            unknown: Bucket::new(r.site_unknown_per_min / 60.0, r.site_unknown_burst, now),
+            seen: now,
+        });
+        site.seen = now;
+        site
+    }
+    /// Whether `ip`'s site has unknown-code budget left (checked before every join, as the global
+    /// budget is, so a refusal says nothing about whether a code exists).
+    pub fn site_unknown_has(&mut self, ip: IpAddr, now: Instant) -> bool {
+        !self.enabled || self.site(ip, now).unknown.has(now)
+    }
+    /// An unknown code from `ip`: spends one from its site's budget.
+    pub fn site_unknown_take(&mut self, ip: IpAddr, now: Instant) {
+        if self.enabled {
+            self.site(ip, now).unknown.try_take(now);
+        }
+    }
+    fn nameplate(&mut self, nameplate: &str, now: Instant) -> &mut Site {
+        let r = &self.rates;
+        let site = self
+            .nameplates
+            .entry(nameplate.to_owned())
+            .or_insert_with(|| Site {
+                unknown: Bucket::new(
+                    r.nameplate_unknown_per_min / 60.0,
+                    r.nameplate_unknown_burst,
+                    now,
+                ),
+                seen: now,
+            });
+        site.seen = now;
+        site
+    }
+    /// Whether `nameplate` has unknown-code budget left (checked before every join, as the site's
+    /// and the global budget are, so a refusal says nothing about whether the code exists).
+    ///
+    /// A nameplate this relay has not seen has its whole burst left, so the check does not record
+    /// one: only [`Limiter::nameplate_unknown_take`] does, and a join refused later leaves no state.
+    pub fn nameplate_unknown_has(&mut self, nameplate: &str, now: Instant) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        match self.nameplates.get_mut(nameplate) {
+            Some(site) => site.unknown.has(now),
+            None => true,
+        }
+    }
+    /// An unknown code for `nameplate`: spends its own budget, whichever address asked.
+    pub fn nameplate_unknown_take(&mut self, nameplate: &str, now: Instant) {
+        if self.enabled {
+            self.nameplate(nameplate, now).unknown.try_take(now);
+        }
+    }
+    #[cfg(test)]
+    fn nameplates_tracked(&self) -> usize {
+        self.nameplates.len()
     }
     /// Count one more host open from `ip`, unless its address (or IPv6 site)
     /// holds as many as it may already.
@@ -186,6 +335,13 @@ impl Limiter {
                 now.saturating_duration_since(a.seen) < keep
                     || a.blocked_until.is_some_and(|b| b > now)
             });
+            // An idle site's bucket has refilled long before: dropping it changes nothing.
+            self.sites
+                .retain(|_, s| now.saturating_duration_since(s.seen) < keep);
+            self.nameplates
+                .retain(|_, s| now.saturating_duration_since(s.seen) < keep);
+            self.site_registers
+                .retain(|_, s| now.saturating_duration_since(s.seen) < keep);
         }
         let r = &self.rates;
         let a = self
@@ -202,7 +358,19 @@ impl Limiter {
         a
     }
     pub fn allow_register(&mut self, ip: IpAddr, now: Instant) -> bool {
-        !self.enabled || self.entry(ip, now).register.try_take(now)
+        if !self.enabled || !self.entry(ip, now).register.has(now) {
+            return !self.enabled;
+        }
+        let r = &self.rates;
+        let site = self
+            .site_registers
+            .entry(site_key(ip))
+            .or_insert_with(|| Site {
+                unknown: Bucket::new(r.site_register_per_min / 60.0, r.site_register_burst, now),
+                seen: now,
+            });
+        site.seen = now;
+        site.unknown.try_take(now) && self.entry(ip, now).register.try_take(now)
     }
     pub fn allow_join(&mut self, ip: IpAddr, now: Instant) -> bool {
         if !self.enabled {
@@ -247,6 +415,120 @@ impl Limiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_holds_only_so_many_connections_open() {
+        let rates = Rates {
+            open_per_address: 3,
+            ..Rates::default()
+        };
+        let mut l = Limiter::new(rates, true);
+        let home: IpAddr = "203.0.113.7".parse().unwrap();
+        let other: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!((0..3).all(|_| l.open_connection(home)));
+        assert!(!l.open_connection(home), "the fourth is refused");
+        assert!(l.open_connection(other), "another address isn't");
+        l.close_connection(home);
+        assert!(l.open_connection(home), "a closed one gives its place back");
+        // IPv6 counts by /64, and a /48 holds four times as many.
+        let mut l = Limiter::new(
+            Rates {
+                open_per_address: 2,
+                ..Rates::default()
+            },
+            true,
+        );
+        let in_64 = |i: u16| -> IpAddr { format!("2001:db8:1:{i}::{}", i + 1).parse().unwrap() };
+        assert!(l.open_connection(in_64(0)) && l.open_connection(in_64(0)));
+        assert!(
+            !l.open_connection("2001:db8:1:0::99".parse().unwrap()),
+            "same /64"
+        );
+        for i in 1..4 {
+            assert!(l.open_connection(in_64(i)) && l.open_connection(in_64(i)));
+        }
+        assert!(!l.open_connection(in_64(4)), "the /48 is full at 8");
+        // Off when the relay can't see client addresses.
+        let mut off = Limiter::new(Rates::default(), false);
+        assert!((0..1000).all(|_| off.open_connection(home)));
+    }
+
+    #[test]
+    fn a_site_spends_its_own_unknown_code_budget() {
+        let t = Instant::now();
+        let mut l = Limiter::new(
+            Rates {
+                site_unknown_per_min: 6.0,
+                site_unknown_burst: 2.0,
+                ..Rates::default()
+            },
+            true,
+        );
+        // Two homes of one /24 share a budget: the burst, then nothing until it refills.
+        let (a, b): (IpAddr, IpAddr) = (
+            "198.51.100.1".parse().unwrap(),
+            "198.51.100.200".parse().unwrap(),
+        );
+        l.site_unknown_take(a, t);
+        assert!(l.site_unknown_has(b, t));
+        l.site_unknown_take(b, t);
+        assert!(!l.site_unknown_has(a, t) && !l.site_unknown_has(b, t));
+        assert!(
+            l.site_unknown_has("198.51.101.1".parse().unwrap(), t),
+            "another /24 isn't"
+        );
+        assert!(
+            l.site_unknown_has(a, t + Duration::from_secs(10)),
+            "one a ten seconds back"
+        );
+        // IPv6: the /56 of one home is one /48.
+        let mut v6 = Limiter::new(
+            Rates {
+                site_unknown_burst: 1.0,
+                ..Rates::default()
+            },
+            true,
+        );
+        v6.site_unknown_take("2001:db8:7:100::1".parse().unwrap(), t);
+        assert!(!v6.site_unknown_has("2001:db8:7:1ff::1".parse().unwrap(), t));
+    }
+
+    #[test]
+    fn a_nameplate_spends_its_own_unknown_code_budget() {
+        let t = Instant::now();
+        let mut l = Limiter::new(
+            Rates {
+                nameplate_unknown_per_min: 6.0,
+                nameplate_unknown_burst: 2.0,
+                ..Rates::default()
+            },
+            true,
+        );
+        // Guesses against one code spend its budget, whichever address sends them.
+        assert!(
+            l.nameplate_unknown_has("K7QM", t),
+            "a code not probed yet has its whole burst"
+        );
+        assert_eq!(l.nameplates_tracked(), 0, "the check records nothing");
+        l.nameplate_unknown_take("K7QM", t);
+        assert!(l.nameplate_unknown_has("K7QM", t));
+        l.nameplate_unknown_take("K7QM", t);
+        assert!(!l.nameplate_unknown_has("K7QM", t), "the burst is spent");
+        assert_eq!(l.nameplates_tracked(), 1);
+        assert!(
+            l.nameplate_unknown_has("ZZZZ", t),
+            "another code keeps its own"
+        );
+        assert_eq!(
+            l.nameplates_tracked(),
+            1,
+            "checking another code records nothing"
+        );
+        assert!(
+            l.nameplate_unknown_has("K7QM", t + Duration::from_secs(10)),
+            "one a ten seconds back"
+        );
+    }
 
     #[test]
     fn buckets_refill_at_their_rate() {
@@ -364,5 +646,28 @@ mod tests {
         let mut off = Limiter::new(Rates::default(), false);
         assert!((0..100).all(|_| off.allow_join(ip, t)));
         assert_eq!(off.tracked(), 0);
+    }
+
+    #[test]
+    fn one_site_registers_only_so_often_across_its_addresses() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let mut l = Limiter::new(Rates::default(), true);
+        let t = Instant::now();
+        let burst = Rates::default().site_register_burst as usize;
+        // Every /64 of one /48 has its own budget, but the /48 shares one.
+        let registered = (0..100)
+            .filter(|home| l.allow_register(ip(&format!("2001:db8:7:{home:x}::1")), t))
+            .count();
+        assert_eq!(registered, burst);
+        assert!(l.allow_register(ip("2001:db8:8::1"), t), "another site");
+        // An address refused by its own budget spends nothing of its site's.
+        let mut l = Limiter::new(Rates::default(), true);
+        let home = ip("198.51.100.1");
+        let own = Rates::default().register_burst as usize;
+        assert_eq!((0..10).filter(|_| l.allow_register(home, t)).count(), own);
+        let neighbours = (2..100)
+            .filter(|n| l.allow_register(ip(&format!("198.51.100.{n}")), t))
+            .count();
+        assert_eq!(neighbours, burst - own);
     }
 }

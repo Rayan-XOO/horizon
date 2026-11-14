@@ -45,8 +45,9 @@ The design: [hdr-linear-light.md](../design/hdr-linear-light.md).
 
 ## Colour
 
-Every colour a 0.2 stage reads or returns is **linear light**: BT.709 (sRGB) primaries, scene-referred, 1.0 is
-vanilla's white at paper white, more is brighter. Horizon decodes vanilla's values with a 2.2 power (vanilla's, not
+Every colour a 0.2 stage reads or returns is **linear light**: BT.709 (sRGB) primaries by default, scene-referred,
+1.0 is vanilla's white at paper white, more is brighter. A pack may ask for BT.2020 primaries, which hold colours
+outside sRGB, with `[frame] primaries` (below). Horizon decodes vanilla's values with a 2.2 power (vanilla's, not
 the piecewise sRGB curve), replacing negatives and NaN with 0 first, and encodes a stage's result the same way where
 the frame stores gamma (`[frame] blend`, below).
 
@@ -59,20 +60,76 @@ the frame stores gamma (`[frame] blend`, below).
 - **`[[lights]]` and `[[particle_lights]]` colours** are written as in 0.1, in vanilla's gamma, and Horizon decodes
   them: `block_light_color` and `colored_light` are linear. `block_light_colors` holds them as written; read it through
   `block_light_color`.
-- **Alpha is coverage only.** A post pass's alpha is ignored.
+- **Alpha is coverage only**, never light: brightness is in rgb alone. A post pass's alpha is ignored.
+
+## Room to grow
+
+`Frame`, the stage inputs (`SkyInput`, `VertexInput`, `MaterialInput`, `DisplacementInput`, `WeatherInput`,
+`PostInput`, `TonemapInput`, `EntityInput`) and `surface_at`'s `SurfaceData` may gain fields in later releases. Read
+their fields and pass them along, but don't construct them: `horizon-shader check` refuses `PostInput(...)` and the
+like. `Surface` is yours to construct and keeps its one field; later material outputs come as helpers.
+
+**New names reach a stage only if the pack asked for them.** A later release puts a new name before your files (a
+helper, a struct, a resource, a constant) only under a manifest key the pack sets, or in a stage added later, whose
+prelude is its own. A stage a pack has today keeps the names it has today, so a name of your own that is free now
+stays yours: an addition doesn't break a pack that didn't ask for it. Names starting with `horizon_` are Horizon's
+already, and new fields can't collide, since you don't construct those structs.
 
 ## The display
 
-`frame.hdr`, `headroom`, `paper_white`, `peak` and `black_level` describe the display. Until HDR output is served for
-0.2 packs (a later step), a 0.2 pack sees SDR values with HDR on too: `hdr` 0, `headroom` 1, `paper_white` and `peak`
-80, `black_level` 0, and its picture is shown at paper white with nothing lifted.
+`frame.hdr`, `headroom`, `paper_white`, `peak` and `black_level` describe the display, read again every frame. With HDR
+on, where the device keeps the HUD on a layer of its own, a 0.2 pack sees the display's: `hdr` 1, `paper_white` and
+`peak` in nits, `headroom` the peak over paper white (at least 1) and `black_level` the display's black in nits.
+Otherwise it sees SDR: `hdr` 0, `headroom` 1, `paper_white` and `peak` 80, `black_level` 0, and its picture ends on an
+8-bit frame, clipped at white, before the camera overlays and the HUD draw. Horizon lifts the shadows onto
+`black_level` after `[tonemap]`: read it, but don't apply it.
 
 ## `[frame] blend`
 
 `blend = \"gamma\"` (the default) keeps the frame in vanilla's gamma, values above 1 kept: Horizon encodes the material,
 sky and weather stages' results before they are stored and blended, so glass, water, clouds and particles blend as
-vanilla's. `blend = \"linear\"` stores linear light, so see-through draws blend as light does. A stage sees the same
-values either way. `\"linear\"` passes the check; the game doesn't serve it yet.
+vanilla's. `blend = \"linear\"` stores linear light, so see-through draws blend as light does: Horizon stores those
+stages' results as they are and decodes its own draws (entities, particles, clouds, weather, the stages a pack leaves
+out), so a solid surface looks as under `\"gamma\"`. A stage sees the same values either way. Where the device can't
+draw a float frame the pack draws on an 8-bit one, in gamma. Under `\"linear\"` resource packs' `core/sky`,
+`core/stars` and `core/rendertype_lines` shaders, which write gamma, give way to Horizon's own sky, stars and block
+outline.
+
+## `[frame] primaries`
+
+`primaries = \"bt709\"` (the default) is the rule above. With `primaries = \"bt2020\"` every colour a stage reads or
+returns is in BT.2020 primaries instead (D65 white, 1.0 still vanilla's white at paper white, values never negative).
+It needs `blend = \"linear\"`, since a change of primaries is only right in linear light. `frame.primaries` says which
+space the pack's colours are in, and `frame.luminance` holds that space's luminance weights: compute luminance as
+`dot(color, frame.luminance)` and it is right in either. `\"bt2020\"` passes the check; the game doesn't serve it yet.
+
+";
+
+/// The entity stage's notes, after its input: what it returns, and vanilla's own.
+const ENTITY_NOTES: &str = "\
+`entity` lights what is no block terrain: `input.kind` says which. It returns the same `Surface` as `material` (rgb
+linear light, 0 or more and unbounded; alpha its coverage), so a pack writes its lighting once and calls it from both
+stages. Around it Horizon keeps vanilla's order: the alpha test on the returned alpha, then the enchantment glint
+added on top, then fog. `horizon-shader check` takes the stage; **the game doesn't draw it yet** and refuses a pack
+that has it. A pack without `[entity]` is drawn as before, and sees none of this stage's names. Until the game draws
+the stage its prelude may still gain names; from then on the rule for new names holds for it too.
+
+Vanilla's own, the picture a pack without the stage gets:
+
+```wgsl
+fn entity(input: EntityInput) -> Surface {
+    let base = input.albedo.rgb * input.tint.rgb * input.shade;
+    // Vanilla lays the flash over the surface in its gamma (the 2.2 power), before the light.
+    let gamma = vec3<f32>(1.0 / 2.2);
+    let flashed = pow(mix(pow(base, gamma), pow(input.overlay.rgb, gamma), input.overlay.a), vec3<f32>(2.2));
+    return Surface(vec4<f32>(flashed * input.lightmap, input.albedo.a * input.tint.a));
+}
+```
+
+Without a flash (`overlay.a` 0) that is `albedo * tint * shade * lightmap`. In linear light alone,
+`mix(base, input.overlay.rgb, input.overlay.a) * input.lightmap` is the same flash a little brighter. The shade and
+the light act on rgb only. `lightmap` holds no coloured light: where `colored_light` is above 0, Horizon's own draw
+adds it to the light colour, and the expression above leaves it out.
 
 ";
 
@@ -99,6 +156,7 @@ pub fn markdown(api: Api) -> String {
             StageKind::Vertex => "[vertex]",
             StageKind::Weather => "[weather]",
             StageKind::Tonemap => "[tonemap]",
+            StageKind::Entity => "[entity]",
         };
         out += &format!("| {} | `{key}` | `{}` |\n", kind.name(), kind.signature());
     }
@@ -106,6 +164,9 @@ pub fn markdown(api: Api) -> String {
     for &kind in api.stages() {
         out += &format!("## {}\n\n`{}`\n\n", kind.name(), kind.signature());
         out += &table(kind.input(), None);
+        if kind == StageKind::Entity {
+            out += ENTITY_NOTES;
+        }
         if kind == StageKind::Material {
             let surface = table(&SURFACE, None);
             // 0.2's lit colour is linear light and may pass white; 0.1's reference keeps its text.
@@ -113,7 +174,8 @@ pub fn markdown(api: Api) -> String {
                 Api::V0_1 => surface,
                 Api::V0_2 => surface.replace(
                     "The lit colour, 0..1, with its alpha.",
-                    "The lit colour, linear light (more than 1 is brighter than white), with its alpha.",
+                    "The lit colour: rgb linear light, 0 or more and unbounded (more than 1 is brighter than \
+                     white); alpha its coverage.",
                 ),
             };
             out += "Under `[displacement]` the stage also defines \
@@ -131,9 +193,15 @@ pub fn markdown(api: Api) -> String {
         }
         out += "\n";
         if kind == StageKind::Tonemap {
-            out += "It runs once per pixel at the window's size, after the post chain and before the camera overlays and\n\
-                    the HUD. A pack without it gets Horizon's: a clip at white in SDR, a roll-off into the headroom in HDR.\n\
-                    Horizon holds the result to 0 to `frame.headroom`.\n\n";
+            out += "It is a pure mapping from the scene's light to the output its `frame` describes, run once per pixel of\n\
+                    each output, after the post chain and before the camera overlays and the HUD. Today the display is the\n\
+                    only output; Horizon may add others for the same frame, such as an SDR screenshot or icon, where `frame`'s\n\
+                    display fields describe SDR (`hdr` 0, `headroom` 1, `paper_white` and `peak` 80, `black_level` 0). Its\n\
+                    only output is the colour it returns, so nothing carries from one call to the next. A pack without it gets\n\
+                    Horizon's: a clip at white in SDR, and in HDR the curve Horizon uses without a pack, which keeps light up\n\
+                    to 60% of the peak as it is and rolls it off into the peak above. Either runs once: Horizon doesn't map a pack's\n\
+                    result again. Horizon holds the result to 0 to `frame.headroom`, then lifts the shadows onto\n\
+                    `frame.black_level`.\n\n";
             continue;
         }
         if kind != StageKind::Sky {
@@ -164,6 +232,10 @@ pub fn markdown(api: Api) -> String {
                     - `fn block_pbr_size() -> vec2<f32>`: the LabPBR maps' size in texels.\n\
                     - `fn set_surface(normal: vec3<f32>, smoothness: f32, data: f32)`: what the post stage's \
                     `surface_at` reads for this point of solid terrain (`data` the pack's own; the face's normal and 0, 0 unset).\n";
+        }
+        if kind == StageKind::Entity {
+            out += "- `fn block_light_color(position: vec3<f32>) -> vec4<f32>`: the colour of the block light at the \
+                    camera-relative `position` (rgb) and how strongly it reaches it (a), as the material stage's.\n";
         }
         if kind != StageKind::Sky {
             out += "- `fn shadow_position(position: vec3<f32>) -> vec3<f32>`: where the camera-relative point `position` is\n  \

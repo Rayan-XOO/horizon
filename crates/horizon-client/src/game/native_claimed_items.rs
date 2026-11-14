@@ -115,7 +115,6 @@ impl ModInput {
     }
 }
 
-#[allow(dead_code)]
 impl Game<'_> {
     /// The stack in inventory slot `slot` as a mod's events carry it.
     fn mod_held(&self, slot: usize) -> Option<NativeHeldItem> {
@@ -220,6 +219,7 @@ impl Game<'_> {
         };
         self.native_input.start(&id, item, slot);
         self.using = Some((slot, 0));
+        self.use_start.item = self.held().cloned();
         true
     }
     /// `tick_used_item` for a claimed item: counts the ticks held and ends

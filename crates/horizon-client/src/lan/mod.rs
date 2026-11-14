@@ -9,7 +9,10 @@ mod advancements;
 pub mod anticheat;
 pub mod arrivals;
 pub mod attributes;
+mod biome_resend;
+mod body;
 pub mod border;
+pub mod chunk_sync;
 pub mod chunks;
 pub mod code_of_conduct;
 mod command_order;
@@ -19,7 +22,9 @@ pub mod conn;
 pub mod containers;
 pub mod data;
 pub mod discovery;
+mod effect_meta;
 pub mod entity;
+pub mod equipment_cache;
 pub mod far;
 pub mod forwarding;
 pub mod guest;
@@ -31,11 +36,13 @@ pub mod menu;
 pub mod playerdata;
 pub mod prediction;
 pub mod recipes;
+mod registry_names;
 pub mod scoreboard;
 mod sound_order;
 pub mod tracking;
 pub mod waypoints;
 
+pub use body::Body;
 pub use conn::{Holding, PlayerSender, flush_all};
 use horizon_protocol::packets::play;
 use horizon_protocol::{
@@ -268,6 +275,10 @@ pub struct NetConfig {
     /// An integrated server's owner profile: the properties the window's own
     /// (memory) connection logs in with.
     pub owner_profile: Option<Arc<OwnerProfile>>,
+    /// `IntegratedServer.getSingleplayerProfile` (`Minecraft.getGameProfile`): the
+    /// integrated server's own player's name and UUID. A memory login whose name matches
+    /// is that profile (the account's UUID); every other login derives the offline one.
+    pub singleplayer_profile: Option<(String, u128)>,
     /// `horizon-clients-only` (Horizon's own server.properties key, off): a
     /// client whose `minecraft:brand` isn't Horizon's is turned away during
     /// configuration. A brand can be spoofed: a gate, not security.
@@ -334,6 +345,7 @@ impl NetConfig {
             lod_distance: crate::lod_net::DEFAULT_DISTANCE,
             levels: crate::chunk::LevelShapes::VANILLA,
             owner_profile: None,
+            singleplayer_profile: None,
         }
     }
 }
@@ -451,6 +463,8 @@ pub struct Shared {
     closing: AtomicUsize,
     /// Connections turned away since the last report of them, and when that was.
     turned_away: Mutex<(usize, Option<Instant>)>,
+    /// A stop waits for a proxy to move the players out (`arrivals::StopWait`): no login comes in.
+    shutting_down: AtomicBool,
 }
 impl Shared {
     /// The registries and tags a new connection is sent.
@@ -473,6 +487,22 @@ impl Shared {
         uuid: u128,
         name: &str,
     ) -> Option<horizon_world::nbt::Tag> {
+        if self.shutting_down.load(Ordering::Relaxed) {
+            return Some(translatable("multiplayer.disconnect.server_shutdown", &[]));
+        }
+        // IntegratedPlayerList.canPlayerLogin: the owner's name (ignoring case,
+        // `isSingleplayerOwner`) is refused while a player of that name is online.
+        if let Some((owner, _)) = &self.config.singleplayer_profile
+            && owner.eq_ignore_ascii_case(name)
+            && self
+                .online
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, online)| online.eq_ignore_ascii_case(name))
+        {
+            return Some(translatable("multiplayer.disconnect.name_taken", &[]));
+        }
         if let Some(gate) = &self.config.gate
             && let Some(reason) = gate(address, uuid, name)
         {
@@ -498,6 +528,10 @@ impl Shared {
         }
         self.online.lock().unwrap().push((uuid, name.to_owned()));
         None
+    }
+    /// A stop has begun: every login from now on is refused as the server's shutdown.
+    pub fn refuse_logins(&self) {
+        self.shutting_down.store(true, Ordering::Relaxed);
     }
     fn is_online(&self, uuid: u128) -> bool {
         self.online.lock().unwrap().iter().any(|(u, _)| *u == uuid)
@@ -687,6 +721,7 @@ impl Lan {
             next_connection: AtomicU64::new(0),
             closing: AtomicUsize::new(0),
             turned_away: Mutex::new((0, None)),
+            shutting_down: AtomicBool::new(false),
             random: Mutex::new(crate::server::java_properties::now_millis() as u64 | 1),
             config,
         });
@@ -1136,6 +1171,56 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// Once a stop waits for a proxy, no login takes a place, an op's neither.
+    #[test]
+    fn a_server_that_refuses_logins_takes_no_one_in() {
+        let config = NetConfig {
+            announce: false,
+            listen: false,
+            bypasses_limit: Some(Arc::new(|_| true)),
+            ..NetConfig::loopback(0, "Stopping".into(), 8)
+        };
+        let lan = Lan::start_with(Arc::new(data::SyncData::empty()), config).unwrap();
+        assert!(lan.shared.try_admit(MEMORY_ADDRESS, 1, "Player").is_none());
+        lan.shared.refuse_logins();
+        assert_eq!(
+            lan.shared.try_admit(MEMORY_ADDRESS, 2, "Late"),
+            Some(translatable("multiplayer.disconnect.server_shutdown", &[]))
+        );
+        assert_eq!(lan.shared.online(), 1);
+    }
+
+    /// `IntegratedPlayerList.canPlayerLogin`: a login whose name is the
+    /// singleplayer owner's (`IntegratedServer.isSingleplayerOwner`, ignoring
+    /// case) is refused with `multiplayer.disconnect.name_taken` while a player
+    /// of that name is online. The owner's own first login, and any other name,
+    /// get in; a server with no owner profile (a dedicated one) has no such rule.
+    #[test]
+    fn a_login_with_the_owners_name_is_refused_while_the_owner_is_online() {
+        let owned = NetConfig {
+            announce: false,
+            listen: false,
+            singleplayer_profile: Some(("Owner".to_owned(), 1)),
+            ..NetConfig::loopback(0, "Owned".into(), 8)
+        };
+        let lan = Lan::start_with(Arc::new(data::SyncData::empty()), owned).unwrap();
+        let taken = Some(translatable("multiplayer.disconnect.name_taken", &[]));
+        assert!(lan.shared.try_admit(MEMORY_ADDRESS, 1, "Owner").is_none());
+        assert_eq!(lan.shared.try_admit(MEMORY_ADDRESS, 2, "oWNER"), taken);
+        assert_eq!(lan.shared.try_admit(MEMORY_ADDRESS, 1, "Owner"), taken);
+        assert!(lan.shared.try_admit(MEMORY_ADDRESS, 3, "Guest").is_none());
+        assert_eq!(lan.shared.online(), 2);
+
+        let dedicated = NetConfig {
+            announce: false,
+            listen: false,
+            ..NetConfig::loopback(0, "Dedicated".into(), 8)
+        };
+        let lan = Lan::start_with(Arc::new(data::SyncData::empty()), dedicated).unwrap();
+        assert!(lan.shared.try_admit(MEMORY_ADDRESS, 1, "Owner").is_none());
+        assert!(lan.shared.try_admit(MEMORY_ADDRESS, 2, "oWNER").is_none());
     }
 
     #[test]

@@ -89,7 +89,7 @@ fn data_packs_are_their_own_kind() {
     assert!(pick(Kind::DataPack, &versions[..1], true).is_none());
 
     let now = support(Kind::DataPack, &v(&[GAME]), &v(&["datapack"]));
-    assert_eq!(now.reason(), Some(DATAPACK_SUPPORT));
+    assert_eq!(now.reason(), Some(datapack_support()));
     let old = support(Kind::DataPack, &v(&["1.21.4"]), &v(&["datapack"]));
     assert!(
         old.reason().unwrap().starts_with("Made for 1.21.4"),
@@ -123,6 +123,10 @@ fn file_names_must_be_plain() {
         "Faithful 32x.zip",
         "FreshAnimations_v1.11.1_26.1+.zip",
         "Faithful_v10.zip",
+        "Console.zip",
+        "COM10.jar",
+        "nullify.jar",
+        "Ünïcode pack.zip",
     ] {
         assert_eq!(safe_name(good), Some(good));
     }
@@ -135,6 +139,14 @@ fn file_names_must_be_plain() {
         "c:x.zip",
         "x.zip.",
         "x\n.zip",
+        "CON",
+        "nul.jar",
+        "Com1.zip",
+        "LPT9",
+        "AUX .zip",
+        "COM¹.jar",
+        "fake\u{202E}gpj.zip",
+        "a\u{200B}b.zip",
     ] {
         assert_eq!(safe_name(bad), None, "{bad:?}");
     }

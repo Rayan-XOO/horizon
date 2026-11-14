@@ -204,7 +204,9 @@ fn goal_name(m: &Mob, name: &str) -> String {
         "Float" => "FloatGoal",
         "RandomFloatAround" => "RandomFloatAroundGoal",
         "GhastLook" => "GhastLookGoal",
+        "Peek" => "ShulkerPeekGoal",
         "GhastShoot" => "GhastShootFireballGoal",
+        "BlazeAttack" => "BlazeAttackGoal",
         "Stroll" => "WaterAvoidingRandomStrollGoal",
         "ParrotWander" => "ParrotWanderGoal",
         "RandomStroll" => "RandomStrollGoal",
@@ -235,7 +237,7 @@ fn goal_name(m: &Mob, name: &str) -> String {
         "RestrictSun" => "RestrictSunGoal",
         "FleeSun" => "FleeSunGoal",
         // `Cat.CatAvoidEntityGoal`, `Fox.FoxAvoidEntityGoal`... name their subclass.
-        "AvoidEntity" if m.species() == Species::Cat => "CatAvoidEntityGoal",
+        "AvoidEntity" | "CatAvoid" if m.species() == Species::Cat => "CatAvoidEntityGoal",
         "AvoidEntity" => "AvoidEntityGoal",
         "BowAttack" => "RangedBowAttackGoal",
         "Swell" => "SwellGoal",
@@ -362,7 +364,7 @@ fn summon_golem(
     let Some(mut golem) = golem else {
         return;
     };
-    golem.random = LegacyRandom::new(spawn_seed(index));
+    golem.random.set_seed(spawn_seed(index));
     born.push(golem);
     for j in near {
         villager_brain::golem_detected(&mut mobs[j], w.game_time);
@@ -436,7 +438,7 @@ fn villager_events(
                 child.extra.age = -24000;
                 child.extra.bed = Some(bed);
                 let seed = spawn_seed(index);
-                child.random = LegacyRandom::new(seed);
+                child.random.set_seed(seed);
                 horizon_client::mobs::villager_brain::init(&mut child, w.game_time, day_time, seed);
                 born.push(child);
             }
@@ -492,7 +494,7 @@ impl HeartHost for Host<'_> {
         let seed = 1000 + *self.created;
         *self.created += 1;
         let mut m = Mob::new(200_000 + seed as u32, kind, at, 0.0);
-        m.random = LegacyRandom::new(seed);
+        m.random.set_seed(seed);
         horizon_client::mobs::monster_brain::init(&mut m, seed);
         m
     }
@@ -539,7 +541,7 @@ impl HiveHost for ProbeHive<'_, '_> {
         if m.species() != Species::Bee {
             return None;
         }
-        m.random = LegacyRandom::new(spawn_seed(index));
+        m.random.set_seed(spawn_seed(index));
         horizon_client::mobs::bee::draw_cooldowns(&mut m);
         Some(m)
     }
@@ -550,6 +552,7 @@ impl HiveHost for ProbeHive<'_, '_> {
     fn sound(&mut self, name: &'static str, at: [f64; 3]) {
         self.events.push(MobEvent::Sound(name, at, 1.0, 1.0));
     }
+    fn set_changed(&mut self, _at: [i32; 3]) {}
 }
 /// The hive's honey level and front from its block state.
 fn hive_state(registry: &BlockRegistry, world: &World, at: [i32; 3]) -> (Option<i32>, [i32; 2]) {
@@ -642,7 +645,7 @@ fn player_hurt(player: Option<&PlayerView>, e: &MobEvent) -> bool {
             ..
         } => true,
         // ServerExplosion.hurtEntities: within twice the radius every hit does damage.
-        MobEvent::Explode(at, radius, _) => {
+        MobEvent::Explode(at, radius, _, _) => {
             let d = Vec3::new(at[0], at[1], at[2])
                 .distance_squared(p.position)
                 .sqrt();
@@ -1068,6 +1071,13 @@ pub fn main() -> horizon_client::Result<()> {
                     // Set once the brain exists (below).
                     x if x.starts_with("cooldown=") => {}
                     "dead" => m.health = 0.0,
+                    // effect=<name>:<amplifier>, never running out.
+                    x if x.starts_with("effect=") => {
+                        let (name, amp) = x[7..].split_once(':').unwrap();
+                        let name: &'static str =
+                            Box::leak(format!("minecraft:{name}").into_boxed_str());
+                        m.add_effect(name, -1, amp.parse().unwrap());
+                    }
                     "leashed" => m.extra.leash = Some(horizon_client::mobs::leash::Holder::Player),
                     x if x.starts_with("leashto=") => {
                         let n: u32 = x[8..].parse().unwrap();
@@ -1076,7 +1086,7 @@ pub fn main() -> horizon_client::Result<()> {
                     other => villager_flag(&mut m, other),
                 }
             }
-            m.random = LegacyRandom::new(spec.seed);
+            m.random.set_seed(spec.seed);
             if matches!(
                 m.species(),
                 Species::Cod | Species::Salmon | Species::TropicalFish
@@ -1197,6 +1207,8 @@ pub fn main() -> horizon_client::Result<()> {
                     others: $snapshot,
                     dragon: None,
                     leash_boats: &[],
+                    who_lookup: None,
+                    foreign: None,
                     others_grid: $grid,
                     others_index: None,
                     others_villagers: None,
@@ -1207,7 +1219,7 @@ pub fn main() -> horizon_client::Result<()> {
                     day_time: world.day_time,
                     raining: s.rain,
                     thundering: s.thunder,
-                    nether: false,
+                    level: horizon_core::LevelKey::OVERWORLD,
                     block_tags: &items.block_tags,
                     landing: &motion.landing,
                     biomes: &biomes,
@@ -1216,7 +1228,7 @@ pub fn main() -> horizon_client::Result<()> {
                     mob_drops: true,
                     max_entity_cramming: 24,
                     difficulty: LocalDifficulty::new(s.difficulty, world.day_time, 0, 0.0),
-                    end: false,
+                    dimension_type: horizon_world::dimension_type::DimensionFacts::overworld(),
                     world_seed: 0,
                     // FlatLevelSource.getSeaLevel.
                     sea_level: -63,
@@ -1434,7 +1446,7 @@ pub fn main() -> horizon_client::Result<()> {
                 // What a copper golem did to chests, before the next mob ticks.
                 for e in &events[from.min(events.len())..] {
                     match e {
-                        MobEvent::ChestOpen { chest, open } => {
+                        MobEvent::ChestOpen { chest, open, .. } => {
                             let o = world
                                 .chest_openers
                                 .entry((chest[0], chest[1], chest[2]))

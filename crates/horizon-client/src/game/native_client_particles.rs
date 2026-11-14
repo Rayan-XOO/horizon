@@ -1,6 +1,7 @@
 //! Local particle requests from native client hooks.
 use super::Game;
 use horizon_client::particles::ParticleOptions;
+use horizon_items::firework::FireworkExplosion;
 use horizon_protocol::entity_data::PositionSource;
 
 fn finite_options(options: &ParticleOptions) -> bool {
@@ -23,13 +24,23 @@ fn finite_options(options: &ParticleOptions) -> bool {
         })
 }
 
+/// The most explosions one `native_client_fireworks` call draws (a crafted
+/// rocket holds at most 7 stars; a mod's show can be larger).
+pub(crate) const MAX_CLIENT_FIREWORK_EXPLOSIONS: usize = 64;
+
+/// Finite numbers and at most [`MAX_CLIENT_FIREWORK_EXPLOSIONS`] explosions.
+fn client_fireworks_ok(at: [f64; 3], velocity: [f64; 3], explosions: &[FireworkExplosion]) -> bool {
+    at.into_iter().chain(velocity).all(f64::is_finite)
+        && explosions.len() <= MAX_CLIENT_FIREWORK_EXPLOSIONS
+}
+
 impl Game<'_> {
     /// `ClientLevel.addParticle`: request one particle in this client's loaded world.
     /// Options and provider input slots pass through unchanged, including encoded
     /// color or size values in `velocity`. Normal distance, settings and population
     /// limits still apply. True means submitted, not necessarily visible: an unknown
     /// provider or missing sprite set draws nothing. False on a server, without a
-    /// client player/level, or for non-finite numeric input. API @API:client_particles@.
+    /// client player/level, or for non-finite numeric input. API 453.
     pub(super) fn native_add_particle(
         &mut self,
         options: &ParticleOptions,
@@ -47,7 +58,40 @@ impl Game<'_> {
         self.particles.add(options, at, velocity);
         true
     }
+    /// `ClientLevel.createFireworks`: a firework's bursts at `at` in this
+    /// client's world, as a rocket's explosion draws them (the client-only
+    /// `FireworkParticles.Starter`): each explosion's shape, colours, fade
+    /// colours, trail and twinkle, one after another, with the blast and
+    /// twinkle sounds; no explosions puffs a little smoke, as vanilla's. Only
+    /// the picture and the sound: no entity, no damage, nothing on the
+    /// server, and other players see nothing (a mod's server half tells each
+    /// client half to draw it). `velocity` is the rocket's, carried by the
+    /// sparks. True means queued; false on a server, without a client player
+    /// or level, for non-finite input and for more than
+    /// [`MAX_CLIENT_FIREWORK_EXPLOSIONS`] explosions. API
+    /// 580.
+    pub(super) fn native_client_fireworks(
+        &mut self,
+        at: [f64; 3],
+        velocity: [f64; 3],
+        explosions: &[FireworkExplosion],
+    ) -> bool {
+        if !self.native_window()
+            || self.player.is_none()
+            || !client_fireworks_ok(at, velocity, explosions)
+        {
+            return false;
+        }
+        let camera = self.eye_position().unwrap_or(at);
+        self.particles
+            .fireworks(at, velocity, explosions.to_vec(), camera, true);
+        true
+    }
 }
+
+#[cfg(test)]
+#[path = "client_fireworks_tests.rs"]
+mod client_fireworks_tests;
 
 #[cfg(test)]
 mod tests {

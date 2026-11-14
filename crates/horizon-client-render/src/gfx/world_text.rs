@@ -3,7 +3,7 @@ pub(super) fn pipeline(
     device: &wgpu::Device,
     layout: Option<&wgpu::PipelineLayout>,
     shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
+    (format, linear): (wgpu::TextureFormat, bool),
 ) -> wgpu::RenderPipeline {
     let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Uint32,3=>Unorm8x4,4=>Uint8x4,5=>Snorm8x4,6=>Float32x2];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -33,8 +33,11 @@ pub(super) fn pipeline(
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_entity"),
-            compilation_options: Default::default(),
+            entry_point: Some("fs_entity_unmarked"),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &super::linear_blend::frame_constants(format, linear),
+                ..Default::default()
+            },
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -63,16 +66,23 @@ mod tests {
             label: None,
             source: wgpu::ShaderSource::Wgsl(
                 r#"
+override HDR_WRITE_LIGHT: bool = false;
+override FRAME_LINEAR: bool = false;
 struct Out { @builtin(position) pos:vec4<f32>, @location(0) color:vec4<f32> }
 @vertex fn vs_entity(@location(0) pos:vec3<f32>, @location(3) color:vec4<f32>)->Out {
  return Out(vec4(pos,1.0),color);
 }
-@fragment fn fs_entity(v:Out)->@location(0) vec4<f32> { return v.color; }
+@fragment fn fs_entity_unmarked(v:Out)->@location(0) vec4<f32> { return v.color; }
 "#
                 .into(),
             ),
         });
-        let pipeline = pipeline(&device, None, &shader, wgpu::TextureFormat::Rgba8Unorm);
+        let pipeline = pipeline(
+            &device,
+            None,
+            &shader,
+            (wgpu::TextureFormat::Rgba8Unorm, false),
+        );
         let texture = |format, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: None,

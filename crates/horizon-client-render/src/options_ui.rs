@@ -2,34 +2,47 @@
 //! Controls, Key Binds, Mouse Settings, Chat Settings, Accessibility,
 //! Language and Resource Packs, laid out like vanilla's HeaderAndFooter /
 //! OptionsList screens and drawn with the shared widgets.
+mod pack_drop;
+
 use std::time::Instant;
 
 pub use crate::settings::Opt;
 
+#[path = "options_ui_widgets.rs"]
+mod widgets;
 use crate::{
     gamepad::{self, GlyphStyle},
+    hdr_calibration::Picture,
     hud::{HudAtlas, HudBatch, rgba},
     keybinds::{self, CATEGORIES, KeyBinds, all_mappings},
     lang::{self, LanguageInfo},
     settings::{SOUND_SOURCES, Settings},
+    settings_shell as shell,
     text::{self, Style, Text},
     ui,
 };
+pub(crate) use widgets::{button, inactive};
+
+#[path = "options_ui_values.rs"]
+mod values;
+pub(crate) use values::{chat_delay_label, chat_px, generic, on_off, percent};
+
+mod shell_pages;
+
+#[path = "options_ui_wheel.rs"]
+mod wheel;
+pub(crate) use wheel::slider_unsnapped;
 
 fn tr(key: &str) -> Text {
     Text::translate(key, &[])
 }
-fn generic(caption: &str, value: Text) -> Text {
-    Text::translate("options.generic_value", &[tr(caption), value])
-}
-fn percent(caption: &str, value: f32) -> Text {
-    Text::translate(
-        "options.percent_value",
-        &[
-            tr(caption),
-            Text::literal(((f64::from(value) * 100.0) as i32).to_string()),
-        ],
-    )
+
+/// False only in a game built without the `horizon-extras` feature (docs/forking.md), which says
+/// so once at startup: the Options screen then has vanilla's Telemetry Data slot instead of
+/// Horizon Settings and Mods, and Credits & Attribution names the official build.
+pub static HORIZON_EXTRAS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+fn horizon_extras() -> bool {
+    HORIZON_EXTRAS.load(std::sync::atomic::Ordering::Relaxed)
 }
 /// `text` cut into lines of at most `width` characters, at spaces where it has them.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -55,19 +68,10 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     lines
 }
-fn on_off(v: bool) -> Text {
-    tr(if v { "options.on" } else { "options.off" })
-}
 /// A music track's name as its row shows it: the file, without its folder
 /// (`minecraft:music/game/calm1` -> `calm1`; the group names the situation).
 fn track_name(id: &str) -> &str {
     id.rsplit('/').next().unwrap_or(id)
-}
-fn chat_px(caption: &str, px: f32) -> Text {
-    Text::translate(
-        "options.pixel_value",
-        &[tr(caption), Text::literal((px as i32).to_string())],
-    )
 }
 pub(crate) enum Kind {
     /// Slider position 0..1.
@@ -293,6 +297,7 @@ impl Opt {
             // the namespace the client bundles (assets/horizon/lang).
             Opt::PadEnabled => "horizon.options.controller",
             Opt::PadVibration => "horizon.options.vibration",
+            Opt::PadPlayInBackground => "horizon.options.play_in_background",
             Opt::PadAdaptiveTriggers => "horizon.options.adaptive_triggers",
             Opt::PadLightbar => "horizon.options.lightbar",
             Opt::PadLookSensitivity => "horizon.options.look_sensitivity",
@@ -302,12 +307,17 @@ impl Opt {
             Opt::PadRepeatInterval => "horizon.options.repeat_interval",
             Opt::PadInvertX => "horizon.options.invert_x",
             Opt::PadInvertY => "horizon.options.invert_y",
+            Opt::PadCraftOnServers => "horizon.options.craft_on_servers",
             Opt::PadToggleSneak => "horizon.options.sneak_button",
             Opt::PadMoveDeadzone => "horizon.options.move_deadzone",
             Opt::PadLookDeadzone => "horizon.options.look_deadzone",
             Opt::PadTriggerThreshold => "horizon.options.trigger_threshold",
             Opt::PadGlyphs => "horizon.options.button_glyphs",
+            Opt::PadNintendoButtons => "horizon.options.nintendo_buttons",
             Opt::PadKeyboard => "horizon.options.on_screen_keyboard",
+            Opt::PadGameplayGuide => "horizon.options.gameplay_guide",
+            Opt::PadRadialMode => "horizon.options.radial_mode",
+            Opt::PadRadialStick => "horizon.options.radial_stick",
             Opt::ModelPart(i) => [
                 "options.modelPart.cape",
                 "options.modelPart.jacket",
@@ -325,11 +335,13 @@ impl Opt {
             Opt::SharePresence => "options.sharePresence",
             Opt::DirectionalAudio => "options.directionalAudio",
             Opt::MusicToast => "options.musicToast",
+            Opt::Page(page, row) => pages::slider_caption(page, row),
         }
     }
     pub(crate) fn kind(self, s: &Settings) -> Kind {
         let unit = |v: f32, lo: f32, hi: f32| Kind::Slider(((v - lo) / (hi - lo)).clamp(0.0, 1.0));
         match self {
+            Opt::ChatDelay => values::kind(s.file.double("chatDelay")),
             Opt::FovEffects | Opt::DarknessPulsing => {
                 Kind::Slider(s.file.double(self.file_key().unwrap()).sqrt() as f32)
             }
@@ -346,7 +358,7 @@ impl Opt {
             ),
             Opt::SimulationDistance => unit(s.simulation_distance as f32, 5.0, 32.0),
             Opt::Sensitivity => Kind::Slider(s.sensitivity),
-            Opt::WheelSensitivity => unit(s.mouse_wheel_sensitivity, 0.01, 10.0),
+            Opt::WheelSensitivity => wheel::kind(s.mouse_wheel_sensitivity),
             Opt::Volume(i) => Kind::Slider(if i == 0 {
                 s.master_volume
             } else {
@@ -388,6 +400,7 @@ impl Opt {
             Opt::PadLookDeadzone => unit(s.controller.look_deadzone, 0.0, 0.5),
             Opt::PadTriggerThreshold => unit(s.controller.trigger_threshold, 0.1, 0.9),
             Opt::SprintWindow => unit(s.sprint_window as f32, 0.0, 10.0),
+            Opt::Page(page, row) => pages::slider_kind(page, row),
             _ => Kind::Cycle,
         }
     }
@@ -437,6 +450,7 @@ impl Opt {
     /// The discrete step count for stepped sliders, or `None` if continuous.
     pub fn slider_steps(self) -> Option<u32> {
         match self {
+            Opt::ChatDelay => Some(60),
             Opt::Fov => Some(80),
             Opt::RenderDistance => Some((crate::options_file::MAX_RENDER_DISTANCE - 2) as u32),
             Opt::SimulationDistance => Some(27),
@@ -487,7 +501,7 @@ impl Opt {
     pub fn label(self, s: &Settings) -> Text {
         let c = self.caption();
         match self {
-            Opt::ChatDelay => tr("options.chat.delay_none"),
+            Opt::ChatDelay => chat_delay_label(s),
             Opt::FovEffects
             | Opt::DarknessPulsing
             | Opt::DistortionEffects
@@ -692,7 +706,7 @@ impl Opt {
             } else {
                 "options.narrator.notavailable"
             }),
-            Opt::ChatDelay => tr("options.chat.delay_none"),
+            Opt::ChatDelay => chat_delay_label(s),
             Opt::HideLightningFlashes => on_off(s.file.bool("hideLightningFlashes")),
             Opt::MonochromeLogo => on_off(s.file.bool("darkMojangStudiosBackground")),
             Opt::HideSplashTexts => on_off(s.file.bool("hideSplashTexts")),
@@ -828,9 +842,16 @@ impl Opt {
             Opt::JapaneseGlyphs => on_off(s.japanese_glyphs),
             Opt::PadEnabled => on_off(s.controller.enabled),
             Opt::PadVibration => on_off(s.controller.vibration),
+            Opt::PadPlayInBackground => on_off(s.controller.play_in_background),
             Opt::PadAdaptiveTriggers => on_off(s.controller.adaptive_triggers),
+            Opt::PadGameplayGuide => tr(match s.controller.guide_detail {
+                gamepad::GuideDetail::Full => "horizon.options.gameplay_guide.full",
+                gamepad::GuideDetail::Basic => "horizon.options.gameplay_guide.basic",
+                gamepad::GuideDetail::Off => "horizon.options.gameplay_guide.off",
+            }),
             Opt::PadInvertX => on_off(s.controller.invert_x),
             Opt::PadInvertY => on_off(s.controller.invert_y),
+            Opt::PadCraftOnServers => on_off(s.controller.craft_on_servers),
             Opt::PadToggleSneak => tr(if s.controller.toggle_sneak {
                 "options.key.toggle"
             } else {
@@ -847,11 +868,18 @@ impl Opt {
                 GlyphStyle::PlayStation => "horizon.options.glyphs.playstation",
                 GlyphStyle::Nintendo => "horizon.options.glyphs.nintendo",
             }),
+            Opt::PadNintendoButtons => tr(if s.controller.nintendo_letters {
+                "horizon.options.nintendo_buttons.letter"
+            } else {
+                "horizon.options.nintendo_buttons.position"
+            }),
             Opt::PadKeyboard => tr(match s.controller.keyboard {
                 gamepad::TextKeyboard::Auto => "horizon.options.keyboard.auto",
                 gamepad::TextKeyboard::Horizon => "horizon.options.keyboard.horizon",
                 gamepad::TextKeyboard::Steam => "horizon.options.keyboard.steam",
             }),
+            Opt::PadRadialMode | Opt::PadRadialStick => self.radial_text(s),
+            Opt::Page(page, row) => pages::slider_text(page, row),
             _ => Text::empty(),
         }
     }
@@ -863,6 +891,7 @@ impl Opt {
         let v = v.clamp(0.0, 1.0);
         let step = |lo: f32, hi: f32| (lo + v * (hi - lo)).round();
         match self {
+            Opt::ChatDelay => values::set(s, v),
             Opt::FovEffects | Opt::DarknessPulsing => s.file.set(
                 self.file_key().unwrap(),
                 crate::options_file::V::Double(f64::from(v).powi(2)),
@@ -882,7 +911,7 @@ impl Opt {
             }
             Opt::SimulationDistance => s.simulation_distance = step(5.0, 32.0) as i32,
             Opt::Sensitivity => s.sensitivity = v,
-            Opt::WheelSensitivity => s.mouse_wheel_sensitivity = 0.01 + v * 9.99,
+            Opt::WheelSensitivity => s.mouse_wheel_sensitivity = wheel::from_slider(v),
             Opt::Volume(0) => s.master_volume = v,
             Opt::Volume(i) => s.volumes[i] = v,
             Opt::Gamma => s.gamma = v,
@@ -890,7 +919,7 @@ impl Opt {
             Opt::CloudRange => s.cloud_range = step(2.0, 128.0) as i32,
             Opt::EntityDistance => s.entity_distance = step(2.0, 20.0) / 4.0,
             Opt::BiomeBlend => s.biome_blend = step(0.0, 7.0) as i32,
-            Opt::Preset => s.graphics_preset = PRESETS[step(0.0, 3.0) as usize].into(),
+            Opt::Preset => s.graphics_preset = PRESETS[preset_from_slider(v)].into(),
             Opt::Mipmaps => s.mipmap_levels = step(0.0, 4.0) as i32,
             Opt::MaxAnisotropy => s.file.set(
                 "maxAnisotropyBit",
@@ -926,6 +955,7 @@ impl Opt {
             Opt::PadLookDeadzone => s.controller.look_deadzone = step(0.0, 50.0) / 100.0,
             Opt::PadTriggerThreshold => s.controller.trigger_threshold = step(10.0, 90.0) / 100.0,
             Opt::SprintWindow => s.sprint_window = step(0.0, 10.0) as i32,
+            Opt::Page(page, row) => pages::slide(page, row, v),
             _ => {}
         }
         if self.affects_preset() {
@@ -1125,12 +1155,21 @@ impl Opt {
             Opt::JapaneseGlyphs => s.japanese_glyphs = !s.japanese_glyphs,
             Opt::PadEnabled => s.controller.enabled = !s.controller.enabled,
             Opt::PadVibration => s.controller.vibration = !s.controller.vibration,
+            Opt::PadPlayInBackground => {
+                s.controller.play_in_background = !s.controller.play_in_background
+            }
             Opt::PadAdaptiveTriggers => {
                 s.controller.adaptive_triggers = !s.controller.adaptive_triggers
             }
             Opt::PadInvertX => s.controller.invert_x = !s.controller.invert_x,
             Opt::PadInvertY => s.controller.invert_y = !s.controller.invert_y,
+            Opt::PadCraftOnServers => {
+                s.controller.craft_on_servers = !s.controller.craft_on_servers
+            }
             Opt::PadToggleSneak => s.controller.toggle_sneak = !s.controller.toggle_sneak,
+            Opt::PadNintendoButtons => {
+                s.controller.nintendo_letters = !s.controller.nintendo_letters
+            }
             Opt::PadLightbar => {
                 let all = gamepad::Lightbar::ALL;
                 let i = all
@@ -1146,6 +1185,14 @@ impl Opt {
                     .unwrap_or(0) as u8;
                 s.controller.glyphs = GlyphStyle::ALL[usize::from(next(i, 4))];
             }
+            Opt::PadGameplayGuide => {
+                let all = gamepad::GuideDetail::ALL;
+                let i = all
+                    .iter()
+                    .position(|d| *d == s.controller.guide_detail)
+                    .unwrap_or(0) as u8;
+                s.controller.guide_detail = all[usize::from(next(i, 3))];
+            }
             Opt::PadKeyboard => {
                 let all = gamepad::TextKeyboard::ALL;
                 let i = all
@@ -1154,98 +1201,13 @@ impl Opt {
                     .unwrap_or(0) as u8;
                 s.controller.keyboard = all[usize::from(next(i, 3))];
             }
+            Opt::PadRadialMode | Opt::PadRadialStick => self.radial_step(s, back),
             _ => {}
         }
         if self.affects_preset() {
             s.graphics_preset = "custom".into();
         }
     }
-}
-const PRESETS: [&str; 4] = ["fast", "fancy", "fabulous", "custom"];
-fn preset_index(p: &str) -> usize {
-    PRESETS.iter().position(|x| *x == p).unwrap_or(1)
-}
-/// A slider moved to `v` (OptionInstance.set): the graphics preset applies
-/// its options when its value changes (`Options.applyGraphicsPreset`).
-pub fn set_slider(opt: Opt, s: &mut Settings, v: f32) {
-    let preset = preset_index(&s.graphics_preset);
-    opt.set_slider(s, v);
-    if opt == Opt::Preset && preset_index(&s.graphics_preset) != preset {
-        apply_preset(s);
-    }
-}
-/// A slider pressed or dragged to `v`: apply it live, and tell the game when
-/// a category volume changed (`Options.createSoundSliderOptionInstance`'s
-/// callback, which `OptionInstance.set` runs only for a new value).
-fn drag_slider(opt: Opt, s: &mut Settings, v: f32, events: &mut Vec<Event>) {
-    let volume = |s: &Settings| match opt {
-        Opt::Volume(0) => Some(s.master_volume),
-        Opt::Volume(i) => Some(s.volumes[i]),
-        _ => None,
-    };
-    let before = volume(s);
-    set_slider(opt, s, v);
-    events.push(Event::SliderDrag);
-    if let (Opt::Volume(source), Some(after)) = (opt, volume(s))
-        && before != Some(after)
-    {
-        events.push(Event::Volume(source, after));
-    }
-}
-/// GraphicsPreset.apply: the options Fast, Fancy and Fabulous set.
-pub fn apply_preset(s: &mut Settings) {
-    let fabulous = s.graphics_preset == "fabulous";
-    match s.graphics_preset.as_str() {
-        "fast" => {
-            s.biome_blend = 1;
-            s.render_distance = 8;
-            s.prioritize_chunk_updates = 0;
-            s.simulation_distance = 6;
-            s.smooth_lighting = false;
-            s.clouds = "fast".into();
-            s.particles = 1;
-            s.mipmap_levels = 2;
-            s.entity_shadows = false;
-            s.entity_distance = 0.75;
-            s.menu_blur = 2;
-            s.cloud_range = 32;
-            s.cutout_leaves = false;
-            s.improved_transparency = false;
-            s.weather_radius = 5;
-            set_filtering(s, 1, 0);
-        }
-        "fancy" | "fabulous" => {
-            s.biome_blend = 2;
-            s.render_distance = if fabulous { 32 } else { 16 };
-            s.prioritize_chunk_updates = 1;
-            s.simulation_distance = 12;
-            s.smooth_lighting = true;
-            s.clouds = "true".into();
-            s.particles = 0;
-            s.mipmap_levels = 4;
-            s.entity_shadows = true;
-            s.entity_distance = if fabulous { 1.25 } else { 1.0 };
-            s.menu_blur = 5;
-            s.cloud_range = if fabulous { 128 } else { 64 };
-            s.cutout_leaves = true;
-            s.improved_transparency = fabulous;
-            s.weather_radius = 10;
-            // Fabulous takes anisotropic filtering (RGSS on a device with known issues, which
-            // wgpu does not report).
-            set_filtering(
-                s,
-                if fabulous { 2 } else { 1 },
-                if fabulous { 2 } else { 1 },
-            );
-        }
-        _ => {}
-    }
-}
-/// The preset's `maxAnisotropyBit` and `textureFiltering` (0 none, 1 RGSS, 2 anisotropic).
-fn set_filtering(s: &mut Settings, anisotropy_bit: i32, filtering: i32) {
-    use crate::options_file::V;
-    s.file.set("maxAnisotropyBit", V::Int(anisotropy_bit));
-    s.file.set("textureFiltering", V::Int(filtering));
 }
 
 /// `Options.preferredGraphicsBackend`'s tooltip: the restart note once the choice differs from
@@ -1288,10 +1250,14 @@ pub enum Page {
     ModProject,
     /// A native mod's settings page: its index in `mods.installed`.
     NativeMod(usize),
+    /// A page a crate registered (`horizon_hooks::pages`): its index in `OptionsUi::pages`.
+    Added(usize),
     /// Horizon's shader packs, either kind (`shader_pack_list`).
     ShaderPacks,
     /// The picked pack's options: the shader screen (`shader_ui`) at the pack's main screen.
     ShaderOptions,
+    /// The selected resource packs' Polytone options (`pack_options_ui`), from the pack screen.
+    PackOptions,
     /// Horizon's graphics settings (`graphics_ui`).
     Graphics,
     GraphicsAdvanced,
@@ -1301,6 +1267,11 @@ pub enum Page {
     /// Horizon's controller settings and button binds.
     Controller,
     PadBinds,
+    /// The radial menu's pages (`radial_editor`), on the settings shell, and a page's name.
+    ControllerRadial,
+    ControllerRadialName,
+    /// The list of every action for one of its slots.
+    ControllerRadialPick,
     Extras,
     /// PvP & HUD (`pvp`): the extras a PvP player sets, on their own page.
     Pvp,
@@ -1326,7 +1297,7 @@ pub enum Page {
     Music,
 }
 #[derive(Clone, Debug, PartialEq)]
-enum Act {
+pub(crate) enum Act {
     None,
     Push(Page),
     Done,
@@ -1345,6 +1316,8 @@ enum Act {
     /// A native mod's key (mod, key) waits for a key; a button of its page.
     NativeKey(usize, usize),
     NativeButton(usize, usize),
+    /// A registered page's row: (page, row).
+    PageRow(usize, usize),
     OpenModFolder,
     /// Browse mods: the page of listing `.0` of `mod_browser`.
     ModProject(usize),
@@ -1389,7 +1362,7 @@ enum WKind {
         code: String,
     },
 }
-struct Widget {
+pub(crate) struct Widget {
     x: f32,
     y: f32,
     w: f32,
@@ -1444,6 +1417,14 @@ fn matches_focus(id: &FocusId, i: usize, wd: &Widget) -> bool {
 /// What the game must do after an interaction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    /// Dropped resource packs accepted on the confirmation screen.
+    ImportPacks(Vec<std::path::PathBuf>),
+    /// The Pack Options page closed with changes: the player's choices of its entries, the
+    /// ones that differ from their defaults (the others went back to theirs).
+    PackOptions {
+        entries: Vec<String>,
+        chosen: std::collections::BTreeMap<String, horizon_polytone::pack::ConfigValue>,
+    },
     /// An accepted button press or the release of a slider.
     ButtonClick,
     /// Horizon's own: download the Modrinth hit at this index of the pack
@@ -1515,6 +1496,8 @@ pub enum Event {
     PlayMusicTrack(String, String),
     /// Open the recordings folder in the system file browser.
     OpenStudioFolder,
+    /// Start playback from the selected Studio recording.
+    OpenStudioReplay(std::path::PathBuf),
 }
 /// A row of the Music page: the track, and the pool it is played from.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1532,23 +1515,6 @@ pub struct MusicGroup {
     /// The rows, in `sounds.json` order.
     pub tracks: Vec<MusicTrack>,
 }
-/// `SliderableValueSet.applyValueImmediately`: these apply 600 ms after
-/// the last change (`OptionInstanceSliderButton.delayedApplyAt`).
-fn delays_apply(opt: Opt) -> bool {
-    matches!(
-        opt,
-        Opt::RenderDistance | Opt::SimulationDistance | Opt::BiomeBlend | Opt::WheelSensitivity
-    )
-}
-/// Whether a slider still shows its own position: while held, or for a
-/// delayed one until its value applies (both then `resetValue`).
-fn slider_unsnapped(opt: Opt, held: bool, moved: Instant) -> bool {
-    if delays_apply(opt) {
-        moved.elapsed().as_millis() < 600
-    } else {
-        held
-    }
-}
 pub struct OptionsUi {
     pub stack: Vec<Page>,
     scroll: f32,
@@ -1564,15 +1530,14 @@ pub struct OptionsUi {
     /// Key Binds: the mapping waiting for a key ([`NATIVE_KEY`]: a native
     /// mod's, `selected_native_key`).
     pub selected_key: Option<&'static str>,
-    /// The native mod's key waiting: (mod, key) in `mods.installed`.
+    /// The native mod's key waiting: (mod, key) in `mods.installed`, or a registered page's
+    /// (page, row) ([`pages::PAGE_KEY`]).
     selected_native_key: Option<(usize, usize)>,
     /// Bindings: the action waiting for a pad button.
     pub selected_pad_action: Option<&'static str>,
-    /// The glyphs the binds list shows (the setting, else the pad's family).
-    pub pad_style: GlyphStyle,
-    /// The pad goes by its letters (`PadSettings::nintendo_letters`) and the glyphs are
-    /// Nintendo's: each part shows the letter of the button playing it.
-    pub pad_by_letter: bool,
+    /// The glyphs menus show (`Glyphs::of`: the setting, else the pad's family, and a Nintendo
+    /// pad's letters when it goes by them). The game sets it each frame.
+    pub pad_glyphs: crate::pad_glyph::Glyphs,
     /// The pad's focus drives the page: its hidden pointer sits mid-widget, so a tooltip goes
     /// under the widget instead of beside the pointer.
     pub pad_driving: bool,
@@ -1615,14 +1580,29 @@ pub struct OptionsUi {
     pub minecart_improvements: bool,
     /// Scroll the selected language into the middle on the next layout.
     center_language: bool,
-    pub graphics: crate::graphics_ui::GraphicsUi,
-    pub controller: crate::controller_ui::ControllerUi,
-    pub shader: crate::shader_ui::ShaderUi,
+    /// The output of the renderer the options are drawn for, as of the last draw. It lives
+    /// here, not on the graphics screen, which opening resets: `shell_mut` hands it over.
+    output: crate::gfx::EffectiveOutput,
+    graphics: shell::Shell<crate::graphics_ui::GraphicsScreen>,
+    /// Controller Settings, on the settings shell.
+    controller: shell::Shell<crate::controller_ui::ControllerScreen>,
+    /// Horizon Extras, on the settings shell.
+    extras: shell::Shell<crate::extras_ui::ExtrasScreen>,
+    /// The radial menu's pages, on the settings shell.
+    radial: shell::Shell<crate::radial_editor::RadialScreen>,
+    /// The list of actions for one of the radial menu's slots.
+    radial_pick: shell::Shell<crate::radial_editor::PickScreen>,
+    /// Shaders: the shader packs and the picked one's options, on the settings shell.
+    shader: shell::Shell<crate::shader_ui::ShaderScreen>,
+    /// Pack Options, on the settings shell, and the packs' Polytone config entries by pack id
+    /// (the game fills them beside `pack_infos`).
+    pack_options: shell::Shell<crate::pack_options_ui::PackOptionsScreen>,
+    pub pack_configs: std::collections::BTreeMap<String, horizon_polytone::pack::Configs>,
     pub split_profiles: crate::split_profiles::SplitProfiles,
     /// HDR calibration while its page is open.
     pub calibration: Option<crate::hdr_calibration::Calibration>,
-    /// Whether the window was fullscreen before calibration made it so (the game keeps it).
-    pub calibration_fullscreen: Option<bool>,
+    /// The window as calibration found it before making it fullscreen (the game keeps it).
+    pub calibration_window: Option<crate::hdr_calibration::WindowState>,
     pub split_setup: crate::split_ui::SplitUi,
     pub studio: crate::studio_ui::StudioUi,
     /// The AI Agent page's status lines (set by the game while it shows).
@@ -1649,7 +1629,7 @@ pub struct OptionsUi {
     /// The list's rows as last laid out: each row's top and bottom (GUI
     /// pixels), for the narration's row under the mouse.
     row_bands: Vec<[f32; 2]>,
-    /// The Extras or PvP & HUD items that take a whole row (`wide_extras`), measured
+    /// The PvP & HUD items that take a whole row (`wide_extras`), measured
     /// when the page is drawn.
     wide_extras: Vec<crate::extras::Item>,
 }
@@ -1669,8 +1649,7 @@ impl Default for OptionsUi {
             selected_key: None,
             selected_native_key: None,
             selected_pad_action: None,
-            pad_style: GlyphStyle::Xbox,
-            pad_by_letter: false,
+            pad_glyphs: crate::pad_glyph::Glyphs::default(),
             pad_driving: false,
             languages: Vec::new(),
             language_choice: None,
@@ -1693,12 +1672,18 @@ impl Default for OptionsUi {
             in_world: false,
             minecart_improvements: false,
             center_language: false,
+            output: crate::gfx::EffectiveOutput::NONE,
             graphics: Default::default(),
             controller: Default::default(),
+            extras: Default::default(),
+            radial: Default::default(),
+            radial_pick: Default::default(),
             shader: Default::default(),
+            pack_options: Default::default(),
+            pack_configs: Default::default(),
             split_profiles: Default::default(),
             calibration: None,
-            calibration_fullscreen: None,
+            calibration_window: None,
             split_setup: Default::default(),
             studio: Default::default(),
             agent_status: Vec::new(),
@@ -1714,27 +1699,6 @@ impl Default for OptionsUi {
             wide_extras: Vec::new(),
         }
     }
-}
-fn button(x: f32, y: f32, w: f32, label: Text, act: Act) -> Widget {
-    Widget {
-        x,
-        y,
-        w,
-        h: 20.0,
-        kind: WKind::Button {
-            label,
-            active: true,
-            act,
-        },
-        list: false,
-        row: 0,
-    }
-}
-fn inactive(mut w: Widget) -> Widget {
-    if let WKind::Button { active, .. } = &mut w.kind {
-        *active = false;
-    }
-    w
 }
 fn option_widget(s: &Settings, opt: Opt, x: f32, y: f32, w: f32) -> Widget {
     // OptionsSubScreen.addContents: the narrator button is active only while
@@ -1763,24 +1727,23 @@ fn option_widget(s: &Settings, opt: Opt, x: f32, y: f32, w: f32) -> Widget {
         Kind::Cycle => button(x, y, w, opt.label(s), Act::Cycle(opt)),
     }
 }
-/// The Extras or PvP & HUD page's rows: its items under their headers.
-fn extras_rows(page: Page) -> Vec<Result<crate::extras::Item, &'static str>> {
-    match page {
-        Page::Pvp => crate::pvp::rows()
-            .into_iter()
-            .map(|r| r.map(crate::extras::Item::Pvp))
-            .collect(),
-        _ => crate::extras::rows(),
-    }
+/// The least GUI size a shell screen lays its keys out for, before it has been drawn at its own.
+const MIN_KEY_GUI: (f32, f32) = (480.0, 240.0);
+/// The PvP & HUD page's rows: its items under their headers.
+fn pvp_rows() -> Vec<Result<crate::extras::Item, &'static str>> {
+    crate::pvp::rows()
+        .into_iter()
+        .map(|r| r.map(crate::extras::Item::Pvp))
+        .collect()
 }
-/// The items of `page`'s rows whose label, with any of their first values, is wider than a
+/// The items of PvP & HUD's rows whose label, with any of their first values, is wider than a
 /// half-width button holds (`width` measures text with the screen's font): those take the
 /// whole row, so no label slides past its edges, in any language.
-fn wide_extras(s: &Settings, page: Page, width: impl Fn(&str) -> f32) -> Vec<crate::extras::Item> {
+fn wide_extras(s: &Settings, width: impl Fn(&str) -> f32) -> Vec<crate::extras::Item> {
     // A button's label keeps 2 px off each edge (`AbstractButton.renderString`'s margin),
     // past which it slides back and forth.
     let room = 150.0 - 4.0;
-    extras_rows(page)
+    pvp_rows()
         .into_iter()
         .filter_map(Result::ok)
         .filter(|&item| {
@@ -1796,25 +1759,6 @@ fn wide_extras(s: &Settings, page: Page, width: impl Fn(&str) -> f32) -> Vec<cra
             })
         })
         .collect()
-}
-/// What a button opening one of Horizon's pages says on hover.
-fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
-    Some(match page {
-        Page::Horizon => "horizon.pages.settings.tooltip",
-        Page::Studio => "horizon.pages.studio.tooltip",
-        Page::Graphics => "horizon.pages.graphics.tooltip",
-        Page::GraphicsAdvanced => "horizon.pages.graphics_advanced.tooltip",
-        Page::Controller => "horizon.pages.controller.tooltip",
-        Page::Extras => "horizon.pages.extras.tooltip",
-        Page::Pvp => "horizon.pages.pvp.tooltip",
-        Page::Agent => "horizon.pages.agent.tooltip",
-        Page::SplitProfiles => "horizon.pages.split_profiles.tooltip",
-        Page::ShaderPacks => "horizon.pages.shader_packs.tooltip",
-        Page::Mods => "horizon.pages.mods.tooltip",
-        Page::SplitSetup => "horizon.pages.split_setup.tooltip",
-        Page::Music => "horizon.pages.music.tooltip",
-        _ => return None,
-    })
 }
 /// Rows of an OptionsList: (big?, options) or a header.
 enum Row {
@@ -1835,14 +1779,17 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
             return None;
         };
         let key = opt.tooltip_key(s);
-        return lang::has(&key).then(|| tr(&key));
+        let Opt::Page(page, row) = opt else {
+            return lang::has(&key).then(|| tr(&key));
+        };
+        return pages::tooltip(*page, *row);
     };
     let mut tip = None;
     if let Act::Extra(item) = act {
         tip = Some(Text::literal(item.description_text()));
     }
     if let Act::Push(page) = act
-        && let Some(text) = horizon_page_tooltip(*page)
+        && let Some(text) = pages::horizon_page_tooltip(*page)
     {
         tip = Some(tr(text));
     }
@@ -1862,6 +1809,7 @@ fn tooltip_text(s: &Settings, wd: &Widget) -> Option<Text> {
     }
     match act {
         Act::Cycle(opt) if !opt.available() => Some(tr("horizon.options.unavailable")),
+        Act::PageRow(page, row) => pages::tooltip(*page, *row),
         Act::ToggleMod(i) => match s.mods.installed.get(*i) {
             Some(installed) => {
                 let description = installed
@@ -2004,6 +1952,9 @@ impl OptionsUi {
         if !self.focus_from_keyboard {
             self.focus = None;
         }
+        if let Some(shell) = self.shell_mut() {
+            shell.blur_search();
+        }
     }
     /// A switch of `horizon-extras.txt` as the Extras page draws it: "Caption: On".
     fn extra_button(&self, s: &Settings, item: crate::extras::Item) -> Widget {
@@ -2032,23 +1983,6 @@ impl OptionsUi {
                 Page::Video | Page::Controls | Page::KeyBinds | Page::ModBrowser
             )
     }
-    /// Whether the resource pack screen is open (not Create World's data packs on the same
-    /// page).
-    pub fn resource_packs_open(&self) -> bool {
-        self.page() == Page::Packs && self.data_pack_dir.is_none()
-    }
-    /// The packs in `resourcepacks/` changed while the pack screen is open
-    /// (`PackSelectionScreen`'s directory watcher): the screen is made again over
-    /// `infos`, keeping the selection made on it so far.
-    pub fn update_pack_infos(&mut self, infos: Vec<crate::pack_screen::PackInfo>) {
-        if let Some(p) = self.pack_screen.take()
-            && p.changed
-        {
-            self.pack_selection = p.commit();
-            self.pack_reselected = true;
-        }
-        self.pack_infos = infos;
-    }
     pub fn page(&self) -> Page {
         *self.stack.last().unwrap_or(&Page::Main)
     }
@@ -2063,12 +1997,11 @@ impl OptionsUi {
                     .pack_screen
                     .as_ref()
                     .is_some_and(|p| p.search_focused()),
-                Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr => {
-                    self.graphics.typing()
-                }
-                Page::Controller | Page::PadBinds => self.controller.typing(),
-                _ if Self::shader_page(self.page()).is_some() => self.shader.typing(),
-                _ => self.settings_search_active(),
+                Page::ControllerRadialName => self.radial_name_typing(),
+                _ => match self.shell() {
+                    Some(shell) => shell.typing(),
+                    None => self.settings_search_active(),
+                },
             }
     }
     /// Jump straight to a page (control socket / tests).
@@ -2175,14 +2108,17 @@ impl OptionsUi {
         if page == Page::Packs {
             self.pack_screen = None;
         }
-        if let Some(at) = Self::graphics_page(page) {
-            self.graphics.open(at);
-        }
-        if let Some(at) = Self::controller_page(page) {
-            self.controller.open(at);
+        if let Some(shell) = self.shell_mut() {
+            shell.open();
         }
         if let Some(at) = Self::shader_page(page) {
-            self.shader.open(at);
+            self.shader.show(at);
+        }
+        if let Some(at) = Self::graphics_page(page) {
+            self.graphics.show(at);
+        }
+        if let Some(at) = Self::controller_page(page) {
+            self.controller.show(at);
         }
         if page == Page::SplitSetup {
             self.split_setup.reset();
@@ -2194,112 +2130,15 @@ impl OptionsUi {
             self.studio.refresh();
         }
     }
-    /// What the graphics screen's actions do to these options.
-    fn graphics_events(
-        &mut self,
-        s: &mut Settings,
-        actions: Vec<crate::graphics_ui::Action>,
-    ) -> Vec<Event> {
-        use crate::graphics_ui::Action;
-        let mut events = Vec::new();
-        for action in actions {
-            match action {
-                Action::ButtonClick => events.push(Event::ButtonClick),
-                Action::Changed => events.push(Event::Changed),
-                Action::SliderDrag => events.push(Event::SliderDrag),
-                Action::BindKey(name) => self.selected_key = Some(name),
-                Action::Calibrate => {
-                    self.calibration = Some(crate::hdr_calibration::Calibration::new(s));
-                    self.push(Page::HdrCalibration);
-                }
-                // The Shaders page's Shader Packs...: the list of either kind, as the page
-                // opens it from anywhere.
-                Action::ShaderPacks => {
-                    events.push(Event::ListShaderPacks);
-                    s.shader_options = None;
-                    events.push(Event::OpenShaderOptions);
-                    self.push(Page::ShaderPacks);
-                }
-                Action::Done => events.extend(self.back(s)),
-            }
-        }
-        events
-    }
-    /// What the controller screen's actions do to these options.
-    fn controller_events(
-        &mut self,
-        s: &mut Settings,
-        actions: Vec<crate::controller_ui::Action>,
-    ) -> Vec<Event> {
-        use crate::controller_ui::Action;
-        let mut events = Vec::new();
-        for action in actions {
-            match action {
-                Action::ButtonClick => events.push(Event::ButtonClick),
-                Action::Changed => events.push(Event::Changed),
-                Action::SliderDrag => events.push(Event::SliderDrag),
-                Action::BindPad(action) => self.selected_pad_action = Some(action),
-                Action::Done => events.extend(self.back(s)),
-            }
-        }
-        events
-    }
-    /// What the shader screen's actions do to these options.
-    fn shader_events(
-        &mut self,
-        s: &mut Settings,
-        actions: Vec<crate::shader_ui::Action>,
-    ) -> Vec<Event> {
-        use crate::shader_ui::Action;
-        let mut events = Vec::new();
-        for action in actions {
-            match action {
-                Action::ButtonClick => events.push(Event::ButtonClick),
-                Action::Changed => events.push(Event::Changed),
-                Action::SliderDrag => events.push(Event::SliderDrag),
-                Action::Picked => {
-                    // The last pack's changed options are kept before the next one's are read.
-                    if s.shader_options.as_ref().is_some_and(|o| o.changed) {
-                        events.push(Event::ShaderOptions);
-                    }
-                    events.push(Event::ShaderPack);
-                    events.push(Event::OpenShaderOptions);
-                }
-                Action::OpenFolder => events.push(Event::OpenShaderPackFolder),
-                Action::Apply => {
-                    events.push(Event::ShaderOptions);
-                    events.push(Event::OpenShaderOptions);
-                }
-                Action::NativeChanged(pack) => events.push(Event::NativePackOptions(pack)),
-                Action::Done => events.extend(self.back(s)),
-            }
-        }
-        events
-    }
-    /// Where the shader screen opens for `page`, if it is one of its pages.
-    fn shader_page(page: Page) -> Option<crate::shader_ui::Tab> {
-        match page {
-            Page::ShaderPacks => Some(crate::shader_ui::Tab::Packs),
-            Page::ShaderOptions => Some(crate::shader_ui::Tab::Screen(0)),
-            _ => None,
-        }
-    }
-    /// Where the controller screen opens for `page`, if it is one of its pages.
-    fn controller_page(page: Page) -> Option<crate::controller_ui::Page> {
-        match page {
-            Page::Controller => Some(crate::controller_ui::Page::General),
-            Page::PadBinds => Some(crate::controller_ui::Page::Bindings),
-            _ => None,
-        }
+    /// A controller's or the keyboard's focus landed on `rect`: a row of a shell screen's list
+    /// that is partly hidden scrolls all into view. How far it moved down, when it moved.
+    pub fn reveal(&mut self, s: &Settings, size: (f32, f32), rect: [f32; 4]) -> Option<f32> {
+        self.shell_mut()?.reveal(s, size, rect)
     }
     /// Whether a video settings screen is open, Horizon's or vanilla's: the fullscreen mode
     /// waits for it to close, and Ctrl with the wheel steps the GUI scale.
     pub fn video_open(&self) -> bool {
         self.page() == Page::Video || Self::graphics_page(self.page()).is_some()
-    }
-    /// Whether the controller screen is open: a controller button pressed now may bind.
-    pub fn controller_open(&self) -> bool {
-        Self::controller_page(self.page()).is_some()
     }
     /// Where the graphics screen opens for `page`, if it is one of its pages.
     fn graphics_page(page: Page) -> Option<crate::graphics_ui::Page> {
@@ -2329,12 +2168,17 @@ impl OptionsUi {
             Page::ModBrowser => "horizon.mods.browse.title",
             Page::ModProject => "horizon.mods.browse.project",
             Page::NativeMod(_) => "Mod Settings",
+            Page::Added(i) => pages::title(i),
             Page::ShaderPacks => "horizon.pages.shader_packs",
             Page::ShaderOptions => "horizon.pages.shader_options",
+            Page::PackOptions => "horizon.pack.options.title",
             Page::Graphics | Page::GraphicsAdvanced | Page::GraphicsHdr | Page::HdrCalibration => {
                 "options.videoTitle"
             }
             Page::Controller | Page::PadBinds => "horizon.pages.controller",
+            Page::ControllerRadial => "horizon.pages.controller_radial",
+            Page::ControllerRadialName => "horizon.radial.name_title",
+            Page::ControllerRadialPick => "horizon.radial.pick_title",
             Page::Extras => "horizon.pages.extras",
             Page::Pvp => "horizon.pages.pvp",
             Page::Credits => "credits_and_attribution.screen.title",
@@ -2544,82 +2388,10 @@ impl OptionsUi {
         }
         rows
     }
-    /// The row that reaches the Zoom mod that replaced the extra: its switch and settings page
-    /// when it is built in, else a note saying where it is installed (Options > Mods). Zoom
-    /// became an official native mod, so Extras has no setting of its own for it (#8713).
-    fn zoom_mod_row(s: &Settings) -> Row {
-        let Some(i) = s
-            .mods
-            .installed
-            .iter()
-            .position(|m| m.id == "zoom" && m.native.is_some())
-        else {
-            // A note, not a button: Options > Mods already has the one way into the Mods page
-            // (`every_setting_and_page_is_reached_from_one_place`).
-            return Row::Note(lang::get("horizon.extras.zoom_mod_install"));
-        };
-        let label = || Text::option_name_value(tr("horizon.extras.zoom"), on_off(s.mods.is_on(i)));
-        let toggle = |width| button(0.0, 0.0, width, label(), Act::ToggleMod(i));
-        let settings = s.mods.installed[i]
-            .native
-            .as_ref()
-            .is_some_and(|page| !page.keys.is_empty() || !page.buttons.is_empty());
-        if settings {
-            Row::Buttons(
-                toggle(150.0),
-                Some(button(
-                    0.0,
-                    0.0,
-                    150.0,
-                    tr("horizon.mods.settings"),
-                    Act::ModSettings(i),
-                )),
-            )
-        } else {
-            Row::Buttons(toggle(310.0), None)
-        }
-    }
-    /// A native mod's page: its name, its keys as Key Binds rows (the
-    /// player's choice, else the default), then its buttons.
-    fn native_rows(&self, s: &Settings, i: usize) -> Vec<Row> {
-        let Some(m) = s.mods.installed.get(i) else {
-            return Vec::new();
-        };
-        let mut rows = vec![Row::Note(m.title.clone())];
-        let Some(page) = &m.native else {
-            return rows;
-        };
-        let chosen = s.mods.keys.get(&m.id);
-        for (k, [name, label, default]) in page.keys.iter().enumerate() {
-            let key = chosen.and_then(|c| c.get(name)).unwrap_or(default);
-            let mut message = keybinds::display_name(key);
-            if self.selected_native_key == Some((i, k)) {
-                message = Text::literal("> ")
-                    .append(message.with_color(text::WHITE))
-                    .append(" <")
-                    .with_color(text::YELLOW);
-            }
-            let caption = button(0.0, 0.0, 150.0, Text::literal(label.clone()), Act::None);
-            let change = button(0.0, 0.0, 150.0, message, Act::NativeKey(i, k));
-            rows.push(Row::Buttons(inactive(caption), Some(change)));
-        }
-        for (b, label) in page.buttons.iter().enumerate() {
-            let widget = button(
-                0.0,
-                0.0,
-                310.0,
-                Text::literal(label.clone()),
-                Act::NativeButton(i, b),
-            );
-            rows.push(Row::Buttons(widget, None));
-        }
-        rows
-    }
-
     fn list_rows(&self, s: &Settings) -> Vec<Row> {
         match self.page() {
             Page::SplitSetup => Vec::new(),
-            Page::Extras | Page::Pvp => {
+            Page::Pvp => {
                 // Each section's switches two to a row, as vanilla's
                 // OptionsList.addSmall lays out an options screen; one whose label would run
                 // past half a row in this language (`wide_extras`) gets the whole row.
@@ -2647,21 +2419,12 @@ impl OptionsUi {
                         widget
                     }
                 };
-                // PvP & HUD opens with its preset; Extras doesn't repeat it, nor the way there
-                // (Horizon Settings has it).
+                // PvP & HUD opens with its preset (Horizon Settings has the way there).
                 let preset = button(0.0, 0.0, 150.0, tr("horizon.pvp.preset"), Act::PvpPreset);
-                let mut rows = Vec::new();
-                if self.page() == Page::Extras {
-                    // Zoom, the FPS counter, Keystrokes and the Minimap are official mods now;
-                    // Extras keeps a way to the one players look for here (#8713).
-                    rows.push(Self::zoom_mod_row(s));
-                }
-                if self.page() == Page::Pvp {
-                    // The editor moves what the game shows: only from a world.
-                    let edit = button(0.0, 0.0, 150.0, tr("horizon.pvp.editor"), Act::HudEditor);
-                    let edit = if self.in_world { edit } else { inactive(edit) };
-                    rows.push(Row::Buttons(preset, Some(edit)));
-                }
+                // The editor moves what the game shows: only from a world.
+                let edit = button(0.0, 0.0, 150.0, tr("horizon.pvp.editor"), Act::HudEditor);
+                let edit = if self.in_world { edit } else { inactive(edit) };
+                let mut rows = vec![Row::Buttons(preset, Some(edit))];
                 let mut section = Vec::new();
                 let flush = |rows: &mut Vec<Row>, section: &mut Vec<crate::extras::Item>| {
                     let mut half = None;
@@ -2677,7 +2440,7 @@ impl OptionsUi {
                     }
                     rows.extend(half.map(|h| Row::Buttons(extra(h, 150.0), None)));
                 };
-                for row in extras_rows(self.page()) {
+                for row in pvp_rows() {
                     match row {
                         Err(header) => {
                             flush(&mut rows, &mut section);
@@ -2689,47 +2452,7 @@ impl OptionsUi {
                 flush(&mut rows, &mut section);
                 rows
             }
-            Page::Horizon => {
-                // Two to a row, as vanilla's OptionsList.addSmall lays out
-                // buttons; each opens one of Horizon's settings pages. Each page has
-                // one way in: graphics and shader packs are Video Settings' (the graphics
-                // screen), the controller is Controls', mods are the Options screen's.
-                let open =
-                    |key: &str, page: Page| button(0.0, 0.0, 150.0, tr(key), Act::Push(page));
-                vec![
-                    Row::Buttons(
-                        open("horizon.pages.open.extras", Page::Extras),
-                        Some(open("horizon.pages.open.pvp", Page::Pvp)),
-                    ),
-                    Row::Buttons(
-                        open(
-                            "horizon.pages.open.split_setup",
-                            if self.split_guest {
-                                Page::SplitProfiles
-                            } else {
-                                Page::SplitSetup
-                            },
-                        ),
-                        Some(open("horizon.pages.open.studio", Page::Studio)),
-                    ),
-                    // No AI hides the AI Agent page and everything AI.
-                    Row::Buttons(
-                        self.extra_button(s, crate::extras::Item::DiscordPresence),
-                        Some(if s.extras.no_ai {
-                            self.extra_button(s, crate::extras::Item::NoAi)
-                        } else {
-                            open("horizon.pages.open.agent", Page::Agent)
-                        }),
-                    ),
-                ]
-                .into_iter()
-                .chain(
-                    (!s.extras.no_ai).then(|| {
-                        Row::Buttons(self.extra_button(s, crate::extras::Item::NoAi), None)
-                    }),
-                )
-                .collect()
-            }
+            Page::Horizon => self.horizon_rows(s),
             Page::Agent => {
                 let mut rows = vec![Row::Buttons(
                     self.extra_button(s, crate::extras::Item::AgentControl),
@@ -3016,6 +2739,7 @@ impl OptionsUi {
             Page::ModBrowser => self.mod_browser_rows(),
             Page::ModProject => self.mod_project_rows(s),
             Page::NativeMod(i) => self.native_rows(s, i),
+            Page::Added(i) => self.added_rows(i),
             _ => {
                 let _ = s;
                 Vec::new()
@@ -3112,6 +2836,22 @@ impl OptionsUi {
                     ("horizon.pages.open.mods", Some(Page::Mods)),
                     ("options.credits_and_attribution", Some(Page::Credits)),
                 ];
+                // horizon-extras: without it, vanilla's last row instead of Horizon Settings and
+                // Mods: Telemetry Data (greyed: nothing is sent) and Credits & Attribution.
+                let plain;
+                let entries: &[_] = if horizon_extras() {
+                    &entries
+                } else {
+                    plain = [
+                        &entries[..entries.len() - 3],
+                        &[
+                            ("options.telemetry", None),
+                            ("options.credits_and_attribution", Some(Page::Credits)),
+                        ],
+                    ]
+                    .concat();
+                    &plain
+                };
                 let rows = entries.len().div_ceil(2) as f32;
                 let gy = (61.0 + 30.0f32).min(h - 33.0 - rows * 24.0);
                 for (i, (key, page)) in entries.iter().enumerate() {
@@ -3160,6 +2900,22 @@ impl OptionsUi {
                 {
                     let y = y + 28.0 * (i + 1) as f32;
                     out.push(inactive(button(x, y, 210.0, tr(key), Act::None)));
+                }
+                // horizon-extras: a build without them says where the official one is.
+                if !horizon_extras() {
+                    out.push(Widget {
+                        x: 0.0,
+                        y: (y + 92.0).min(h - 42.0),
+                        w,
+                        h: 9.0,
+                        kind: WKind::Text {
+                            text: tr("horizon.plain.official"),
+                            color: 0xFFA0A0A0,
+                            centered: true,
+                        },
+                        list: false,
+                        row: 0,
+                    });
                 }
                 out.push(done(h - 27.0));
                 top = 0.0;
@@ -3309,13 +3065,20 @@ impl OptionsUi {
                 }
                 content = y + self.scroll - top + 2.0;
                 out[list_start..].iter_mut().for_each(|w| w.list = true);
-                out.push(button(
+                let reset_all = button(
                     cx - 154.0,
                     h - 27.0,
                     150.0,
                     tr("controls.resetAll"),
                     Act::ResetKeys,
-                ));
+                );
+                // KeyBindsScreen.extractRenderState: active only while some
+                // binding differs from its default.
+                out.push(if s.keys.changed_from_defaults() {
+                    reset_all
+                } else {
+                    inactive(reset_all)
+                });
                 out.push(button(cx + 4.0, h - 27.0, 150.0, tr("gui.done"), Act::Done));
             }
             Page::Language => {
@@ -3583,13 +3346,18 @@ impl OptionsUi {
             Narratable::container_list(self.row_bands.len(), hovered_row, rect).key(key)
         });
     }
+    /// `output`: that of the renderer the options are drawn for, each draw, so the graphics
+    /// screen's rows and calibration read its offer and report as they are now, not another
+    /// window's, and not one from before the page opened.
     pub fn draw(
         &mut self,
         s: &Settings,
+        output: crate::gfx::EffectiveOutput,
         batch: &mut HudBatch,
         atlas: &HudAtlas,
         cursor: (f32, f32),
     ) {
+        self.output = output;
         let (w, h) = (batch.width, batch.height);
         if let Some(error) = &self.resource_error {
             ui::menu_background(batch, atlas, 0.0, 0.0, w, h, self.in_world);
@@ -3649,18 +3417,15 @@ impl OptionsUi {
             c.draw(batch, atlas, cursor);
             return;
         }
-        if Self::graphics_page(self.page()).is_some() {
-            self.graphics.binding = self.selected_key;
-            self.graphics.draw(s, batch, atlas, cursor, self.in_world);
+        let waiting = self.waiting();
+        let in_world = self.in_world;
+        if self.draw_radial_name(batch, atlas, cursor, in_world) {
             return;
         }
-        if Self::controller_page(self.page()).is_some() {
-            self.controller.binding = self.selected_pad_action;
-            self.controller.draw(s, batch, atlas, cursor, self.in_world);
-            return;
-        }
-        if Self::shader_page(self.page()).is_some() {
-            self.shader.draw(s, batch, atlas, cursor, self.in_world);
+        if let Some(shell) = self.shell_mut() {
+            shell.draw(s, batch, atlas, cursor, in_world, waiting);
+            // The keys lay the screen out at the size it was drawn at.
+            self.size = (batch.width, batch.height);
             return;
         }
         if self.page() == Page::SplitSetup {
@@ -3672,7 +3437,7 @@ impl OptionsUi {
         }
         if self.page() == Page::SplitProfiles {
             self.split_profiles
-                .draw(batch, atlas, cursor, self.in_world, self.pad_style);
+                .draw(batch, atlas, cursor, self.in_world, self.pad_glyphs);
             return;
         }
         if self.page() == Page::Studio {
@@ -3691,8 +3456,8 @@ impl OptionsUi {
             crate::screen_draw::paint(batch, atlas, &draws);
             return;
         }
-        if matches!(self.page(), Page::Extras | Page::Pvp) {
-            self.wide_extras = wide_extras(s, self.page(), |t| atlas.font.width(t));
+        if self.page() == Page::Pvp {
+            self.wide_extras = wide_extras(s, |t| atlas.font.width(t));
         }
         let (widgets, top, bottom, content) = self.layout(s, w, h);
         self.size = (w, h);
@@ -3750,22 +3515,16 @@ impl OptionsUi {
             }
             match &wd.kind {
                 WKind::Button { label, active, act } => {
-                    if matches!(act, Act::Done) {
-                        ui::action_button(
-                            batch,
-                            atlas,
-                            crate::widgets::Action::Done,
-                            wd.x,
-                            wd.y,
-                            wd.w,
-                            wd.h,
-                            label,
-                            *active,
-                            hover,
-                        );
-                    } else {
-                        ui::button(batch, atlas, wd.x, wd.y, wd.w, wd.h, label, *active, hover);
-                    }
+                    ui::focused_button(
+                        batch,
+                        atlas,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        label,
+                        *active,
+                        pointer_over,
+                        is_focused,
+                        matches!(act, Act::Done).then_some(crate::widgets::Action::Done),
+                    );
                     crate::widgets::last_narratable(|n| {
                         narrate_widget(n, s, wd, hover, list_key, framebuffer);
                     });
@@ -3994,6 +3753,9 @@ impl OptionsUi {
             return match self.studio.click((x, y), size) {
                 StudioAction::None => Vec::new(),
                 StudioAction::Refresh => vec![Event::ButtonClick],
+                StudioAction::OpenReplay(path) => {
+                    vec![Event::ButtonClick, Event::OpenStudioReplay(path)]
+                }
                 StudioAction::OpenFolder => vec![Event::ButtonClick, Event::OpenStudioFolder],
                 StudioAction::Back => {
                     let mut events = vec![Event::ButtonClick];
@@ -4008,10 +3770,17 @@ impl OptionsUi {
             if right {
                 return Vec::new();
             }
-            let outcome = c.click((x, y), size, drag);
+            let outcome = c.click(&atlas.font, (x, y), size, drag);
             return self.calibration_outcome(s, outcome);
         }
-        if Self::graphics_page(self.page()).is_some() {
+        if self.page() == Page::ControllerRadialName {
+            return self.click_radial_name(s, atlas, (x, y), size, drag || right);
+        }
+        if self.shell().is_some() {
+            // Waiting on a controller button: a click cancels the wait.
+            if !drag && self.selected_pad_action.take().is_some() {
+                return Vec::new();
+            }
             // Waiting on a key: a mouse button binds, as on Key Binds.
             if self.selected_key.is_some() && !drag {
                 let button = if right {
@@ -4021,24 +3790,13 @@ impl OptionsUi {
                 };
                 return self.bind_mouse(s, button);
             }
-            let actions =
-                self.graphics
-                    .click(s, (x, y), size, framebuffer, drag, right, self.shift);
-            return self.graphics_events(s, actions);
-        }
-        if Self::controller_page(self.page()).is_some() {
-            // Waiting on a button: a click cancels the wait.
-            if !drag && self.selected_pad_action.take().is_some() {
-                return Vec::new();
-            }
-            let actions =
-                self.controller
-                    .click(s, (x, y), size, framebuffer, drag, right, self.shift);
-            return self.controller_events(s, actions);
-        }
-        if Self::shader_page(self.page()).is_some() {
-            let actions = self.shader.click(s, (x, y), size, drag, right, self.shift);
-            return self.shader_events(s, actions);
+            let shift = self.shift;
+            self.framebuffer = framebuffer;
+            self.shell_framebuffers();
+            let outputs = self.shell_mut().map_or_else(Vec::new, |shell| {
+                shell.click(s, (x, y), size, drag, right, shift)
+            });
+            return self.shell_events(s, outputs);
         }
         if self.page() == Page::Packs {
             let mut events = Vec::new();
@@ -4060,6 +3818,7 @@ impl OptionsUi {
                 self.pack_focus = Instant::now();
             }
             match action {
+                crate::pack_screen::Action::Import(paths) => events.push(Event::ImportPacks(paths)),
                 crate::pack_screen::Action::OpenFolder => events.push(match &self.data_pack_dir {
                     Some(dir) => Event::OpenDataPackFolder(dir.clone()),
                     None => Event::OpenPackFolder,
@@ -4068,6 +3827,7 @@ impl OptionsUi {
                 crate::pack_screen::Action::BrowsePick(i) => {
                     events.push(Event::DownloadPack(i));
                 }
+                crate::pack_screen::Action::Options(id) => self.open_pack_options(&id),
                 crate::pack_screen::Action::None => {}
             }
             return events;
@@ -4172,6 +3932,11 @@ impl OptionsUi {
             if wd.list && (y < top || y >= bottom) {
                 continue;
             }
+            // AbstractWidget.mouseClicked rejects inactive buttons before the
+            // container can focus them.
+            if matches!(wd.kind, WKind::Button { active: false, .. }) {
+                return events;
+            }
             // A click focuses the widget for its highlight only: vanilla's wheel
             // steps a keyboard-focused widget from anywhere, not a clicked one.
             self.focus = Some(focus_id(wd_idx, &wd));
@@ -4240,11 +4005,9 @@ impl OptionsUi {
                             self.push(Page::NativeMod(i));
                             events.push(Event::NativeSettings(i));
                         }
-                        Act::NativeKey(i, k) => {
-                            self.selected_key = Some(NATIVE_KEY);
-                            self.selected_native_key = Some((i, k));
-                        }
+                        Act::NativeKey(i, k) => self.wait_native_key(i, k),
                         Act::NativeButton(i, b) => events.push(Event::NativeButton(i, b)),
+                        Act::PageRow(p, r) => events.extend(self.page_act(p, r, self.shift)),
                         Act::OpenModFolder => events.push(Event::OpenModFolder),
                         Act::ModProject(i) => {
                             if let Some(listing) = self.mod_browser.listings.get(i) {
@@ -4311,14 +4074,18 @@ impl OptionsUi {
         // AbstractSliderButton suppresses the press sound and plays once on
         // release, even if the pointer has left the widget or its value stayed.
         let slider = self.dragging.take().is_some();
-        let (shader_slider, shader_pack) = self.shader.release();
-        let graphics_slider = self.graphics.release() | self.controller.release() | shader_slider;
+        let shell_slider = self.shell_mut().and_then(|shell| shell.release());
         let calibration_slider = self.calibration.as_mut().is_some_and(|c| c.release());
         let split_drop = self.split_setup.release();
-        if slider || graphics_slider || calibration_slider {
+        if slider || shell_slider.is_some() || calibration_slider {
             let mut events = vec![Event::ButtonClick, Event::Changed];
-            // A pack's option is saved, and the pack rebuilt, once per drag.
-            events.extend(shader_pack.map(Event::NativePackOptions));
+            // What the screen does once a drag ends: a shader pack's option is saved, and the
+            // pack rebuilt, once per drag.
+            let done = shell_slider.into_iter().flatten();
+            events.extend(done.filter_map(|output| match output {
+                shell::Output::Event(event) => Some(event),
+                _ => None,
+            }));
             events
         } else if split_drop {
             vec![Event::ButtonClick]
@@ -4379,7 +4146,6 @@ impl OptionsUi {
     /// wheel wherever the cursor is. Focus left by a click does not count
     /// (`focus_from_keyboard`): honouring it toggled the clicked option on every
     /// later wheel event, from anywhere on the screen, while the list never scrolled.
-    /// The graphics screen has its own wheel (`GraphicsUi::wheel`).
     pub fn wheel(
         &mut self,
         s: &mut Settings,
@@ -4390,20 +4156,16 @@ impl OptionsUi {
     ) -> Vec<Event> {
         self.size = size;
         self.framebuffer = framebuffer;
-        if Self::graphics_page(self.page()).is_some() {
-            let actions = self.graphics.wheel(s, size, cursor, framebuffer, amount);
-            return self.graphics_events(s, actions);
+        if self.resource_error.is_some() {
+            return Vec::new();
+        }
+        self.shell_framebuffers();
+        if let Some(shell) = self.shell_mut() {
+            let outputs = shell.wheel(s, size, cursor, amount);
+            return self.shell_events(s, outputs);
         }
         if self.page() == Page::Studio {
             self.studio.wheel(amount);
-            return Vec::new();
-        }
-        if Self::controller_page(self.page()).is_some() {
-            let actions = self.controller.wheel(s, size, cursor, framebuffer, amount);
-            return self.controller_events(s, actions);
-        }
-        if Self::shader_page(self.page()).is_some() {
-            self.shader.scroll(s, size, amount);
             return Vec::new();
         }
         let plain = self.resource_error.is_none()
@@ -4481,16 +4243,12 @@ impl OptionsUi {
         if self.resource_error.is_some() {
             return;
         }
-        if Self::graphics_page(self.page()).is_some() {
-            self.graphics.scroll(s, size, amount);
+        if let Some(shell) = self.shell_mut() {
+            shell.scroll(s, size, amount);
             return;
         }
-        if Self::controller_page(self.page()).is_some() {
-            self.controller.scroll(s, size, amount);
-            return;
-        }
-        if Self::shader_page(self.page()).is_some() {
-            self.shader.scroll(s, size, amount);
+        if self.page() == Page::Studio {
+            self.studio.wheel(amount);
             return;
         }
         match &mut self.pack_screen {
@@ -4558,7 +4316,19 @@ impl OptionsUi {
                 self.pack_screen = Some(screen);
             }
         }
-        self.pack_screen.as_mut().expect("made above")
+        // The cards of packs with Polytone options carry their button (data packs have none).
+        let with_options = if self.data_pack_dir.is_none() {
+            self.pack_configs
+                .iter()
+                .filter(|(_, c)| !c.entries().is_empty())
+                .map(|(id, _)| id.clone())
+                .collect()
+        } else {
+            Default::default()
+        };
+        let screen = self.pack_screen.as_mut().expect("made above");
+        screen.with_options = with_options;
+        screen
     }
     /// Escape or Done: leave the current page, applying page results.
     /// After an input on HDR calibration: Save keeps what it landed on, Cancel what was
@@ -4584,13 +4354,12 @@ impl OptionsUi {
             }
         }
     }
-    /// HDR calibration's test picture, while its page is open: the step, its nits and
-    /// where the controls start (a share of the height `h`).
-    pub fn calibration_picture(&self, h: f32) -> Option<(crate::hdr_calibration::Step, f32, f32)> {
+    /// HDR calibration's test picture, while its page is open, in a GUI of `size`.
+    pub fn calibration_picture(&self, atlas: &HudAtlas, size: (f32, f32)) -> Option<Picture> {
         self.calibration
             .as_ref()
             .filter(|_| self.page() == Page::HdrCalibration)
-            .map(|c| c.picture(h))
+            .map(|c| c.picture(&atlas.font, size))
     }
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
         let mut events = Vec::new();
@@ -4615,6 +4384,10 @@ impl OptionsUi {
         self.language_search.focused = false;
         self.can_change_value = false;
         match page {
+            Page::PackOptions => {
+                let screen = std::mem::take(&mut self.pack_options.screen);
+                events.extend(screen.finished());
+            }
             Page::ShaderOptions | Page::ShaderPacks => {
                 if s.shader_options.as_ref().is_some_and(|o| o.changed) {
                     events.push(Event::ShaderOptions);
@@ -4673,12 +4446,12 @@ impl OptionsUi {
             self.scroll = 0.0;
         } else if self.page() == Page::SplitProfiles {
             self.split_profiles.type_text(text);
-        } else if Self::graphics_page(self.page()).is_some() && self.graphics.typing() {
-            self.graphics.type_text(text);
-        } else if Self::controller_page(self.page()).is_some() && self.controller.typing() {
-            self.controller.type_text(text);
-        } else if Self::shader_page(self.page()).is_some() && self.shader.typing() {
-            self.shader.type_text(text);
+        } else if self.page() == Page::ControllerRadialName {
+            self.type_radial_name(text);
+        } else if let Some(shell) = self.shell_mut() {
+            if shell.typing() {
+                shell.type_text(text);
+            }
         } else if self.settings_search_active() {
             self.settings_search.insert_text(text);
             self.scroll = 0.0;
@@ -4710,14 +4483,11 @@ impl OptionsUi {
         if self.page() == Page::SplitProfiles {
             return self.split_profiles.shortcut(shortcut, clipboard);
         }
-        if Self::graphics_page(self.page()).is_some() {
-            return self.graphics.shortcut(shortcut, clipboard);
+        if self.page() == Page::ControllerRadialName {
+            return self.radial_name_shortcut(shortcut, clipboard);
         }
-        if Self::controller_page(self.page()).is_some() {
-            return self.controller.shortcut(shortcut, clipboard);
-        }
-        if Self::shader_page(self.page()).is_some() {
-            return self.shader.shortcut(shortcut, clipboard);
+        if let Some(shell) = self.shell_mut() {
+            return shell.shortcut(shortcut, clipboard);
         }
         if self.settings_search_active() {
             if self.settings_search.shortcut(shortcut, clipboard) {
@@ -4731,19 +4501,10 @@ impl OptionsUi {
         let Some(name) = self.selected_key.take() else {
             return Vec::new();
         };
-        if name == NATIVE_KEY {
-            let (i, k) = self.selected_native_key.take().unwrap_or_default();
-            let Some(m) = s.mods.installed.get(i) else {
-                return Vec::new();
-            };
-            let Some([key, ..]) = m.native.as_ref().and_then(|p| p.keys.get(k)) else {
-                return Vec::new();
-            };
-            let keys = s.mods.keys.entry(m.id.clone()).or_default();
-            keys.insert(key.clone(), value);
-            return vec![Event::Changed];
+        if name == NATIVE_KEY || name == pages::PAGE_KEY {
+            return self.bind_native_key(s, name, value);
         }
-        if !s.extras.set_key(name, value.clone()) && !s.horizon.set_key(name, value.clone()) {
+        if !s.extras.set_key(name, value.clone()) {
             s.keys.set(name, &value);
         }
         vec![Event::Changed]
@@ -4828,40 +4589,20 @@ impl OptionsUi {
         if self.page() == Page::SplitProfiles && self.split_profiles.key(key, text) {
             return Vec::new();
         }
+        if self.page() == Page::ControllerRadialName {
+            return self.radial_name_key(s, key, text);
+        }
 
-        if Self::graphics_page(self.page()).is_some() {
-            let size = (self.size.0.max(480.0), self.size.1.max(240.0));
-            let fb = [self.framebuffer[0].max(480), self.framebuffer[1].max(240)];
-            let (actions, handled) = self.graphics.key_modifiers(s, key, text, shift, size, fb);
-            let mut events = self.graphics_events(s, actions);
-            if key == K::Escape {
-                events.extend(self.back(s));
-                return events;
-            }
-            if handled {
-                return events;
-            }
-            return events;
-        }
-        if Self::controller_page(self.page()).is_some() {
-            let size = (self.size.0.max(480.0), self.size.1.max(240.0));
-            let fb = [self.framebuffer[0].max(480), self.framebuffer[1].max(240)];
-            let (actions, _) = self.controller.key_modifiers(s, key, text, shift, size, fb);
-            let mut events = self.controller_events(s, actions);
-            if key == K::Escape {
-                events.extend(self.back(s));
-            }
-            return events;
-        }
-        if Self::shader_page(self.page()).is_some() {
-            let size = (self.size.0.max(480.0), self.size.1.max(240.0));
-            let (actions, handled) = self.shader.key_modifiers(s, key, text, shift, size);
-            let mut events = self.shader_events(s, actions);
-            // Escape leaves a screen a link opened first, then the shader screen.
-            if key == K::Escape && !handled {
-                events.extend(self.back(s));
-            }
-            return events;
+        // The size it was drawn at; before the first draw, one its keys can lay out at.
+        let gui = if self.size.0 > 0.0 && self.size.1 > 0.0 {
+            self.size
+        } else {
+            MIN_KEY_GUI
+        };
+        self.shell_framebuffers();
+        if let Some(shell) = self.shell_mut() {
+            let outputs = shell.key(s, key, text, shift, gui);
+            return self.shell_events(s, outputs);
         }
 
         if key == K::Escape {
@@ -5146,11 +4887,9 @@ impl OptionsUi {
                             self.push(Page::NativeMod(i));
                             events.push(Event::NativeSettings(i));
                         }
-                        Act::NativeKey(i, k) => {
-                            self.selected_key = Some(NATIVE_KEY);
-                            self.selected_native_key = Some((i, k));
-                        }
+                        Act::NativeKey(i, k) => self.wait_native_key(i, k),
                         Act::NativeButton(i, b) => events.push(Event::NativeButton(i, b)),
+                        Act::PageRow(p, r) => events.extend(self.page_act(p, r, shift)),
                         Act::OpenModFolder => events.push(Event::OpenModFolder),
                         Act::ModProject(i) => {
                             if let Some(listing) = self.mod_browser.listings.get(i) {
@@ -5201,6 +4940,39 @@ impl OptionsUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extras_ui::ExtraRow;
+    use crate::gfx::EffectiveOutput;
+
+    /// A renderer whose destination offers nothing and whose display reports nothing.
+    const NONE: EffectiveOutput = EffectiveOutput::NONE;
+
+    #[test]
+    fn pack_options_leave_with_a_change_and_with_nothing_after_its_undo() {
+        use crate::settings_shell::Screen as _;
+        let mut s = Settings::default();
+        let atlas = HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets"));
+        let atlas = atlas.unwrap();
+        let mut ui = OptionsUi::default();
+        let mut configs = horizon_polytone::pack::Configs::default();
+        let birds = serde_json::json!({"default_value": true});
+        configs.add_entry("p:birds".into(), &birds);
+        ui.pack_configs.insert("pack".into(), configs);
+        for undone in [false, true] {
+            ui.open_pack_options("pack");
+            assert!(ui.shell().is_some(), "Pack Options is on the shell");
+            let birds = crate::pack_options_ui::Item::Entry(0);
+            ui.pack_options.screen.press(&mut s, birds, false);
+            if undone {
+                let before = s.clone();
+                ui.pack_options.screen.undo(&mut s, &before);
+            }
+            let events = ui.key(&mut s, &atlas, winit::keyboard::KeyCode::Escape, None);
+            let sent = events
+                .iter()
+                .any(|e| matches!(e, Event::PackOptions { .. }));
+            assert_eq!(sent, !undone, "undone: {undone}");
+        }
+    }
 
     /// The window allows the input method only while `typing` says a search
     /// box has the focus (`Game::text_field_focused`), so a page without one
@@ -5514,7 +5286,7 @@ mod tests {
         assert!(file.set_text("renderDistance", "1").is_err());
         assert_eq!(file.int("renderDistance"), 128);
     }
-    fn atlas() -> HudAtlas {
+    pub(super) fn atlas() -> HudAtlas {
         HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
     }
 
@@ -5522,8 +5294,20 @@ mod tests {
     /// read, and leaving the shader screen applies them.
     #[test]
     fn the_shader_screen_saves_changed_options_before_reading_the_next_packs() {
-        use crate::shader_ui::Action;
-        let mut s = Settings::default();
+        use crate::shader_pack_list::{Entry, Kind};
+        let entry = |file: &str| Entry {
+            file: file.into(),
+            key: file.into(),
+            title: file.into(),
+            kind: Kind::Classic,
+            options: Vec::new(),
+            values: Vec::new(),
+            pages: Vec::new(),
+        };
+        let mut s = Settings {
+            shader_packs: vec![entry("A.zip"), entry("B.zip")],
+            ..Settings::default()
+        };
         s.horizon.shader_pack = "A.zip".into();
         let mut options = crate::shader_options::ShaderOptions::new(
             "A.zip".into(),
@@ -5537,15 +5321,21 @@ mod tests {
         let mut ui = OptionsUi::default();
         ui.open(false);
         ui.push(Page::ShaderPacks);
-        let events = ui.shader_events(&mut s, vec![Action::Picked]);
+        let size = (854.0, 480.0);
+        let (x, y) = ui
+            .shader
+            .point_at(&s, size, crate::shader_ui::Item::Pack(1));
+        let events = ui.click(&mut s, &atlas(), x, y, size, [1708, 960], false, false);
         assert!(matches!(
             events[..],
             [
+                Event::ButtonClick,
                 Event::ShaderOptions,
                 Event::ShaderPack,
                 Event::OpenShaderOptions
             ]
         ));
+        assert_eq!(s.horizon.shader_pack, "B.zip");
         let events = ui.back(&mut s);
         assert!(matches!(events[0], Event::ShaderOptions));
     }
@@ -5645,6 +5435,9 @@ mod tests {
                 }
                 if ui.controller_open() {
                     texts.extend(ui.controller.row_names(&s));
+                }
+                if ui.page() == Page::Extras {
+                    texts.extend(ui.extras.row_labels(&s));
                 }
             }
             texts
@@ -6010,11 +5803,127 @@ mod tests {
     }
 
     #[test]
+    fn pointer_cursor_leaves_a_clicked_option_while_its_focus_stays() {
+        use crate::widgets::{Cursor, take_cursor};
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Video);
+        let size = (480.0, 480.0);
+        let (widgets, top, bottom, _) = ui.layout(&s, size.0, size.1);
+        let button = widgets
+            .iter()
+            .find(|wd| {
+                matches!(
+                    wd.kind,
+                    WKind::Button {
+                        active: true,
+                        act: Act::Cycle(_),
+                        ..
+                    }
+                ) && (!wd.list || wd.y >= top && wd.y + wd.h <= bottom)
+            })
+            .expect("visible cycle button");
+        let over = (button.x + 1.0, button.y + 1.0);
+        ui.click(
+            &mut s,
+            &atlas,
+            over.0,
+            over.1,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        ui.release();
+        assert!(
+            ui.focus.is_some(),
+            "the accepted click keeps vanilla's focus"
+        );
+        assert!(!ui.focus_from_keyboard);
+        let _ = take_cursor();
+        ui.draw(&s, NONE, &mut HudBatch::new([480, 480]), &atlas, over);
+        assert_eq!(take_cursor(), Cursor::PointingHand);
+        ui.draw(
+            &s,
+            NONE,
+            &mut HudBatch::new([480, 480]),
+            &atlas,
+            (-10.0, -10.0),
+        );
+        assert_eq!(take_cursor(), Cursor::Arrow, "focus is not mouse hover");
+        assert!(
+            ui.focus.is_some(),
+            "moving the pointer does not clear focus"
+        );
+        ui.focus_from_keyboard = true;
+        ui.draw(
+            &s,
+            NONE,
+            &mut HudBatch::new([480, 480]),
+            &atlas,
+            (-10.0, -10.0),
+        );
+        assert_eq!(
+            take_cursor(),
+            Cursor::Arrow,
+            "keyboard focus is not mouse hover either"
+        );
+    }
+
+    #[test]
+    fn pointer_cursor_leaves_a_disabled_option_without_focusing_it() {
+        use crate::widgets::{Cursor, take_cursor};
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::KeyBinds);
+        let size = (480.0, 480.0);
+        let (widgets, top, bottom, _) = ui.layout(&s, size.0, size.1);
+        let button = widgets
+            .iter()
+            .find(|wd| {
+                matches!(wd.kind, WKind::Button { active: false, .. })
+                    && (!wd.list || wd.y >= top && wd.y + wd.h <= bottom)
+            })
+            .expect("visible disabled button");
+        let over = (button.x + 1.0, button.y + 1.0);
+        let _ = take_cursor();
+        ui.draw(&s, NONE, &mut HudBatch::new([480, 480]), &atlas, over);
+        assert_eq!(take_cursor(), Cursor::NotAllowed);
+        assert!(
+            ui.click(
+                &mut s,
+                &atlas,
+                over.0,
+                over.1,
+                size,
+                [480, 480],
+                false,
+                false
+            )
+            .is_empty()
+        );
+        assert!(
+            ui.focus.is_none(),
+            "an inactive widget rejects the click before focus"
+        );
+        ui.draw(
+            &s,
+            NONE,
+            &mut HudBatch::new([480, 480]),
+            &atlas,
+            (-10.0, -10.0),
+        );
+        assert_eq!(take_cursor(), Cursor::Arrow);
+    }
+
+    #[test]
     fn a_clicked_extras_tooltip_leaves_with_the_pointer() {
         let atlas = atlas();
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
-        ui.show(Page::Extras);
+        ui.show(Page::Pvp);
         let (widgets, _, _, _) = ui.layout(&s, 480.0, 480.0);
         let extra = widgets
             .iter()
@@ -6024,7 +5933,7 @@ mod tests {
                     WKind::Button {
                         act: Act::Extra(item),
                         ..
-                    } if !matches!(item, crate::extras::Item::SortKey)
+                    } if item.key_name().is_none()
                 )
             })
             .unwrap();
@@ -6043,6 +5952,7 @@ mod tests {
         let mut on = HudBatch::new([480, 480]);
         ui.draw(
             &s,
+            NONE,
             &mut on,
             &atlas,
             (extra.x + extra.w / 2.0, extra.y + extra.h / 2.0),
@@ -6055,6 +5965,7 @@ mod tests {
         let mut off = HudBatch::new([480, 480]);
         ui.draw(
             &s,
+            NONE,
             &mut off,
             &atlas,
             (extra.x + extra.w + 40.0, extra.y + extra.h + 40.0),
@@ -6070,19 +5981,17 @@ mod tests {
 
     #[test]
     fn extras_reaches_the_zoom_mod_that_replaced_the_extra() {
+        let atlas = atlas();
         let mut s = Settings::default();
         let mut ui = OptionsUi::default();
         ui.show(Page::Extras);
         let english = || lang::Language::load(&[], "en_us");
         // Without the mod, Extras says where it is installed (a note, not a second way into
         // Options > Mods).
-        let (widgets, _, _, _) = lang::scoped(english(), || ui.layout(&s, 480.0, 4000.0)).0;
+        let labels = lang::scoped(english(), || ui.extras.row_labels(&s)).0;
         assert!(
-            widgets.iter().any(|w| matches!(
-                &w.kind,
-                WKind::Text { text, .. } if text.plain() == "Zoom: install from Mods"
-            )),
-            "Extras has no hint for the Zoom mod"
+            labels.iter().any(|l| l == "Zoom: install from Mods"),
+            "Extras has no hint for the Zoom mod: {labels:?}"
         );
         // Built in, Zoom's settings live on its page: Extras opens that page.
         s.mods.installed.push(crate::mod_list::Installed {
@@ -6096,30 +6005,28 @@ mod tests {
                 buttons: Vec::new(),
             }),
         });
-        let (widgets, _, _, _) = lang::scoped(english(), || ui.layout(&s, 480.0, 4000.0)).0;
-        assert!(
-            widgets.iter().any(|w| matches!(
-                &w.kind,
-                WKind::Button {
-                    act: Act::ModSettings(0),
-                    label,
-                    ..
-                } if label.plain() == "Settings"
-            )),
-            "Extras doesn't open the Zoom mod's settings"
+        let labels = lang::scoped(english(), || ui.extras.row_labels(&s)).0;
+        assert!(labels.iter().any(|l| l == "Settings"), "{labels:?}");
+        // The mod's switch is beside it, so Extras keeps the Zoom setting it had.
+        assert!(labels.iter().any(|l| l.starts_with("Zoom: ")), "{labels:?}");
+        let size = (480.0, 480.0);
+        let on = s.mods.is_on(0);
+        let at = ui.extras.point_at(&s, size, ExtraRow::Zoom(0));
+        assert_eq!(
+            ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false),
+            vec![Event::ButtonClick, Event::Changed]
         );
-        // The mod's switch is on the same row, so Extras keeps the Zoom setting it had.
-        assert!(
-            widgets.iter().any(|w| matches!(
-                &w.kind,
-                WKind::Button {
-                    act: Act::ToggleMod(0),
-                    label,
-                    ..
-                } if label.plain().starts_with("Zoom")
-            )),
-            "Extras doesn't switch the Zoom mod"
+        assert_ne!(s.mods.is_on(0), on);
+        let at = ui.extras.point_at(&s, size, ExtraRow::ZoomSettings(0));
+        assert_eq!(
+            ui.click(&mut s, &atlas, at.0, at.1, size, [960, 960], false, false),
+            vec![
+                Event::ButtonClick,
+                Event::ButtonClick,
+                Event::NativeSettings(0)
+            ]
         );
+        assert_eq!(ui.page(), Page::NativeMod(0));
     }
 
     #[test]
@@ -6300,7 +6207,7 @@ mod tests {
                 .unwrap();
             let cursor = (option.x + 1.0, option.y + 1.0);
             let mut actual = HudBatch::new([480, 480]);
-            ui.draw(&s, &mut actual, &atlas, cursor);
+            ui.draw(&s, NONE, &mut actual, &atlas, cursor);
             let key = format!("options.inactivityFpsLimit.{mode}.tooltip");
             assert!(lang::has(&key));
             let mut expected = HudBatch::new([480, 480]);
@@ -6463,32 +6370,27 @@ mod tests {
             );
             assert_eq!(ui.page(), page);
         }
-        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
         assert_eq!(
-            widgets
-                .iter()
-                .filter(|w| matches!(
-                    w.kind,
-                    WKind::Button {
-                        act: Act::Extra(_),
-                        ..
-                    }
-                ))
-                .count(),
-            crate::extras::rows().iter().filter(|r| r.is_ok()).count()
+            ui.extras.row_labels(&s).len(),
+            // And the note about the Zoom mod over them.
+            1 + crate::extras::rows().iter().filter(|r| r.is_ok()).count()
         );
+        let press = |ui: &mut OptionsUi, s: &mut Settings, item: crate::extras::Item| {
+            let at = ui.extras.point_at(s, size, ExtraRow::Item(item));
+            ui.click(s, &atlas, at.0, at.1, size, [960, 960], false, false)
+        };
         assert_eq!(
-            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::Sort)),
+            press(&mut ui, &mut s, crate::extras::Item::Sort),
             vec![Event::ButtonClick, Event::Changed]
         );
         assert!(s.extras.sort);
         assert_eq!(
-            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::Pregen)),
+            press(&mut ui, &mut s, crate::extras::Item::Pregen),
             vec![Event::ButtonClick, Event::Changed]
         );
         assert!(s.extras.pregen);
         assert_eq!(
-            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::SortKey)),
+            press(&mut ui, &mut s, crate::extras::Item::SortKey),
             vec![Event::ButtonClick]
         );
         assert_eq!(ui.selected_key, Some(crate::extras::SORT_KEY));
@@ -6501,17 +6403,65 @@ mod tests {
             crate::extras::Extras::parse(&s.extras.serialize()),
             s.extras
         );
-        // In a window too short for the page, the wheel scrolls to its end.
-        let short = (480.0, 180.0);
-        ui.scroll(&s, short, -1000.0);
-        let (_, top, bottom, content) = ui.layout(&s, short.0, short.1);
-        assert!(content > bottom - top);
-        assert_eq!(ui.scroll, content - (bottom - top));
         assert_eq!(
             ui.key(&mut s, &atlas, winit::keyboard::KeyCode::Escape, None),
             vec![Event::Changed]
         );
         assert_eq!(ui.page(), Page::Horizon);
+    }
+
+    /// A Bindings row pressed waits for a controller button: the next click or key cancels the
+    /// wait, Escape unbinds the action as on Key Binds, and none of them leaves the screen.
+    #[test]
+    fn a_controller_binding_waits_and_a_click_or_a_key_ends_the_wait() {
+        use crate::controller_ui::Item;
+        use winit::keyboard::KeyCode as K;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::PadBinds);
+        let size = (854.0, 480.0);
+        ui.size = size;
+        let jump = Item::Bind("key.jump");
+        let (x, y) = ui.controller.point_at(&s, size, jump);
+        let press = |ui: &mut OptionsUi, s: &mut Settings| {
+            ui.click(s, &atlas, x, y, size, [1708, 960], false, false)
+        };
+        assert_eq!(press(&mut ui, &mut s), vec![Event::ButtonClick]);
+        assert_eq!(ui.selected_pad_action, Some("key.jump"));
+        assert!(press(&mut ui, &mut s).is_empty());
+        assert_eq!(ui.selected_pad_action, None);
+        press(&mut ui, &mut s);
+        assert_eq!(ui.key(&mut s, &atlas, K::KeyQ, None), vec![Event::Changed]);
+        assert_eq!(
+            (ui.selected_pad_action, s.controller.is_default("key.jump")),
+            (None, true)
+        );
+        press(&mut ui, &mut s);
+        assert_eq!(
+            ui.key(&mut s, &atlas, K::Escape, None),
+            vec![Event::Changed]
+        );
+        assert_eq!(s.controller.binding("key.jump"), None);
+        assert_eq!(ui.page(), Page::PadBinds);
+    }
+
+    /// Every way a pad or a wheel scrolls a page on the shell moves the same list: Replay Studio's
+    /// took the wheel and missed `scroll_at`, so a stick couldn't scroll it.
+    #[test]
+    fn the_wheel_and_the_stick_scroll_a_page_on_the_shell_alike() {
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        ui.show(Page::Extras);
+        // Too short for the page.
+        let short = (480.0, 180.0);
+        ui.wheel(&mut s, short, (0.0, 0.0), [960, 360], -1.0);
+        let one = ui.extras.scroll_amount();
+        assert!(one > 0.0);
+        ui.scroll_at(&s, short, (0.0, 0.0), -1.0);
+        assert_eq!(ui.extras.scroll_amount(), 2.0 * one);
+        ui.scroll_at(&s, short, (0.0, 0.0), 2.0);
+        assert_eq!(ui.extras.scroll_amount(), 0.0);
     }
 
     #[test]
@@ -6888,7 +6838,7 @@ mod tests {
         ui.show(Page::Language);
         let draw_hint = |ui: &mut OptionsUi| {
             let mut batch = HudBatch::new([960, 640]);
-            ui.draw(&settings, &mut batch, &atlas, (-1.0, -1.0));
+            ui.draw(&settings, NONE, &mut batch, &atlas, (-1.0, -1.0));
             let search = &ui.language_search;
             batch.vertices.iter().any(|v| {
                 v.color == rgba(170, 170, 170, 255)
@@ -6994,7 +6944,7 @@ mod tests {
             let row_y = if above { top - 5.0 } else { bottom - 16.0 };
             ui.scroll = row.y - row_y;
             let (x, width, height) = (row.x, row.w, row.h);
-            ui.draw(&s, &mut batch, &atlas, (-1.0, -1.0));
+            ui.draw(&s, NONE, &mut batch, &atlas, (-1.0, -1.0));
             let vertices: Vec<_> = batch
                 .vertices
                 .iter()
@@ -7138,7 +7088,7 @@ mod tests {
             MouseButton::Back,
             MouseButton::Forward,
         ] {
-            for name in [SORT_KEY, crate::graphics::HDR_KEY, "key.jump"] {
+            for name in [SORT_KEY, "key.jump"] {
                 let mut ui = OptionsUi::default();
                 let mut s = Settings::default();
                 ui.selected_key = Some(name);
@@ -7147,7 +7097,6 @@ mod tests {
                 let value = keybinds::mouse_name(button);
                 match name {
                     SORT_KEY => assert_eq!(s.extras.sort_key, value),
-                    crate::graphics::HDR_KEY => assert_eq!(s.horizon.hdr_key, value),
                     _ => assert_eq!(s.keys.get(name), value),
                 }
                 assert_eq!(Extras::parse(&s.extras.serialize()), s.extras);
@@ -7344,7 +7293,7 @@ mod tests {
     /// An Extras or PvP & HUD label wider than half a row takes the whole row, so every label
     /// fits its button: "Keep channels for UI sounds: Off" did not.
     #[test]
-    fn extras_labels_fit_their_buttons() {
+    fn pvp_labels_fit_their_buttons() {
         // Vanilla's font: 6 px a glyph, a few narrower ones.
         let width = |t: &str| {
             t.chars()
@@ -7359,9 +7308,9 @@ mod tests {
         };
         let s = Settings::default();
         let mut ui = OptionsUi::default();
-        for page in [Page::Extras, Page::Pvp] {
-            ui.stack = vec![Page::Main, page];
-            ui.wide_extras = wide_extras(&s, page, width);
+        {
+            ui.stack = vec![Page::Main, Page::Pvp];
+            ui.wide_extras = wide_extras(&s, width);
             let rows = ui.list_rows(&s);
             let buttons: Vec<&Widget> = rows
                 .iter()
@@ -7375,20 +7324,11 @@ mod tests {
                     continue;
                 };
                 let label = label.plain();
-                assert!(width(&label) <= b.w - 4.0, "{page:?}: {label} on {}", b.w);
+                assert!(width(&label) <= b.w - 4.0, "{label} on {}", b.w);
             }
             // Short ones keep vanilla's two to a row.
-            assert!(buttons.iter().any(|b| b.w == 150.0), "{page:?}");
+            assert!(buttons.iter().any(|b| b.w == 150.0));
         }
-        ui.stack = vec![Page::Main, Page::Extras];
-        ui.wide_extras = wide_extras(&s, Page::Extras, width);
-        for item in [
-            crate::extras::Item::UiSoundReserve,
-            crate::extras::Item::WheelCyclesSettings,
-        ] {
-            assert!(ui.wide_extras.contains(&item), "{item:?}");
-        }
-        assert!(!ui.wide_extras.contains(&crate::extras::Item::AutoReconnect));
     }
 
     /// Every setting a player reaches, from the Options screen through every button that opens
@@ -7524,39 +7464,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Shader packs, both kinds, are on the graphics screen's Shaders page: its Shader
-    /// Packs... opens the pack list, listed afresh, and Done comes back to that page.
-    #[test]
-    fn the_graphics_shaders_page_opens_the_shader_pack_list() {
-        use crate::graphics_ui::{H, Item, Target};
-        use winit::keyboard::KeyCode;
-        let atlas = atlas();
-        let mut s = Settings::default();
-        let mut ui = OptionsUi {
-            size: (427.0, 240.0),
-            ..Default::default()
-        };
-        ui.show(Page::Graphics);
-        ui.graphics.open(crate::graphics_ui::Page::Shaders);
-        let packs = Target::Item(Item::Horizon(H::ShaderPacks));
-        assert!(
-            (0..40).any(|_| {
-                ui.key(&mut s, &atlas, KeyCode::Tab, None);
-                ui.graphics.focus == Some(packs)
-            }),
-            "{:?}",
-            ui.graphics.focus
-        );
-        let events = ui.key(&mut s, &atlas, KeyCode::Enter, None);
-        assert_eq!(ui.page(), Page::ShaderPacks);
-        assert!(events.contains(&Event::ListShaderPacks), "{events:?}");
-        // The picked pack's own settings are read with the list.
-        assert!(events.contains(&Event::OpenShaderOptions), "{events:?}");
-        ui.back(&mut s);
-        assert_eq!(ui.page(), Page::Graphics);
-        assert_eq!(ui.graphics.page(), crate::graphics_ui::Page::Shaders);
     }
 
     #[test]
@@ -7778,22 +7685,6 @@ mod tests {
     }
 
     #[test]
-    fn the_graphics_screens_wheel_scrolls_even_over_a_slider_being_changed() {
-        use crate::graphics_ui::{H, Item, Target};
-        let mut s = Settings::default();
-        let mut ui = OptionsUi::default();
-        ui.show(Page::Graphics);
-        let size = (640.0, 360.0);
-        s.horizon.chunk_updates = 16;
-        ui.graphics.focus = Some(Target::Item(Item::Horizon(H::ChunkUpdates)));
-        ui.graphics.can_change_value = true;
-        let before = ui.graphics.scroll_amount();
-        ui.wheel(&mut s, size, (320.0, 150.0), [1920, 1080], -1.0);
-        assert_eq!(s.horizon.chunk_updates, 16);
-        assert!(ui.graphics.scroll_amount() > before);
-    }
-
-    #[test]
     fn horizon_pages_slider_and_wheel_parity() {
         use winit::keyboard::KeyCode as K;
         let atlas = atlas();
@@ -7804,20 +7695,9 @@ mod tests {
         s.extras.wheel_cycles_settings = true;
         ui.show(Page::Extras);
         let size = (480.0, 600.0);
-        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
-        let sort_wd = widgets
-            .iter()
-            .find(|w| {
-                matches!(
-                    w.kind,
-                    WKind::Button {
-                        act: Act::Extra(crate::extras::Item::Sort),
-                        ..
-                    }
-                )
-            })
-            .unwrap();
-        let cursor = (sort_wd.x + 5.0, sort_wd.y + 5.0);
+        let cursor = ui
+            .extras
+            .point_at(&s, size, ExtraRow::Item(crate::extras::Item::Sort));
         assert!(!s.extras.sort);
         ui.wheel(&mut s, size, cursor, [854, 480], 1.0);
         assert!(s.extras.sort);
@@ -7827,29 +7707,21 @@ mod tests {
         // 2. Horizon Graphics page through OptionsUi:
         // Tab onto ChunkUpdates slider, ArrowRight adjusts value, Space toggles can_change_value
         ui.show(Page::Graphics);
-        ui.graphics.open(crate::graphics_ui::Page::Performance);
+        ui.graphics.show(crate::graphics_ui::Page::Performance);
         s.horizon.chunk_updates = 10;
+        let chunk_updates = crate::graphics_ui::Item::Horizon(crate::graphics_ui::H::ChunkUpdates);
         ui.size = size;
         ui.framebuffer = [854, 480];
 
         // Tab into controls
         for _ in 0..80 {
             ui.key(&mut s, &atlas, K::Tab, None);
-            if ui.graphics.focus
-                == Some(crate::graphics_ui::Target::Item(
-                    crate::graphics_ui::Item::Horizon(crate::graphics_ui::H::ChunkUpdates),
-                ))
-            {
+            if ui.graphics.focused_row() == Some(chunk_updates) {
                 break;
             }
         }
-        assert_eq!(
-            ui.graphics.focus,
-            Some(crate::graphics_ui::Target::Item(
-                crate::graphics_ui::Item::Horizon(crate::graphics_ui::H::ChunkUpdates)
-            ))
-        );
-        assert!(ui.graphics.can_change_value);
+        assert_eq!(ui.graphics.focused_row(), Some(chunk_updates));
+        assert!(ui.graphics.changes_value());
 
         // Right arrow steps ChunkUpdates to 11
         let events = ui.key(&mut s, &atlas, K::ArrowRight, None);
@@ -7858,7 +7730,7 @@ mod tests {
 
         // Space toggles can_change_value to false
         ui.key(&mut s, &atlas, K::Space, None);
-        assert!(!ui.graphics.can_change_value);
+        assert!(!ui.graphics.changes_value());
 
         // ArrowRight does not change ChunkUpdates when can_change_value is false
         ui.key(&mut s, &atlas, K::ArrowRight, None);
@@ -8300,55 +8172,16 @@ mod tests {
         ui.click(&mut s, &atlas, px, py, size, [854, 480], false, false);
         assert_eq!(s.particles, 0);
         ui.shift = false;
-
-        // Also verify Act::Extra on Page::Extras
-        ui.show(Page::Extras);
-        let (widgets, top, _, _) = ui.layout(&s, size.0, size.1);
-        if let Some(extra_btn) = widgets.iter().find(|wd| {
-            matches!(
-                wd.kind,
-                WKind::Button {
-                    active: true,
-                    act: Act::Extra(crate::extras::Item::CosmeticsOthers),
-                    ..
-                }
-            )
-        }) {
-            // Extras has enough rows to scroll: click the cycle button inside
-            // the list's viewport, as a player would after scrolling to it.
-            ui.scroll = (extra_btn.y - top).max(0.0);
-            let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
-            let extra_btn = widgets
-                .iter()
-                .find(|wd| {
-                    matches!(
-                        wd.kind,
-                        WKind::Button {
-                            act: Act::Extra(crate::extras::Item::CosmeticsOthers),
-                            ..
-                        }
-                    )
-                })
-                .unwrap();
-            let (ex, ey) = (extra_btn.x + 1.0, extra_btn.y + 1.0);
-            use horizon_cosmetics::prefs::Others;
-            // Not chosen, nothing owned: shows Hidden.
-            assert_eq!(s.extras.cosmetics_others, None);
-            assert_eq!(s.extras.effective_others(), Others::Hidden);
-
-            // Forward (wraps to Shown), now a choice
-            ui.click(&mut s, &atlas, ex, ey, size, [854, 480], false, false);
-            assert_eq!(s.extras.cosmetics_others, Some(Others::Shown));
-
-            // Backward with shift
-            ui.shift = true;
-            ui.click(&mut s, &atlas, ex, ey, size, [854, 480], false, false);
-            assert_eq!(s.extras.cosmetics_others, Some(Others::Hidden));
-
-            // Backward again
-            ui.click(&mut s, &atlas, ex, ey, size, [854, 480], false, false);
-            assert_eq!(s.extras.cosmetics_others, Some(Others::NameTags));
-            ui.shift = false;
-        }
     }
 }
+
+#[path = "options_ui_preset.rs"]
+mod preset;
+pub(crate) use preset::{
+    PRESETS, apply_preset, drag_slider, preset_from_slider, preset_index, set_slider,
+};
+#[cfg(test)]
+#[path = "options_ui_graphics_tests.rs"]
+mod graphics_tests;
+#[path = "options_ui_pages.rs"]
+mod pages;

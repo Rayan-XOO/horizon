@@ -19,7 +19,7 @@ pub const VARIANTS: [&str; 4] = ["creamy", "white", "brown", "gray"];
 pub const MAX_TEMPER: i32 = 30;
 
 // Llama state: `variant` the coat, `variant2` the strength (1 to 5),
-// `variant3` the temper, `chested` the chest, `head` the carpet, `flag2`
+// `equine_temper` the signed temper, `chested` the chest, `head` the carpet, `flag2`
 // `didSpit`, `ints[0]` a trader llama's despawn delay.
 pub fn is_llama(s: Species) -> bool {
     matches!(s, Species::Llama | Species::TraderLlama)
@@ -62,7 +62,7 @@ pub fn register(m: &mut Mob) {
     if trader {
         g.add(1, Panic::new(2.0));
     }
-    g.add(1, equine::RunAroundLikeCrazy);
+    g.add(1, equine::RunAroundLikeCrazy::new());
     g.add(2, super::caravan::FollowCaravan::new(f64::from(2.1_f32)));
     g.add(3, RangedAttack::new(1.25, 40, 40, 20.0, spit));
     g.add(3, Panic::new(1.2));
@@ -226,12 +226,7 @@ fn spit(m: &mut Mob, who: Who, _power: f32, cx: &mut Cx) {
     let zd = t.position.z - m.position.z;
     let yo = (xd * xd + zd * zd).sqrt() * f64::from(0.2_f32);
     let mut p = Projectile::new(ProjectileKind::LlamaSpit, start, Some(Who::Mob(m.id)));
-    p.shoot(
-        &mut crate::projectiles::own_random(m),
-        [xd, yd + yo, zd],
-        1.5,
-        10.0,
-    );
+    p.shoot_own([xd, yd + yo, zd], 1.5, 10.0);
     cx.events.push(MobEvent::Projectile(p));
     let pitch = 1.0 + (m.random.next_float() - m.random.next_float()) * 0.2;
     cx.events.push(MobEvent::Sound(
@@ -265,7 +260,6 @@ pub fn from_nbt(m: &mut Mob, tag: &horizon_world::nbt::Tag) {
     use crate::save::number;
     m.extra.variant = number(tag.get("Variant")).unwrap_or(0).clamp(0, 3) as u8;
     m.extra.variant2 = number(tag.get("Strength")).unwrap_or(1).clamp(1, 5) as u8;
-    m.extra.variant3 = i32::from(m.extra.variant3).min(MAX_TEMPER) as u8;
     if is_trader(m) {
         m.extra.ints[0] =
             number(tag.get("DespawnDelay")).map_or(DEFAULT_DESPAWN_DELAY, |v| v as i32);

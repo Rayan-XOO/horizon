@@ -192,7 +192,7 @@ impl Oit {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon improved transparency"),
             source: wgpu::ShaderSource::Wgsl(
-                (include_str!("../terrain.wgsl").to_owned()
+                (super::terrain_shader()
                     + include_str!("../oit.wgsl")
                     + include_str!("../oit_world.wgsl"))
                 .into(),
@@ -253,7 +253,14 @@ impl Oit {
                 ..Default::default()
             })
         };
-        let constants = [("SPRITE_ARRAYS", sprites[0]), ("SPRITE_SPLIT", sprites[1])];
+        let constants = [
+            ("SPRITE_ARRAYS", sprites[0]),
+            ("SPRITE_SPLIT", sprites[1]),
+            (
+                "HDR_WRITE_LIGHT",
+                f64::from(u8::from(format == super::LINEAR_FRAME)),
+            ),
+        ];
         let add = wgpu::BlendOperation::Add;
         let depth = |write| {
             Some(wgpu::DepthStencilState {
@@ -464,7 +471,10 @@ impl Oit {
                 fragment: Some(wgpu::FragmentState {
                     module: &cloud_shader,
                     entry_point: Some(fragment),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants[2..],
+                        ..Default::default()
+                    },
                     targets: &stage_targets(stage),
                 }),
                 multiview_mask: None,
@@ -488,7 +498,14 @@ impl Oit {
                 Stage::Accumulate,
             ),
         ];
-        let features = Features::new(device, &layouts, features[0], features[1], features[2]);
+        let features = Features::new(
+            device,
+            &layouts,
+            features[0],
+            features[1],
+            features[2],
+            format,
+        );
         Self {
             uniform,
             layouts,
@@ -679,13 +696,16 @@ impl Oit {
             ),
         ] {
             {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some(label),
                     timestamp_writes: timing.as_deref_mut().and_then(|t| t.writes(label)),
                     color_attachments: &first,
                     depth_stencil_attachment: read_only(terrain_depth),
                     ..Default::default()
                 });
+                let pixels = super::pixel_count(terrain_depth);
+                let mut pass =
+                    super::pack_timing::counted(timing.as_deref_mut(), pass, pixels, label);
                 pass.set_bind_group(GROUP, group, &[]);
                 draw(&mut pass, stage);
             }
@@ -912,7 +932,7 @@ mod tests {
     #[test]
     fn the_terrain_shader_validates() {
         validate(
-            &(include_str!("../terrain.wgsl").to_owned()
+            &(crate::gfx::terrain_shader()
                 + include_str!("../oit.wgsl")
                 + include_str!("../oit_world.wgsl")),
             &[
@@ -955,7 +975,7 @@ mod tests {
         );
         let border = stages("border");
         validate(
-            &(include_str!("../border.wgsl").to_owned()
+            &(super::super::border_shader()
                 + include_str!("../oit.wgsl")
                 + include_str!("../oit_border.wgsl")),
             &border.iter().map(String::as_str).collect::<Vec<_>>(),

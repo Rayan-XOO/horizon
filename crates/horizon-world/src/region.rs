@@ -8,6 +8,7 @@ use crate::{
 };
 use horizon_core::position::ChunkPos;
 use std::{
+    cell::RefCell,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -17,6 +18,11 @@ use std::{
 const SECTOR: usize = 4096;
 const HEADER: usize = SECTOR * 2;
 const MAX_COMPRESSED: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    /// Decompression storage retained by each region-reading worker.
+    static NBT_DECODE_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Clone, Debug)]
 pub struct ChunkRecord {
@@ -41,14 +47,16 @@ impl ChunkRecord {
     /// `RegionFileStorage.read`: the root read straight off the decompressing
     /// stream, so bytes after it, and a damaged stream past it, are never read.
     pub fn nbt(&self, limits: Limits) -> io::Result<NamedTag> {
-        let mut bytes = Vec::new();
-        let decoded = self
-            .compression
-            .decode_into(&self.compressed, limits.max_bytes, &mut bytes);
-        match nbt::read_named(&bytes, limits) {
-            Ok((root, _)) => Ok(root),
-            Err(e) => Err(decoded.err().unwrap_or_else(|| invalid(e.to_string()))),
-        }
+        NBT_DECODE_BUFFER.with_borrow_mut(|bytes| {
+            bytes.clear();
+            let decoded = self
+                .compression
+                .decode_into(&self.compressed, limits.max_bytes, bytes);
+            match nbt::read_named(bytes, limits) {
+                Ok((root, _)) => Ok(root),
+                Err(e) => Err(decoded.err().unwrap_or_else(|| invalid(e.to_string()))),
+            }
+        })
     }
 }
 
@@ -61,6 +69,9 @@ pub struct RegionFile {
     /// The sectors in use (`RegionBitmap`): the header's two and every
     /// chunk's.
     used: Vec<bool>,
+    /// The first free sector (`RegionBitmap`'s low watermark): allocation
+    /// starts its first-fit search here instead of at sector 0.
+    first_free: usize,
 }
 
 pub fn position_from_path(path: &Path) -> io::Result<ChunkPos> {
@@ -101,6 +112,100 @@ fn position(region: ChunkPos, index: usize) -> ChunkPos {
 fn external_path(directory: &Path, chunk: ChunkPos) -> PathBuf {
     directory.join(format!("c.{}.{}.mcc", chunk.x, chunk.z))
 }
+/// The header of a region file, from its start: each chunk's place (sector
+/// and sector count) and timestamp.
+fn read_header(file: &mut File) -> io::Result<([u32; 1024], [u32; 1024])> {
+    let len = file.metadata()?.len();
+    // RegionFile's constructor: a short header (an empty or truncated file)
+    // reads as far as it goes, the rest stays zero (no chunks).
+    let mut header = [0; HEADER];
+    let mut read = 0;
+    while read < HEADER {
+        match file.read(&mut header[read..])? {
+            0 => break,
+            n => read += n,
+        }
+    }
+    let mut offsets = [0; 1024];
+    let mut timestamps = [0; 1024];
+    for i in 0..1024 {
+        offsets[i] = u32::from_be_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+        timestamps[i] = u32::from_be_bytes(
+            header[SECTOR + i * 4..SECTOR + i * 4 + 4]
+                .try_into()
+                .unwrap(),
+        );
+        if offsets[i] == 0 {
+            continue;
+        }
+        let start = offsets[i] >> 8;
+        let count = offsets[i] & 255;
+        // Vanilla drops entries that overlap the header, are empty or start past
+        // the end of the file (logged as invalid sectors).
+        if start < 2 || count == 0 || u64::from(start) * SECTOR as u64 > len {
+            offsets[i] = 0;
+        }
+    }
+    Ok((offsets, timestamps))
+}
+/// `RegionFile.getChunkDataInputStream` for the chunk the header puts at
+/// `offset`: a chunk the file cannot deliver is absent (`null`), not an
+/// error, so a reader skips it the way vanilla does instead of giving up on
+/// the whole region.
+fn read_record(
+    file: &mut File,
+    directory: &Path,
+    chunk: ChunkPos,
+    offset: u32,
+    timestamp: u32,
+) -> io::Result<Option<ChunkRecord>> {
+    if offset == 0 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(u64::from(offset >> 8) * SECTOR as u64))?;
+    let mut header = [0; 5];
+    if file.read(&mut header)? < header.len() {
+        return Ok(None); // "Chunk header is truncated"
+    }
+    let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+    if len == 0 {
+        return Ok(None); // "Chunk is allocated, but stream is missing"
+    }
+    if len as u64 + 4 > (u64::from(offset & 255) * SECTOR as u64) {
+        return Ok(None); // "Chunk stream is truncated"
+    }
+    let compression = Compression::try_from(header[4] & 127)?;
+    let compressed = if header[4] & 128 != 0 {
+        // `createExternalChunkInputStream`: the stub's length says nothing
+        // about the stream in the `.mcc`, so a stub that also claims inline
+        // data only warns; and a stub whose file is gone is a chunk that is
+        // not there (`null`), not a damaged one.
+        let path = external_path(directory, chunk);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let file = File::open(path)?;
+        let mut data = Vec::new();
+        file.take((MAX_COMPRESSED + 1) as u64)
+            .read_to_end(&mut data)?;
+        if data.len() > MAX_COMPRESSED {
+            return Err(invalid("external chunk compressed limit exceeded"));
+        }
+        data
+    } else {
+        let mut data = vec![0; len - 1];
+        match file.read_exact(&mut data) {
+            Ok(()) => data,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    };
+    Ok(Some(ChunkRecord {
+        compression,
+        compressed,
+        timestamp,
+    }))
+}
 fn remove_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -133,37 +238,7 @@ impl RegionFile {
 
     fn from_file(path: PathBuf, mut file: File) -> io::Result<Self> {
         let position = position_from_path(&path)?;
-        let len = file.metadata()?.len();
-        // RegionFile's constructor: a short header (an empty or truncated file)
-        // reads as far as it goes, the rest stays zero (no chunks).
-        let mut header = [0; HEADER];
-        let mut read = 0;
-        while read < HEADER {
-            match file.read(&mut header[read..])? {
-                0 => break,
-                n => read += n,
-            }
-        }
-        let mut offsets = [0; 1024];
-        let mut timestamps = [0; 1024];
-        for i in 0..1024 {
-            offsets[i] = u32::from_be_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
-            timestamps[i] = u32::from_be_bytes(
-                header[SECTOR + i * 4..SECTOR + i * 4 + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            if offsets[i] == 0 {
-                continue;
-            }
-            let start = offsets[i] >> 8;
-            let count = offsets[i] & 255;
-            // Vanilla drops entries that overlap the header, are empty or start past
-            // the end of the file (logged as invalid sectors).
-            if start < 2 || count == 0 || u64::from(start) * SECTOR as u64 > len {
-                offsets[i] = 0;
-            }
-        }
+        let (offsets, timestamps) = read_header(&mut file)?;
         let mut region = Self {
             file,
             path,
@@ -171,11 +246,17 @@ impl RegionFile {
             offsets,
             timestamps,
             used: Vec::new(),
+            first_free: 0,
         };
         region.force(0, 2);
         for offset in offsets.into_iter().filter(|&o| o != 0) {
             region.force((offset >> 8) as usize, (offset & 255) as usize);
         }
+        region.first_free = region
+            .used
+            .iter()
+            .position(|&u| !u)
+            .unwrap_or(region.used.len());
         Ok(region)
     }
 
@@ -185,18 +266,25 @@ impl RegionFile {
             self.used.resize(start + count, false);
         }
         self.used[start..start + count].fill(true);
+        if self.first_free >= start && self.first_free < start + count {
+            self.first_free = self.used[start + count..]
+                .iter()
+                .position(|&u| !u)
+                .map_or(self.used.len(), |i| start + count + i);
+        }
     }
     /// `RegionBitmap.free`.
     fn free(&mut self, start: usize, count: usize) {
         let end = (start + count).min(self.used.len());
         if start < end {
             self.used[start..end].fill(false);
+            self.first_free = self.first_free.min(start);
         }
     }
     /// `RegionBitmap.allocate`: the first run of free sectors long enough
     /// (the end of the file is free).
     fn allocate(&mut self, count: usize) -> usize {
-        let mut current = 0;
+        let mut current = self.first_free;
         loop {
             let start = (current..self.used.len())
                 .find(|&s| !self.used[s])
@@ -317,44 +405,18 @@ impl RegionFile {
             .map(|(i, _)| (position(self.position, i), self.timestamps[i]))
     }
 
+    /// The chunk's record, `None` for a chunk the file does not hold or cannot
+    /// deliver (`read_record`).
     pub fn read(&mut self, chunk: ChunkPos) -> io::Result<Option<ChunkRecord>> {
         let i = slot(self.position, chunk)?;
-        let offset = self.offsets[i];
-        if offset == 0 {
-            return Ok(None);
-        }
-        self.file
-            .seek(SeekFrom::Start(u64::from(offset >> 8) * SECTOR as u64))?;
-        let mut header = [0; 5];
-        self.file.read_exact(&mut header)?;
-        let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
-        if len < 1 || len as u64 + 4 > (u64::from(offset & 255) * SECTOR as u64) {
-            return Err(invalid("invalid chunk payload length"));
-        }
-        let compression = Compression::try_from(header[4] & 127)?;
-        let compressed = if header[4] & 128 != 0 {
-            if len != 1 {
-                return Err(invalid("external chunk stub has inline data"));
-            }
-            let path = external_path(self.path.parent().unwrap_or(Path::new(".")), chunk);
-            let file = File::open(path)?;
-            let mut data = Vec::new();
-            file.take((MAX_COMPRESSED + 1) as u64)
-                .read_to_end(&mut data)?;
-            if data.len() > MAX_COMPRESSED {
-                return Err(invalid("external chunk compressed limit exceeded"));
-            }
-            data
-        } else {
-            let mut data = vec![0; len - 1];
-            self.file.read_exact(&mut data)?;
-            data
-        };
-        Ok(Some(ChunkRecord {
-            compression,
-            compressed,
-            timestamp: self.timestamps[i],
-        }))
+        let directory = self.path.parent().unwrap_or(Path::new("."));
+        read_record(
+            &mut self.file,
+            directory,
+            chunk,
+            self.offsets[i],
+            self.timestamps[i],
+        )
     }
 
     /// Export all chunks, preserving untouched compressed bytes and timestamps.
@@ -390,6 +452,50 @@ impl RegionFile {
     }
 }
 type BTreeChanges<'a> = std::collections::BTreeMap<usize, Option<&'a ChunkRecord>>;
+
+/// A region file's header kept without the file open: which chunks the file
+/// holds and where, as of when it was read. For a reader of many chunks that
+/// must not keep every file open (far terrain: a region file for each 32
+/// chunks of the view), so that the header is read once and not once a chunk.
+///
+/// It goes stale when the file is written: `RegionFile::write` moves the
+/// chunk, and frees its old sectors for the next chunk written. Whoever keeps
+/// a header must know when that happens.
+pub struct RegionHeader {
+    path: PathBuf,
+    position: ChunkPos,
+    offsets: [u32; 1024],
+    timestamps: [u32; 1024],
+}
+impl RegionHeader {
+    pub fn read(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_owned();
+        let position = position_from_path(&path)?;
+        let (offsets, timestamps) = read_header(&mut File::open(&path)?)?;
+        Ok(Self {
+            path,
+            position,
+            offsets,
+            timestamps,
+        })
+    }
+    /// `RegionFile::read` at the place this header gives the chunk, with the
+    /// file opened for this one record.
+    pub fn read_chunk(&self, chunk: ChunkPos) -> io::Result<Option<ChunkRecord>> {
+        let i = slot(self.position, chunk)?;
+        if self.offsets[i] == 0 {
+            return Ok(None);
+        }
+        let directory = self.path.parent().unwrap_or(Path::new("."));
+        read_record(
+            &mut File::open(&self.path)?,
+            directory,
+            chunk,
+            self.offsets[i],
+            self.timestamps[i],
+        )
+    }
+}
 
 static NEXT_TEMP: AtomicU32 = AtomicU32::new(0);
 
@@ -537,5 +643,109 @@ impl Drop for RegionWriter {
                 let _ = fs::remove_file(path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-hint allocator: first fit from sector 0. The hint must keep
+    /// producing exactly its placements.
+    fn naive_first_fit(used: &[bool], count: usize) -> usize {
+        let mut current = 0;
+        loop {
+            let start = (current..used.len())
+                .find(|&s| !used[s])
+                .unwrap_or(used.len());
+            let end = (start..used.len()).find(|&s| used[s]);
+            if end.is_none_or(|end| end - start >= count) {
+                return start;
+            }
+            current = end.unwrap_or(start);
+        }
+    }
+
+    #[test]
+    fn allocation_matches_first_fit_from_zero() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-region-first-free-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.0.0.mca");
+        let mut region = RegionFile::open_writable(&path, true).unwrap();
+
+        let mut seed = 0x1234_5678u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize
+        };
+        for op in 0..120 {
+            let slot = next() % 1024;
+            let size = match next() % 4 {
+                0 => 1, // external: one stub sector
+                _ => 2,
+            };
+            let pos = position(region.position, slot);
+            if next() % 5 == 0 {
+                assert!(region.clear(pos, op as u32).is_ok());
+            } else {
+                let record = ChunkRecord {
+                    compression: Compression::None,
+                    compressed: vec![0; size * SECTOR - 5],
+                    timestamp: op as u32,
+                };
+                assert!(region.write(pos, &record).is_ok());
+            }
+            // The naive bitmap from what the region placed, under the old rule.
+            let mut naive = vec![false; region.used.len()];
+            naive[0..2].fill(true);
+            for i in 0..1024 {
+                let o = region.offsets[i];
+                if o != 0 {
+                    let s = (o >> 8) as usize;
+                    let c = (o & 255) as usize;
+                    if naive.len() < s + c {
+                        naive.resize(s + c, false);
+                    }
+                    naive[s..s + c].fill(true);
+                }
+            }
+            assert_eq!(region.used, naive);
+            assert_eq!(region.first_free, naive_first_fit(&naive, 1));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kept_header_reads_the_chunks_of_its_file() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-region-header-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.-1.2.mca");
+        let record = |fill: u8, len: usize| ChunkRecord {
+            compression: Compression::None,
+            compressed: vec![fill; len],
+            timestamp: u32::from(fill),
+        };
+        let (first, last) = (ChunkPos::new(-32, 64), ChunkPos::new(-1, 95));
+        let missing = ChunkPos::new(-31, 64);
+        let mut region = RegionFile::open_writable(&path, true).unwrap();
+        region.write(first, &record(7, 100)).unwrap();
+        // Two sectors, after the first chunk's one.
+        region.write(last, &record(9, 5000)).unwrap();
+
+        let header = RegionHeader::read(&path).unwrap();
+        for (chunk, fill, len) in [(first, 7, 100), (last, 9, 5000)] {
+            let read = header.read_chunk(chunk).unwrap().unwrap();
+            assert_eq!(read.compressed, vec![fill; len]);
+            assert_eq!(read.timestamp, u32::from(fill));
+        }
+        assert!(header.read_chunk(missing).unwrap().is_none());
+        // The next region's chunk.
+        assert!(header.read_chunk(ChunkPos::new(0, 64)).is_err());
+        assert!(RegionHeader::read(dir.join("r.5.5.mca")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -17,7 +17,6 @@ use winit::keyboard::KeyCode;
 const FAKE_EYE: f32 = 1.62;
 
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Breaks the block at `pos` as a machine does, with no player: vanilla's
     /// `Level.destroyBlock(pos, true)` with the loot rolled for `tool`
@@ -33,7 +32,7 @@ impl Game<'_> {
     /// (a harvester storing them); without, they pop as item entities and the
     /// list is empty. Nothing drops where `doTileDrops` is off. None, with
     /// nothing broken, for air, an unloaded block and off a server.
-    /// API @API:machine_breaking@.
+    /// API 418.
     pub(super) fn native_machine_destroy_block(
         &mut self,
         pos: [i32; 3],
@@ -73,7 +72,7 @@ impl Game<'_> {
     /// crack away. A machine passes an id of its own that no entity has (a
     /// negative one), the same each time, so a new stage replaces its old one;
     /// a crack not renewed for 400 ticks fades. Off a server nothing happens.
-    /// API @API:machine_breaking@.
+    /// API 418.
     pub(super) fn native_set_break_progress(&mut self, breaker: i32, pos: [i32; 3], progress: i32) {
         if !self.native_authoritative() {
             return;
@@ -99,7 +98,7 @@ impl Game<'_> {
     /// None, with nothing used, off a server and while a player's action is
     /// being run (from inside a player's hook: run it from a block entity's
     /// tick).
-    /// API @API:fake_player@.
+    /// API 417.
     pub(super) fn native_use_as_player(
         &mut self,
         stack: ItemStack,
@@ -440,13 +439,26 @@ pub(crate) mod tests {
 
         let ender = [10, 64, 8];
         let key = (ender[0], ender[1], ender[2]);
+        let diamonds = Some(ItemStack::new("minecraft:diamond", 5));
+        game.ender_items[0] = diamonds.clone();
         assert!(click_new(&mut game, "minecraft:ender_chest", ender).consumed);
         assert!(game.ender_open.is_none());
-        assert!(
-            game.world.block_entities.get(&key).is_none(),
-            "a stand-in chest stayed",
-        );
+        // An ender chest keeps its block entity (`EnderChestBlock.newBlockEntity`), but
+        // `EnderChestBlockEntity` holds no items: the player's own are not left in it.
+        match game.world.block_entities.get(&key) {
+            Some(BlockEntity::Chest(items)) => {
+                assert!(
+                    items.iter().all(Option::is_none),
+                    "the player's items stayed"
+                );
+            }
+            other => panic!("the ender chest lost its block entity: {other:?}"),
+        }
         assert!(!game.lid_openers.contains_key(&key), "its lid stayed open");
+        assert_eq!(
+            game.ender_items[0], diamonds,
+            "the server's own ender items changed"
+        );
     }
 
     /// Each field holds a value the use can't have written, so a swap that
@@ -459,6 +471,7 @@ pub(crate) mod tests {
             dim: game.dim,
             pos: [1, 2, 3],
             yaw: 0.0,
+            pitch: 0.0,
             forced: false,
         };
         let spawn = Vec3::new(1.0, 2.0, 3.0);

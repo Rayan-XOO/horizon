@@ -11,6 +11,14 @@ use horizon_client::{
     items::ItemStack,
 };
 use horizon_core::geometry::{Aabb, Vec3};
+use horizon_items::mining::{self, DestroySpeedModifiers};
+
+/// The point a `ServerboundInteractPacket` carries: `EntityHitResult.getLocation()
+/// - entity.position()`, measured from the entity's feet, as
+/// `MultiPlayerGameMode.interact` computes it.
+pub(super) fn interact_location(point: Vec3, feet: Vec3) -> [f64; 3] {
+    [point.x - feet.x, point.y - feet.y, point.z - feet.z]
+}
 
 /// The off hand's place in `visible_hands` (the main hand uses its hotbar slot).
 const OFFHAND: usize = usize::MAX;
@@ -117,6 +125,31 @@ impl Game<'_> {
             .unwrap_or(otherwise)
     }
 
+    /// A stack's `minecraft:attack_range` component, falling back to the spear's
+    /// default reach (`spear::REACH`) for spear items unless explicitly removed.
+    fn stack_attack_range(&self, stack: &ItemStack) -> Option<serde_json::Value> {
+        let view_stack = horizon_client::item_render::stack_view(stack);
+        let view = self.pack.item_renderer.models.components_view(&view_stack);
+        if let Some(val) = view.get("minecraft:attack_range") {
+            return Some(val.clone());
+        }
+        if stack
+            .data()
+            .is_some_and(|d| d.other("!minecraft:attack_range").is_some())
+        {
+            return None;
+        }
+        horizon_client::spear::Kinetic::of(&stack.item).map(|_| {
+            serde_json::json!({
+                "min_reach": horizon_client::spear::REACH.min,
+                "max_reach": horizon_client::spear::REACH.max,
+                "min_creative_reach": horizon_client::spear::REACH.min_creative,
+                "max_creative_reach": horizon_client::spear::REACH.max_creative,
+                "hitbox_margin": horizon_client::spear::REACH.hitbox_margin,
+            })
+        })
+    }
+
     /// ServerGamePacketListenerImpl.handleAttack's
     /// `Player.isWithinAttackRange(mainHandItem, box, 3.0)` for the player in
     /// place: the held item's `attack_range`, else `AttackRange.defaultFor`
@@ -126,14 +159,7 @@ impl Game<'_> {
         let Some(eye) = self.eye_position() else {
             return false;
         };
-        let range = self.held().and_then(|stack| {
-            self.pack
-                .item_renderer
-                .models
-                .components(&horizon_client::item_render::stack_view(stack))
-                .get("minecraft:attack_range")
-                .cloned()
-        });
+        let range = self.held().and_then(|stack| self.stack_attack_range(stack));
         let reach = match &range {
             Some(r) => attack_reach(r, self.creative),
             None => {
@@ -194,6 +220,19 @@ impl Game<'_> {
         let duration = swing_duration(animation, dig_speed, fatigue);
         if self.swing.start_if_able(hand, animation, duration) {
             self.swings_started += 1;
+            if let Some(r) = self.remote.as_ref()
+                && r.session.is_recording()
+            {
+                let pkt = horizon_protocol::packets::play::Clientbound::SwingAnimation(
+                    horizon_protocol::packets::play::SwingAnimation {
+                        id: r.entity_id,
+                        hand: if hand == Hand::Off { 1 } else { 0 },
+                        kind: animation.kind as i32,
+                        duration,
+                    },
+                );
+                r.session.record_clientbound(&pkt);
+            }
         }
     }
     /// `swing(hand)` for the hand that acts, with the default animation.
@@ -242,14 +281,7 @@ impl Game<'_> {
     /// `Minecraft.startAttack` on an entity: a main-hand item with an
     /// `attack_range` attacks only a hit inside it.
     pub(super) fn held_range_allows(&self, distance: f64) -> bool {
-        let range = self.held().and_then(|stack| {
-            self.pack
-                .item_renderer
-                .models
-                .components(&horizon_client::item_render::stack_view(stack))
-                .get("minecraft:attack_range")
-                .cloned()
-        });
+        let range = self.held().and_then(|stack| self.stack_attack_range(stack));
         range.is_none_or(|r| attack_range_contains(&r, distance, self.creative))
     }
     /// `LocalPlayer.raycastHitResult`'s item (`getActiveItem`: the one in
@@ -259,12 +291,7 @@ impl Game<'_> {
             .using
             .and_then(|(slot, _)| self.inventory.get(slot).and_then(Option::as_ref))
             .or_else(|| self.held())?;
-        self.pack
-            .item_renderer
-            .models
-            .components(&horizon_client::item_render::stack_view(active))
-            .get("minecraft:attack_range")
-            .cloned()
+        self.stack_attack_range(active)
     }
     /// `AttackRange.getClosesetHit` against the mobs `mob_hit` can pick
     /// (`EntitySelector.CAN_BE_PICKED`), as `raycastHitResult` reads it: the
@@ -300,7 +327,7 @@ impl Game<'_> {
                 (
                     i,
                     eye.distance_squared(at).sqrt(),
-                    super::interact_location(at, feet),
+                    interact_location(at, feet),
                 )
             })
             .reduce(|a, b| if b.1 < a.1 { b } else { a });
@@ -382,6 +409,7 @@ impl Game<'_> {
         self.mining = d.active.then_some(Mining {
             pos: d.pos,
             progress: d.progress,
+            per_tick: 0.0,
             ticks: d.ticks as u32,
         });
         if let Some(mining) = &self.mining {
@@ -403,31 +431,54 @@ impl Game<'_> {
             return 0.0;
         }
         let held = self.held();
-        let mut speed = self.items().mining_speed(held, &facts.name);
+        let tool_speed = self.items().mining_speed(held, &facts.name);
         let hardness = facts.hardness;
-        let harvest = !facts.requires_tool || self.items().correct_for_drops(held, &facts.name);
-        speed = self.modify_destroy_speed(speed);
-        speed *= block_break_speed;
-        if let Some(eye) = self.eye_position()
-            && self
-                .res
-                .facts()
-                .get(self.world.block(
-                    eye[0].floor() as i32,
-                    eye[1].floor() as i32,
-                    eye[2].floor() as i32,
-                ))
-                .fluid
-                == horizon_client::blocks::Fluid::Water
-        {
-            speed *= self.submerged_mining_speed();
-        }
-        if self.player.as_ref().is_some_and(|p| !p.ground.on_ground) {
-            speed /= 5.0;
-        }
+        let harvest =
+            self.items()
+                .has_correct_tool_for_drops(held, facts.requires_tool, &facts.name);
+        let player = DestroySpeedModifiers {
+            // Vanilla reads the attribute (recomputing a dirty one) only then.
+            mining_efficiency: if tool_speed > 1.0 {
+                self.mining_efficiency()
+            } else {
+                0.0
+            },
+            effects: self.potions.effects.mining_speed_factor(),
+            block_break_speed,
+            submerged_mining_speed: self
+                .mining_eyes_in_water()
+                .then(|| self.submerged_mining_speed()),
+            on_ground: self.player.as_ref().is_none_or(|p| p.ground.on_ground),
+        };
+        let mut speed = mining::destroy_speed(tool_speed, &player);
         // NeoForge's PlayerEvent.BreakSpeed, where Player.getDestroySpeed ends.
         self.native_break_speed(pos, state, speed, &mut speed);
-        speed / hardness / if harvest { 30.0 } else { 100.0 }
+        mining::destroy_progress(hardness, harvest, speed)
+    }
+    /// `EntityFluidInteraction`: compare the eyes with the camera fluid surface.
+    fn mining_eyes_in_water(&self) -> bool {
+        use horizon_client::blocks::Fluid;
+        let Some(eye) = self.eye_position() else {
+            return false;
+        };
+        let [x, y, z] = eye.map(|v| v.floor() as i32);
+        let facts = self.res.facts();
+        let inside = |y| {
+            let fluid = facts.get(self.world.block(x, y, z));
+            if fluid.fluid != Fluid::Water {
+                return false;
+            }
+            let above = facts.get(self.world.block(x, y + 1, z));
+            let source = fluid.fluid_level == 8 && !fluid.fluid_falling;
+            let height = if above.fluid == fluid.fluid || (source && above.sturdy_full & 1 != 0) {
+                1.0
+            } else {
+                f64::from(f32::from(fluid.fluid_level) / 9.0)
+            };
+            eye[1] <= f64::from(y) + height
+        };
+        // The scan also includes a capped source below eyes exactly on a cell boundary.
+        inside(y) || (eye[1] == f64::from(y) && inside(y - 1))
     }
     /// A key for the main-hand stack (`destroyingItem`): its item and components.
     pub(super) fn main_hand_key(&self) -> String {
@@ -501,13 +552,19 @@ impl Game<'_> {
         }
         self.swing.tick();
         let main = self.inventory[self.selected].clone();
-        // Player.tick: a different item resets the attack strength, and
-        // detectEquipmentUpdates gives the player its modifiers.
-        if self.hand_strength.tick(main.as_ref().map(|s| HeldStack {
+        // Player.tick: a different item resets the attack strength; any change
+        // of the stack (`!ItemStack.matches`, e.g. another Efficiency level on
+        // the same tool) is what detectEquipmentUpdates gives the player its
+        // modifiers for.
+        let held = main.as_ref().map(|s| HeldStack {
             item: s.item.to_string(),
             rest: format!("{} {} {:?}", s.count, s.damage, s.extra),
-        })) {
+        });
+        let changed = self.hand_strength.main_hand_changed(&held);
+        if self.hand_strength.tick(held) {
             self.attack_ticks = 0;
+        }
+        if changed {
             self.apply_equipment();
         }
         self.attack_item = main.as_ref().map(|s| s.item.clone());
@@ -527,7 +584,7 @@ impl Game<'_> {
             self.hands_busy(),
             self.hand_strength.swap_scale(1.0, speed),
             changed,
-            self.settings.extras.pvp.combat.legacy,
+            self.pvp_legacy_look(),
         );
         for h in 0..2 {
             if replace[h] {
@@ -536,6 +593,24 @@ impl Game<'_> {
             }
         }
     }
+
+    /// A replay owns its held-item and equip animation state. Reset it when a
+    /// standalone replay closes so a later world cannot inherit lowered hands
+    /// or the replay player's visible stacks.
+    pub(super) fn reset_studio_hand_state(&mut self) {
+        let main = self.inventory.get(self.selected).cloned().flatten();
+        self.visible_hands = [(self.selected, main), (OFFHAND, self.offhand.clone())];
+        self.hands_replaced = [false; 2];
+        self.heights = horizon_client::first_person::HandHeights {
+            main: 1.0,
+            old_main: 1.0,
+            off: 1.0,
+            old_off: 1.0,
+        };
+        self.swing = Default::default();
+        self.sway = Default::default();
+    }
+
     /// `Minecraft.crosshairPickEntity` when it is a `LivingEntity`: whether
     /// it is alive (the nearest entity under the crosshair, before any block).
     pub(super) fn crosshair_living(&self) -> Option<bool> {
@@ -551,14 +626,7 @@ impl Game<'_> {
             .using
             .and_then(|(slot, _)| self.inventory.get(slot).and_then(Option::as_ref))
             .or_else(|| self.held());
-        let range = active.and_then(|stack| {
-            self.pack
-                .item_renderer
-                .models
-                .components(&horizon_client::item_render::stack_view(stack))
-                .get("minecraft:attack_range")
-                .cloned()
-        });
+        let range = active.and_then(|stack| self.stack_attack_range(stack));
         let spear = range.as_ref().and_then(|r| {
             let eye = self.eye_position()?;
             let look = super::view_vector(self.yaw, self.pitch);
@@ -621,9 +689,34 @@ impl Game<'_> {
         {
             return menu;
         }
-        let Some(hit) = self.pick() else {
+        self.pick()
+            .is_some_and(|hit| self.block_interactable_for_spectator(&hit))
+    }
+    /// `BlockBehaviour.showAsInteractableInSpectatorMode`: a block with a menu, or a portal.
+    fn block_interactable_for_spectator(&self, hit: &super::Hit) -> bool {
+        let block = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+        matches!(
+            &*self.res.facts().get(block).name,
+            "minecraft:nether_portal" | "minecraft:end_portal" | "minecraft:end_gateway"
+        ) || self.block_opens_menu(hit)
+    }
+    /// A lectern with no book (`LecternBlock.useWithoutItem` consumes the click and does nothing).
+    pub(super) fn block_is_empty_lectern(&self, hit: &super::Hit) -> bool {
+        let state = self.world.block(hit.pos[0], hit.pos[1], hit.pos[2]);
+        &*self.res.facts().get(state).name == "minecraft:lectern"
+            && self
+                .pack
+                .assets
+                .registry
+                .state(state)
+                .and_then(|s| s.properties.get("has_book"))
+                .is_none_or(|v| v != "true")
+    }
+    /// `BlockState.getMenuProvider`: the block's use opens a screen.
+    pub(super) fn block_opens_menu(&self, hit: &super::Hit) -> bool {
+        if self.block_is_empty_lectern(hit) {
             return false;
-        };
+        }
         let id = &*self
             .res
             .facts()
@@ -631,12 +724,11 @@ impl Game<'_> {
             .name;
         let name = id.trim_start_matches("minecraft:");
         match name {
-            // BlockBehaviour.getMenuProvider and `instanceof Portal`.
+            // BlockBehaviour.getMenuProvider.
             "crafting_table" | "enchanting_table" | "anvil" | "chipped_anvil" | "damaged_anvil"
             | "stonecutter" | "loom" | "cartography_table" | "grindstone" | "smithing_table"
             | "barrel" | "furnace" | "blast_furnace" | "smoker" | "brewing_stand" | "hopper"
-            | "dispenser" | "dropper" | "crafter" | "lectern" | "beacon" | "nether_portal"
-            | "end_portal" | "end_gateway" => true,
+            | "dispenser" | "dropper" | "crafter" | "lectern" | "beacon" => true,
             // ChestBlock.getMenuProvider: none while a redstone conductor
             // sits on top of either half (a sitting cat aside). Copper
             // chests are `ChestBlock`s too.
@@ -657,18 +749,24 @@ impl Game<'_> {
     /// Haste and Mining Fatigue modifiers (`ADD_MULTIPLIED_TOTAL`), clamped to
     /// the attribute's range.
     pub(super) fn main_hand_attack_speed(&self) -> f64 {
-        // The base comes from the player's attribute map so `/attribute ... base set` applies.
+        if let Some(player) = &self.player
+            && let Ok(speed) = player
+                .attributes
+                .computed_value_of("minecraft:attack_speed")
+            && (self.remote.is_some()
+                || !self.applied_modifiers.is_empty()
+                || !self.potions.applied.is_empty())
+        {
+            return speed.clamp(0.0, 1024.0);
+        }
         let base = self
             .player
             .as_ref()
             .and_then(|player| {
-                let key = player.attributes.key("minecraft:attack_speed")?;
-                let handle = player.attributes.lookup(Some(&key))?;
                 player
                     .attributes
-                    .instance(&handle)
+                    .computed_value_of("minecraft:attack_speed")
                     .ok()
-                    .map(|value| value.base_value())
             })
             .unwrap_or(horizon_client::attack_strength::BASE_ATTACK_SPEED);
         let value = base
@@ -942,6 +1040,30 @@ mod tests {
         let reach = attack_reach(&spear, false);
         assert!(in_attack_range(7.625, reach, 3.0));
         assert!(!in_attack_range(7.7, reach, 3.0));
+    }
+
+    #[test]
+    fn spear_default_reach_and_bounds() {
+        // #14092: A spear's default reach matches REACH (min 2.0, max 4.5, creative 6.5, margin 0.125).
+        let r = &horizon_client::spear::REACH;
+        let spear = serde_json::json!({
+            "min_reach": r.min, "max_reach": r.max,
+            "min_creative_reach": r.min_creative, "max_creative_reach": r.max_creative,
+            "hitbox_margin": r.hitbox_margin,
+        });
+        let survival = attack_reach(&spear, false);
+        assert_eq!(survival, (2.0, 4.5, 0.125));
+        let creative = attack_reach(&spear, true);
+        assert_eq!(creative, (2.0, 6.5, 0.125));
+        // Serverbound handleAttack allows reach plus 3.0 buffer:
+        // Survival: 4.5 + 0.125 + 3.0 = 7.625
+        assert!(in_attack_range(7.625, survival, 3.0));
+        assert!(!in_attack_range(7.626, survival, 3.0));
+        // Minimum reach boundary: 2.0 - 0.125 = 1.875
+        assert!(attack_range_contains(&spear, 1.875, false));
+        assert!(!attack_range_contains(&spear, 1.874, false));
+        assert!(attack_range_contains(&spear, 4.625, false));
+        assert!(!attack_range_contains(&spear, 4.626, false));
     }
 
     fn stack(item: &str, count: u32, damage: u32) -> Option<ItemStack> {

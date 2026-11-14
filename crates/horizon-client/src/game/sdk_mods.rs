@@ -848,7 +848,7 @@ fn serve(game: &mut Game<'_>, id: &str, player: u128, dimension: &str, request: 
                 let only = r.i32()?;
                 runs.push(NativeBlockRun { x, z, y, height, surface, block, only: u32::try_from(only).ok() });
             }
-            if let Err(e) = game.native_edit_blocks(dimension, &NativeBlockEdit { palette, filters, runs }) {
+            if let Err(e) = game.native_edit_blocks(dimension, &NativeBlockEdit { palette, filters, runs, neighbour_updates: false, block_entities: Vec::new() }) {
                 log::warn!("[mod {id}] edit-blocks left out: {e}");
             }
         }

@@ -1,7 +1,7 @@
 //! Custom names: `NameTagItem.interactLivingEntity` and the name tag
 //! (`EntityRenderer.submitNameTag`): above the head, facing the camera,
 //! on a translucent black background, shown when the name is visible or the
-//! mob is under the crosshair within 64 blocks, as its team's name tag
+//! mob is under the crosshair within its name-tag distance (64 by default), as its team's name tag
 //! visibility allows, in the team's colours, with its score in the
 //! objective displayed below names. Other players' names (on a LAN host
 //! or a server) show whenever `LivingEntityRenderer.shouldShowName` allows,
@@ -117,10 +117,17 @@ impl NameTagLayouts {
 impl Game<'_> {
     /// A named name tag names the mob under the crosshair.
     pub(super) fn name_mob(&mut self, index: usize) -> bool {
-        let Some(name) = self
+        // `NameTagItem`: the mob takes the tag's `custom_name` component, style and all.
+        let Some((name, text)) = self
             .held()
             .filter(|h| &*h.item == "minecraft:name_tag")
-            .and_then(|h| h.custom_name())
+            .and_then(|h| {
+                let text = h.data()?.other("minecraft:custom_name");
+                Some((
+                    h.custom_name()?,
+                    text.map(horizon_client::entity_nbt::name_text),
+                ))
+            })
         else {
             return false;
         };
@@ -131,6 +138,7 @@ impl Game<'_> {
         let entity_id = m.id;
         let entity_name = name.clone();
         m.custom_name = Some(name);
+        m.custom_name_text = text;
         m.persistent = true;
         // itemStack.shrink(1), in creative too.
         self.consume_held();
@@ -252,10 +260,12 @@ impl Game<'_> {
                 }
                 None => return None,
             };
-            // The tag's 64 block distance is measured to the entity: copy the
-            // name only for a mob the frame can show it on.
+            // The tag's per-entity distance (vanilla's default is 64) is
+            // measured to the entity: copy the name only for a mob the frame
+            // can show it on.
             let at = glam::DVec3::new(m.position.x, m.position.y, m.position.z);
-            (at.distance_squared(camera) < 64.0 * 64.0).then_some((m, name, false))
+            let max = m.name_tag_distance();
+            (at.distance_squared(camera) < max * max).then_some((m, name, false))
         });
         let own = self.own_name_tag().map(|(m, _)| m.id);
         let players = players
@@ -277,7 +287,7 @@ impl Game<'_> {
             }
             // EntityAttachment.NAME_TAG: 0.5 above the box of the current pose.
             let p = name_tag_at(m, alpha);
-            // The name tag distance (64) is measured to the entity.
+            // The name tag distance is measured to the entity.
             let distance_sqr =
                 glam::DVec3::new(m.position.x, m.position.y, m.position.z).distance_squared(camera);
             // Match the model's renderer-specific box, not the tag anchor: the
@@ -289,6 +299,7 @@ impl Game<'_> {
                 distance_sqr,
                 (lo - camera - inflate).as_vec3(),
                 (hi - camera + inflate).as_vec3(),
+                m.name_tag_distance(),
             ) {
                 continue;
             }
@@ -298,11 +309,7 @@ impl Game<'_> {
                 self.count_cull(1);
                 continue;
             }
-            let marks = if player || self.cosmetics_local() {
-                self.cosmetics_marks(m, Some(m.id) == own)
-            } else {
-                Marks::default()
-            };
+            let marks = self.hooks_name_marks(m, Some(m.id) == own);
             let at = match marks.top {
                 Some(top) => p + glam::DVec3::Y * cosmetic_lift(top, m.model_scale()),
                 None => p,
@@ -339,12 +346,13 @@ impl Game<'_> {
             // MobRenderer.shouldShowName: a visible name, or the mob under the
             // crosshair; players (LivingEntityRenderer) need neither.
             // `ClientMannequin.belowNameDisplay`: the description is `scoreText`, drawn
-            // within the below-name distance (10) whether the name shows or not.
+            // within the below-name distance (10 by default) whether the name
+            // shows or not.
             let description = (m.species() == horizon_client::mobs::Species::Mannequin
-                && distance_sqr < 10.0 * 10.0)
-                .then(|| m.extra.description.component())
-                .flatten()
-                .map(|tag| horizon_client::entity_nbt::name_text(&tag).resolve_legacy());
+                && distance_sqr < m.below_name_distance().powi(2))
+            .then(|| m.extra.description.component())
+            .flatten()
+            .map(|tag| horizon_client::entity_nbt::name_text(&tag).resolve_legacy());
             let is_own = Some(m.id) == own;
             let name_shown = sb::name_shown(team, viewer, view)
                 && (!is_own || !view.is_vehicle)
@@ -402,14 +410,14 @@ impl Game<'_> {
                 .unwrap_or(shown);
             let mut lines = Vec::new();
             // EntityRenderer.extractNameTags: the score shows within the
-            // below-name distance (10), under the name.
+            // per-entity below-name distance (10 by default), under the name.
             let mut lift = 0.0;
             if m.species() == horizon_client::mobs::Species::Mannequin {
                 if let Some(text) = description {
                     lines.push((text, 0.0));
                     lift = f64::from(9.0f32 * 1.15 * 0.025);
                 }
-            } else if distance_sqr < 10.0 * 10.0
+            } else if distance_sqr < m.below_name_distance().powi(2)
                 && let Some(score) = holder.and_then(|h| self.below_name_text(&h))
             {
                 lines.push((score.resolve_legacy(), 0.0));
@@ -468,6 +476,7 @@ impl Game<'_> {
                 distance_sqr,
                 (origin - half).as_vec3(),
                 (origin + glam::DVec3::new(half.x, height + grow, half.z)).as_vec3(),
+                a.name_tag_distance(),
             ) {
                 continue;
             }
@@ -509,7 +518,7 @@ impl Game<'_> {
             let mut lines = Vec::new();
             let mut lift = 0.0;
             let holder = self.persist.uuids.get(&a.id).map(|u| uuid_text(*u));
-            if distance_sqr < 10.0 * 10.0
+            if distance_sqr < a.below_name_distance().powi(2)
                 && let Some(score) = holder.and_then(|h| self.below_name_text(&h))
             {
                 lines.push((score.resolve_legacy(), 0.0));
@@ -768,10 +777,10 @@ impl Game<'_> {
                     if background { BACKGROUND } else { 0 },
                 ),
             };
-            if n == last && marks.horizon {
+            if let Some(mark) = marks.mark.filter(|_| n == last) {
                 let x = -self.gui.atlas.font.width_text(text) / 2.0 - 10.0;
                 // 8 text pixels square, a pixel left of the background.
-                for (mx, my, w, h, argb) in horizon_cosmetics::mark::MARK {
+                for &(mx, my, w, h, argb) in mark {
                     let a = text_alpha * (argb >> 24) / 255;
                     batch.fill(
                         &self.gui.atlas,
@@ -831,8 +840,10 @@ fn name_tag_in_view(
     distance_sqr: f64,
     min: glam::Vec3,
     max: glam::Vec3,
+    max_distance: f64,
 ) -> bool {
-    distance_sqr < 64.0 * 64.0 && frustum.is_none_or(|view| view.intersects(min, max))
+    distance_sqr < max_distance * max_distance
+        && frustum.is_none_or(|view| view.intersects(min, max))
 }
 
 fn first_mob_indices(mobs: &[Mob]) -> std::collections::HashMap<u32, usize> {
@@ -935,10 +946,11 @@ struct NameTag {
     marks: Marks,
 }
 
-/// What Horizon draws by a player's name: its mark (they play Horizon) and their name tag style.
+/// What a hook draws by a player's name (`horizon_hooks::players::NameDecoration`): a mark
+/// before it (Horizon's: they play Horizon) and a name tag style.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Marks {
-    pub horizon: bool,
+    pub mark: Option<horizon_hooks::players::Mark>,
     pub style: Option<TagStyle>,
     /// How high the cosmetics drawn on their body get above the neck, in model pixels: the tag
     /// goes up over a tall one (`cosmetic_lift`).
@@ -954,6 +966,15 @@ pub(super) struct TagStyle {
     pub line: u32,
 }
 
+/// `Entity.DATA_CUSTOM_NAME` of a mob named `name`: its component with its style (a name
+/// summoned or set as `{text: "..", color: "red"}` keeps its colour), else the plain text.
+pub(super) fn name_component(m: &Mob, name: &str) -> horizon_world::nbt::Tag {
+    match &m.custom_name_text {
+        Some(text) => horizon_client::scoreboard::json_to_tag(&text.component()),
+        None => horizon_protocol::text::literal(name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,6 +982,29 @@ mod tests {
     use horizon_client::pose::Pose;
     use horizon_core::geometry::Vec3;
     use std::sync::Arc;
+
+    #[test]
+    fn a_mobs_name_is_sent_with_its_style() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        let Ok(types) = horizon_client::mobs::MobTypes::load(&root) else {
+            return;
+        };
+        let cow = Arc::new(types.types["minecraft:cow"].clone());
+        let mut m = Mob::new(1, cow, Vec3::new(0.0, 64.0, 0.0), 0.0);
+        m.custom_name = Some("RED NAME".into());
+        let plain = horizon_protocol::text::literal("RED NAME");
+        assert_eq!(name_component(&m, "RED NAME"), plain);
+        let styled = horizon_world::nbt::Tag::compound([
+            ("text", horizon_world::nbt::Tag::String("RED NAME".into())),
+            ("color", horizon_world::nbt::Tag::String("red".into())),
+        ]);
+        m.custom_name_text = Some(horizon_client::entity_nbt::name_text(&styled));
+        let sent = horizon_client::entity_nbt::name_text(&name_component(&m, "RED NAME"));
+        assert_eq!(sent, horizon_client::entity_nbt::name_text(&styled));
+        assert_ne!(sent, horizon_client::entity_nbt::name_text(&plain));
+    }
 
     fn tag_font() -> HudAtlas {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1114,7 +1158,8 @@ mod tests {
             Some(&View),
             181.0,
             glam::Vec3::new(-0.8, 8.5, -10.8),
-            glam::Vec3::new(0.8, 11.3, -9.2)
+            glam::Vec3::new(0.8, 11.3, -9.2),
+            64.0
         ));
         for (offset, distance, expected) in [
             ([0.0, 0.0, -10.0], 100.0, true),
@@ -1130,11 +1175,21 @@ mod tests {
                     Some(&View),
                     distance,
                     glam::Vec3::from_array(offset) - glam::Vec3::splat(0.5),
-                    glam::Vec3::from_array(offset) + glam::Vec3::splat(0.5)
+                    glam::Vec3::from_array(offset) + glam::Vec3::splat(0.5),
+                    64.0
                 ),
                 expected
             );
         }
+        // A server-synced `minecraft:name_tag_distance` of 5 hides a tag
+        // six blocks away even though the vanilla default reaches 64.
+        assert!(!name_tag_in_view(
+            Some(&View),
+            36.0,
+            glam::Vec3::splat(-0.5),
+            glam::Vec3::splat(0.5),
+            5.0
+        ));
     }
 
     #[test]

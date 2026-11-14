@@ -93,6 +93,9 @@ impl Config {
         if let Some(v) = var("RELAY_MAX_HOSTS_PER_ADDRESS") {
             c.rates.hosts_per_address = v;
         }
+        if let Some(v) = var("RELAY_MAX_OPEN_PER_ADDRESS") {
+            c.rates.open_per_address = v;
+        }
         if let Some(v) = var("RELAY_MAX_BRIDGES") {
             c.max_bridges = v;
         }
@@ -110,6 +113,12 @@ impl Config {
         }
         if let Some(v) = var::<f64>("RELAY_GLOBAL_UNKNOWN_PER_MIN") {
             c.global_unknown_per_min = v;
+        }
+        if let Some(v) = var::<f64>("RELAY_NAMEPLATE_UNKNOWN_PER_MIN") {
+            c.rates.nameplate_unknown_per_min = v;
+        }
+        if let Some(v) = var::<f64>("RELAY_NAMEPLATE_UNKNOWN_BURST") {
+            c.rates.nameplate_unknown_burst = v;
         }
         if let Some(v) = var::<u8>("RELAY_PER_ADDRESS_LIMITS") {
             c.per_address = v != 0;
@@ -246,6 +255,8 @@ struct Pending {
 struct Inner {
     hosts: HashMap<String, HostEntry>,
     ended: HashMap<String, Instant>,
+    /// `ended`'s entries in the order they were added, so they expire without a scan.
+    ended_order: std::collections::VecDeque<(String, Instant)>,
     pending: HashMap<u64, Pending>,
 }
 
@@ -342,18 +353,17 @@ impl Relay {
                         self.state.connections.fetch_sub(1, Ordering::Relaxed);
                         continue;
                     }
-                    let state = self.state.clone();
-                    let spawned =
+                    // Given back when the thread ends, a panic included, or with the closure
+                    // when the thread can't start.
+                    let slot = ConnSlot(self.state.clone());
+                    let _ =
                         std::thread::Builder::new()
                             .name("relay-conn".into())
                             .spawn(move || {
                                 let _ = stream.set_nonblocking(false);
-                                let _ = handle(&state, stream, peer);
-                                state.connections.fetch_sub(1, Ordering::Relaxed);
+                                let _ = handle(&slot.0, stream, peer);
+                                drop(slot);
                             });
-                    if spawned.is_err() {
-                        self.state.connections.fetch_sub(1, Ordering::Relaxed);
-                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -404,29 +414,76 @@ fn unmap(peer: SocketAddr) -> SocketAddr {
     }
 }
 
+/// A connection counted against its address's cap ([`limits::Limiter::open_connection`]), given
+/// back however the connection ends.
+struct OpenSlot<'a>(&'a State, std::net::IpAddr);
+impl<'a> OpenSlot<'a> {
+    fn take(state: &'a State, ip: std::net::IpAddr) -> Option<Self> {
+        // Decided with the lock released before a slot exists: a refused one must never be built,
+        // its Drop would give back a place it never took (and lock the limiter again).
+        let open = locked(&state.limiter).open_connection(ip);
+        open.then(|| Self(state, ip))
+    }
+}
+impl Drop for OpenSlot<'_> {
+    fn drop(&mut self) {
+        locked(&self.0.limiter).close_connection(self.1);
+    }
+}
+
+/// One of `max_connections`, given back when dropped.
+struct ConnSlot(Arc<State>);
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        self.0.connections.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A host's attach token against the one given: every byte compared, whatever differs first.
+fn same_token(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
 fn handle(state: &Arc<State>, mut stream: TcpStream, peer: SocketAddr) -> io::Result<()> {
     if state.stop.load(Ordering::Relaxed) {
         return Ok(());
     }
     let mut peer = unmap(peer);
+    // Counted per address before anything is read: past its cap a connection is closed at once,
+    // not held for `first_line` with one of the relay's global slots. Behind the PROXY protocol the
+    // client's address is the line the load balancer sends on connect, so it's counted after it.
+    let mut _open = None;
+    // Behind the PROXY protocol only the load balancers may connect: anyone else is closed at
+    // once, before the relay holds a slot for `first_line` waiting for a line it would refuse.
+    let from_balancer =
+        |ip: std::net::IpAddr| state.config.proxy_from.iter().any(|net| net.contains(ip));
+    if state.config.proxy_protocol && !from_balancer(peer.ip()) {
+        return Ok(());
+    }
+    if !state.config.proxy_protocol {
+        let Some(slot) = OpenSlot::take(state, peer.ip()) else {
+            return Ok(());
+        };
+        _open = Some(slot);
+    }
     // The first line (and an HTTP request) within `first_line` in all.
     let first_line = horizon_friends::deadline(&stream, state.config.first_line)?;
     stream.set_read_timeout(Some(state.config.first_line))?;
     let _ = stream.set_nodelay(true);
+    let _ = horizon_friends::set_tcp_keepalive(&stream);
     let mut line = wire::read_line(&mut stream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
     if state.config.proxy_protocol {
-        if !state
-            .config
-            .proxy_from
-            .iter()
-            .any(|net| net.contains(peer.ip()))
-        {
-            // Not from our load balancer: its PROXY line would be the client's own say.
-            return Ok(());
-        }
         peer = proxy_line(&line)
             .map(unmap)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no PROXY line"))?;
+        let Some(slot) = OpenSlot::take(state, peer.ip()) else {
+            return Ok(());
+        };
+        _open = Some(slot);
         line = wire::read_line(&mut stream)?.ok_or(io::ErrorKind::UnexpectedEof)?;
     }
     if line.starts_with(b"GET ") {
@@ -511,9 +568,17 @@ fn host(
     let nameplate = {
         let mut inner = locked(&state.inner);
         let kept = state.config.ended_kept;
-        inner
-            .ended
-            .retain(|_, t| now.saturating_duration_since(*t) < kept);
+        // Oldest first, stopping at the first one still kept: a registration costs the entries
+        // that expired, not a scan of every nameplate ended in the last `ended_kept`.
+        while let Some((n, t)) = inner.ended_order.front().cloned() {
+            if now.saturating_duration_since(t) < kept {
+                break;
+            }
+            inner.ended_order.pop_front();
+            if inner.ended.get(&n) == Some(&t) {
+                inner.ended.remove(&n);
+            }
+        }
         let mut found = None;
         if inner.hosts.len() < state.config.max_hosts {
             for _ in 0..64 {
@@ -551,7 +616,9 @@ fn host(
             .is_some_and(|h| h.token == token)
         {
             inner.hosts.remove(&nameplate);
-            inner.ended.insert(nameplate, Instant::now());
+            let ended = Instant::now();
+            inner.ended_order.push_back((nameplate.clone(), ended));
+            inner.ended.insert(nameplate, ended);
         }
     }
     let _ = stream.shutdown(Shutdown::Both);
@@ -585,11 +652,18 @@ fn serve_host(
             while let Ok(Some(_)) = wire::read_line(&mut reader) {}
             let _ = tx.send(Out::Closed);
         })?;
+    // A ping every `ping_every`, whatever else is sent meanwhile: the host only speaks to answer a ping, so
+    // pings held off by a stream of joins would let `host_timeout` end a host that is alive.
+    let mut next_ping = Instant::now() + state.config.ping_every;
     while !state.stop.load(Ordering::Relaxed) {
-        match rx.recv_timeout(state.config.ping_every) {
+        match rx.recv_timeout(next_ping.saturating_duration_since(Instant::now())) {
             Ok(Out::Line(m)) => wire::send(stream, &m)?,
             Ok(Out::Closed) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => wire::send(stream, &FromRelay::Ping)?,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if Instant::now() >= next_ping {
+            wire::send(stream, &FromRelay::Ping)?;
+            next_ping = Instant::now() + state.config.ping_every;
         }
     }
     Ok(())
@@ -632,10 +706,16 @@ fn join(
 ) -> io::Result<()> {
     let now = Instant::now();
     state.joins.fetch_add(1, Ordering::Relaxed);
-    // The global budget for unknown codes is checked before the lookup, so a
-    // refusal says nothing about whether the nameplate exists.
-    let allowed =
-        locked(&state.limiter).allow_join(peer.ip(), now) && locked(&state.global_unknown).has(now);
+    // The site's budget for unknown codes is checked before the lookup, so its refusal says
+    // nothing about whether the nameplate exists. The relay-wide one only refuses unknown codes:
+    // a few sites can keep it empty, and a guest with a real code must still get in then. While
+    // it is spent a refusal does tell a prober a code is unknown; guessing a code's secret half
+    // stays capped by its host (five tries a code, fifty a session).
+    let allowed = {
+        let mut limiter = locked(&state.limiter);
+        limiter.allow_join(peer.ip(), now) && limiter.site_unknown_has(peer.ip(), now)
+    };
+    let global_spent = !locked(&state.global_unknown).has(now);
     if !allowed {
         state.rate_limited.fetch_add(1, Ordering::Relaxed);
         return refuse(&mut stream, ErrorCode::RateLimited);
@@ -643,6 +723,15 @@ fn join(
     let Some(nameplate) = code::parse_nameplate(nameplate) else {
         return refuse(&mut stream, ErrorCode::BadRequest);
     };
+    // The nameplate's own budget: what one address set can take of the global unknown budget for
+    // a single short code. Checked before the lookup like the other budgets, so a refusal says
+    // nothing about whether the code exists. It counts unknown short codes only, so a wrong secret
+    // for an existing code stays the host's limit (five, then it retires the code), not the
+    // relay's.
+    if !locked(&state.limiter).nameplate_unknown_has(&nameplate, now) {
+        state.rate_limited.fetch_add(1, Ordering::Relaxed);
+        return refuse(&mut stream, ErrorCode::RateLimited);
+    }
     let session = random_u64();
     let (atx, arx) = sync_channel(1);
     let lookup = {
@@ -677,9 +766,18 @@ fn join(
     };
     let (to_host, slot) = match lookup {
         Lookup::Found(tx, slot) => (tx, slot),
+        Lookup::Unknown if global_spent => {
+            state.rate_limited.fetch_add(1, Ordering::Relaxed);
+            return refuse(&mut stream, ErrorCode::RateLimited);
+        }
         Lookup::Unknown => {
             state.unknown.fetch_add(1, Ordering::Relaxed);
-            locked(&state.limiter).unknown(peer.ip(), now);
+            {
+                let mut limiter = locked(&state.limiter);
+                limiter.unknown(peer.ip(), now);
+                limiter.nameplate_unknown_take(&nameplate, now);
+                limiter.site_unknown_take(peer.ip(), now);
+            }
             locked(&state.global_unknown).try_take(now);
             return refuse(&mut stream, ErrorCode::UnknownCode);
         }
@@ -729,7 +827,7 @@ fn attach(
                 inner
                     .hosts
                     .get(&p.nameplate)
-                    .is_some_and(|h| h.token == token)
+                    .is_some_and(|h| same_token(&h.token, token))
             })
             .map(|p| p.attach.clone())
     };
@@ -774,6 +872,7 @@ fn bridge(
         for s in [&guest, &host] {
             s.set_read_timeout(Some(state.config.idle))?;
             let _ = s.set_nodelay(true);
+            let _ = horizon_friends::set_tcp_keepalive(s);
         }
         let (g, h, st) = (guest.try_clone()?, host.try_clone()?, state.clone());
         let up = std::thread::Builder::new()
@@ -788,7 +887,7 @@ fn bridge(
 fn copy(state: &State, mut from: TcpStream, mut to: TcpStream) {
     let rate = state.config.session_rate;
     let mut bucket = Bucket::new(rate, (rate / 2.0).max(16384.0), Instant::now());
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = [0u8; 16 * 1024];
     loop {
         let n = match from.read(&mut buf) {
             Ok(0) | Err(_) => break,

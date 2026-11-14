@@ -14,7 +14,6 @@ use horizon_world::nbt::{Compound, JavaString, Tag};
 use std::sync::Arc;
 
 /// A tank as a side reaches it (`native_fluid_tanks`).
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeFluidTank {
     /// Its number, for the mod's own use.
@@ -239,7 +238,6 @@ fn tank_room(tanks: &[NativeFluidTank], fluid: &str, accepts: impl Fn(usize) -> 
 }
 
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// What holds fluids at `pos` in the level in place, `dimension`: a mod
     /// block's tanks (its block entity's, and not the placeholder standing in
@@ -321,7 +319,7 @@ impl Game<'_> {
     }
     /// `native_fluid_insert`: up to `amount` millibuckets of `fluid`
     /// (`minecraft:water`, `minecraft:lava`, or since API
-    /// @API:mod_fluids@ a mod's own, `create:chocolate`) into the block at
+    /// 425 a mod's own, `create:chocolate`) into the block at
     /// `pos`, through its side `face`, in the level in place: a mod block's
     /// tanks first those with the same fluid, then empty ones, by the sides
     /// and tanks its table gave and every fillable tank that accepts the
@@ -733,8 +731,15 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "prepared resources in HORIZON_TEST_RESOURCES; run alone to isolate the mod registry"]
+    #[ignore = "prepared resources in HORIZON_TEST_RESOURCES"]
     fn the_standard_helpers_route_to_native_owned_storage() {
+        crate::mod_api::in_own_process(
+            "game::machines::native_fluids::tests::the_standard_helpers_route_to_native_owned_storage",
+            the_standard_helpers_route_to_native_owned_storage_in_own_process,
+        );
+    }
+
+    fn the_standard_helpers_route_to_native_owned_storage_in_own_process() {
         use crate::game::{Audio, Options, Progress, Settings, World, load_resources};
         use crate::mod_api::{
             self, CustomBlockFluidsEvent, CustomFluidDrainEvent, CustomFluidFillEvent,

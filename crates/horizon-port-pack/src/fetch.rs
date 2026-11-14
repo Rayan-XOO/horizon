@@ -168,8 +168,14 @@ pub fn fetch(
         match made
             .unwrap_or(Ok(()))
             .map_err(|e| e.to_string())
-            .and_then(|()| download(&url, sha1.as_deref(), &dest, true))
-        {
+            .and_then(|()| {
+                // Maven's `.sha1` or nothing: a jar whose checksum couldn't be read isn't taken.
+                let sha1 = sha1
+                    .as_deref()
+                    .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .ok_or_else(|| format!("{checksum}: no SHA-1"))?;
+                download(&url, Some(sha1), &dest, true)
+            }) {
             Ok(()) => log(format!("loader: {}", dest.display())),
             Err(e) => log(format!(
                 "loader: {e} (structures keep only vanilla biome tags)"
@@ -309,10 +315,10 @@ impl Local {
     fn index(dir: &Path) -> Local {
         let mut local = Local::default();
         local.walk(dir, 3);
-        if let Ok(text) = fs::read_to_string(dir.join("minecraftinstance.json")) {
-            if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                local.curseforge = curseforge_names(&v);
-            }
+        if let Ok(text) = fs::read_to_string(dir.join("minecraftinstance.json"))
+            && let Ok(v) = serde_json::from_str::<Value>(&text)
+        {
+            local.curseforge = curseforge_names(&v);
         }
         local
     }

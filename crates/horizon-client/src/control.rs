@@ -10,6 +10,7 @@
 //! writes `{"transport":"tcp","port":N,"token":"..."}` to the path, readable
 //! only by its user; a client's first line must then be `auth TOKEN`.
 use crate::block_entity_render::StaticCacheFrameStats;
+use horizon_threads::alloc_count::{Counts, ON};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
@@ -20,6 +21,7 @@ use std::{
         mpsc,
     },
     thread,
+    time::Instant,
 };
 
 #[cfg(unix)]
@@ -95,6 +97,7 @@ fn read_endpoint(path: &Path) -> io::Result<(u16, String)> {
 
 /// Connect to a running game's control endpoint (and authenticate over TCP).
 pub fn connect(path: &Path) -> io::Result<Stream> {
+    private_dir(path, false)?;
     #[cfg(unix)]
     if !uses_tcp(path) {
         return UnixStream::connect(path).map(Stream::Unix);
@@ -158,8 +161,80 @@ pub fn default_path() -> PathBuf {
     if !cfg!(unix) {
         return std::env::temp_dir().join("horizon-control.json");
     }
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .or_else(fallback_dir)
+        .unwrap_or_else(std::env::temp_dir);
     dir.join("horizon-control.sock")
+}
+
+/// Without `$XDG_RUNTIME_DIR` (containers, some WSL and minimal setups), when the temporary
+/// directory is shared by every user (`/tmp`), a folder of this user's own in it,
+/// `horizon-<uid>`: a fixed name there let another user bind the socket first, so that
+/// `--control` failed and `horizon-ctl` talked to theirs. [`private_dir`] checks it before the
+/// socket is made or reached. A temporary directory of the user's own (macOS's `$TMPDIR`) is
+/// used as it is. The launcher finds the endpoint the same way (`game_tools.rs`).
+fn fallback_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = std::env::temp_dir();
+        let shared = std::fs::metadata(&temp).is_ok_and(|m| m.permissions().mode() & 0o002 != 0);
+        let uid = own_uid().filter(|_| shared)?;
+        Some(temp.join(format!("horizon-{uid}")))
+    }
+    #[cfg(not(unix))]
+    None
+}
+
+/// This process's user: the owner of `/proc/self` where there is one, else of the home folder.
+#[cfg(unix)]
+fn own_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self")
+        .ok()
+        .or_else(|| std::fs::metadata(std::env::var_os("HOME")?).ok())
+        .map(|m| m.uid())
+}
+
+/// For an endpoint in [`fallback_dir`]: [`check_private`] on that folder. Elsewhere (the user's
+/// `$HORIZON_CONTROL`, the runtime directory) nothing to check.
+fn private_dir(path: &Path, make: bool) -> io::Result<()> {
+    match fallback_dir() {
+        Some(dir) if path.parent() == Some(dir.as_path()) => check_private(&dir, make),
+        _ => Ok(()),
+    }
+}
+
+/// `dir` made (mode 0700) when `make`, and refused unless it is a real folder, this user's, that
+/// no one else may enter.
+#[cfg(unix)]
+fn check_private(dir: &Path, make: bool) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if make {
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            _ => {}
+        }
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir()
+        || meta.permissions().mode() & 0o077 != 0
+        || own_uid().is_some_and(|uid| uid != meta.uid())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} isn't a folder only this user can open; set $HORIZON_CONTROL or $XDG_RUNTIME_DIR",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn check_private(_: &Path, _: bool) -> io::Result<()> {
+    Ok(())
 }
 
 /// Whether `path` can be an endpoint at all, without touching it: a Unix socket's path has a
@@ -184,6 +259,7 @@ pub fn check_path(path: &Path) -> io::Result<()> {
 impl Server {
     pub fn start(path: &Path) -> io::Result<Self> {
         check_path(path)?;
+        private_dir(path, true)?;
         // An endpoint left by a crashed game refuses connections; replace it.
         if path.exists() && connect(path).is_err() {
             std::fs::remove_file(path)?;
@@ -392,7 +468,38 @@ fn serve(stream: Stream, sender: &mpsc::Sender<Request>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn the_fallback_socket_folder_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("horizon-control-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Made 0700 when missing, and then fine to reach.
+        let made = base.join("made");
+        super::check_private(&made, true).unwrap();
+        let mode = std::fs::metadata(&made).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        super::check_private(&made, false).unwrap();
+        // One another user could enter or write: refused, made or not.
+        let open = base.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(super::check_private(&open, true).is_err());
+        assert!(super::check_private(&open, false).is_err());
+        // A link to a private folder, or a file: refused.
+        std::os::unix::fs::symlink(&made, base.join("link")).unwrap();
+        assert!(super::check_private(&base.join("link"), false).is_err());
+        std::fs::write(base.join("file"), b"").unwrap();
+        assert!(super::check_private(&base.join("file"), true).is_err());
+        // Missing and not to be made: an error, not a folder made by whoever connects.
+        assert!(super::check_private(&base.join("missing"), false).is_err());
+        assert!(!base.join("missing").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
+    use std::time::Duration;
 
     /// The check agrees with the system at every length around its limit.
     #[cfg(unix)]
@@ -499,6 +606,22 @@ mod tests {
     }
 
     #[test]
+    fn the_series_cover_every_frame_the_summary_counts() {
+        let mut stats = FrameStats::default();
+        for ms in [4.0, 5.0, 6.0] {
+            stats.record(ms);
+            stats.record_cpu(ms / 2.0);
+        }
+        let mut summary = stats.summary();
+        assert!(summary.get("frame_ms").is_none());
+        stats.add_series(&mut summary);
+        assert_eq!(summary["frame_ms"], serde_json::json!([4.0, 5.0, 6.0]));
+        assert_eq!(summary["cpu_ms"], serde_json::json!([2.0, 2.5, 3.0]));
+        assert_eq!(summary["gpu_ms"], serde_json::json!([]));
+        assert_eq!(summary["frames"], 3);
+    }
+
+    #[test]
     fn frame_summary_reports_block_entity_cache_work() {
         let mut stats = FrameStats::default();
         stats.record(10.0);
@@ -521,6 +644,67 @@ mod tests {
         assert_eq!(summary["static_entities_drawn_avg_per_frame"], 4.0);
         assert_eq!(summary["dynamic_entities_drawn_avg_per_frame"], 3.0);
     }
+
+    fn counts(allocs: u64, bytes: u64, frees: u64, freed: u64) -> Counts {
+        Counts {
+            allocs,
+            bytes,
+            frees,
+            freed,
+        }
+    }
+
+    #[test]
+    fn allocations_are_summarized_per_frame_and_per_second() {
+        let mut stats = FrameStats::default();
+        let start = Instant::now();
+        for (i, a) in [100u64, 200, 300, 400, 1000].into_iter().enumerate() {
+            // Window: 10 blocks kept; process: twice the blocks, 1 MiB per 100, 20 blocks and 1 MiB kept.
+            let window = counts(a, a * 1024, a - 10, 0);
+            let all = counts(
+                2 * a,
+                (2 * a / 100) << 20,
+                2 * a - 20,
+                ((2 * a / 100) - 1) << 20,
+            );
+            stats.record_allocs(window, all, start + Duration::from_millis(100 * i as u64));
+        }
+        let alloc = stats.alloc_summary();
+        let window = &alloc["window_thread"];
+        assert_eq!(window["allocs_per_frame"]["avg"], 400.0);
+        assert_eq!(window["allocs_per_frame"]["p50"], 300.0);
+        assert_eq!(window["allocs_per_frame"]["p95"], 1000.0);
+        assert_eq!(window["allocs_per_frame"]["max"], 1000.0);
+        assert_eq!(window["kib_per_frame"]["p50"], 300.0);
+        assert_eq!(window["frees_per_frame_avg"], 390.0);
+        // The first frame only starts the clock: the rates cover the four after it, 0.4 s.
+        let process = &alloc["process"];
+        assert_eq!(process["allocs_per_s"], 9500.0);
+        assert_eq!(process["frees_per_s"], 9300.0);
+        assert_eq!(process["mib_per_s"], 95.0);
+        assert_eq!(process["net_mib"], 4.0);
+        assert_eq!(stats.alloc_counts(), [100, 200, 300, 400, 1000]);
+    }
+
+    #[test]
+    fn one_frame_has_counts_but_no_rate() {
+        let mut stats = FrameStats::default();
+        stats.record_allocs(counts(5, 64, 5, 64), counts(9, 99, 9, 99), Instant::now());
+        let alloc = stats.alloc_summary();
+        assert_eq!(alloc["window_thread"]["allocs_per_frame"]["max"], 5.0);
+        assert!(alloc["process"]["allocs_per_s"].is_null());
+        assert!(FrameStats::default().alloc_summary().is_null());
+    }
+
+    #[test]
+    fn the_summary_has_alloc_only_when_the_game_counts() {
+        let mut stats = FrameStats::default();
+        stats.record(10.0);
+        stats.record_allocs(counts(5, 64, 5, 64), Counts::default(), Instant::now());
+        assert_eq!(stats.summary()["alloc"].is_null(), !ON);
+        stats.reset();
+        assert!(stats.alloc_counts().is_empty() && stats.alloc_summary().is_null());
+    }
 }
 
 /// Frame durations since the last reset, summarized like the Java recorder,
@@ -537,6 +721,15 @@ pub struct FrameStats {
     static_bytes_uploaded: u64,
     static_entities_drawn: u64,
     dynamic_entities_drawn: u64,
+    /// Window-thread allocations and bytes of each rendered frame (`alloc-count` builds).
+    allocs: Vec<u32>,
+    alloc_bytes: Vec<u64>,
+    /// Window-thread frees summed over the frames in `allocs`.
+    alloc_frees: u64,
+    /// When the first and the last frame since the reset were recorded.
+    alloc_span: Option<(Instant, Instant)>,
+    /// All threads' counts over the frames after the first, the time base of the rates.
+    alloc_process: Counts,
 }
 
 /// The parts of a frame's CPU time: world streaming and uploads, game ticks,
@@ -613,17 +806,77 @@ impl FrameStats {
         self.static_entities_drawn += stats.static_entities_drawn;
         self.dynamic_entities_drawn += stats.dynamic_entities_drawn;
     }
-    /// Every recorded frame time, in milliseconds, in order.
-    pub fn frame_millis(&self) -> &[f32] {
-        &self.millis
+    /// Adds every frame's time (`frame_ms`, `cpu_ms`, `gpu_ms`) to a summary.
+    pub fn add_series(&self, summary: &mut serde_json::Value) {
+        summary["frame_ms"] = self.millis.clone().into();
+        summary["cpu_ms"] = self.cpu.clone().into();
+        summary["gpu_ms"] = self.gpu.clone().into();
     }
-    /// CPU time of every recorded frame, in milliseconds.
-    pub fn cpu_millis(&self) -> &[f32] {
-        &self.cpu
+    /// One frame's allocations: this thread's since the last frame, all threads' since then.
+    pub fn record_allocs(&mut self, window: Counts, process: Counts, now: Instant) {
+        if self.allocs.len() < Self::LIMIT {
+            self.allocs
+                .push(u32::try_from(window.allocs).unwrap_or(u32::MAX));
+            self.alloc_bytes.push(window.bytes);
+            self.alloc_frees += window.frees;
+        }
+        match &mut self.alloc_span {
+            None => self.alloc_span = Some((now, now)),
+            Some((_, last)) => {
+                *last = now;
+                let sum = &mut self.alloc_process;
+                sum.allocs += process.allocs;
+                sum.bytes += process.bytes;
+                sum.frees += process.frees;
+                sum.freed += process.freed;
+            }
+        }
     }
-    /// GPU time of every frame the GPU timed, in milliseconds.
-    pub fn gpu_millis(&self) -> &[f32] {
-        &self.gpu
+    /// Window-thread allocations of every recorded frame, in order.
+    pub fn alloc_counts(&self) -> &[u32] {
+        &self.allocs
+    }
+    /// Window-thread bytes allocated in every recorded frame, in order.
+    pub fn alloc_bytes(&self) -> &[u64] {
+        &self.alloc_bytes
+    }
+    /// The `alloc` object of [`summary`](Self::summary), `null` before a frame was recorded.
+    fn alloc_summary(&self) -> serde_json::Value {
+        let n = self.allocs.len();
+        if n == 0 {
+            return serde_json::Value::Null;
+        }
+        let round = |v: f64| (v * 10.0).round() / 10.0;
+        let stats = |mut values: Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            let pick = |p: f64| values[((n as f64 * p).ceil() as usize).clamp(1, n) - 1];
+            serde_json::json!({
+                "avg": round(values.iter().sum::<f64>() / n as f64),
+                "p50": round(pick(0.5)),
+                "p95": round(pick(0.95)),
+                "max": round(values[n - 1]),
+            })
+        };
+        let per_second =
+            |amount: u64, seconds: f64| (seconds > 0.0).then(|| round(amount as f64 / seconds));
+        let seconds = self.alloc_span.map_or(0.0, |(first, last)| {
+            last.duration_since(first).as_secs_f64()
+        });
+        let mib = |bytes: u64| bytes as f64 / 1048576.0;
+        let process = &self.alloc_process;
+        serde_json::json!({
+            "window_thread": {
+                "allocs_per_frame": stats(self.allocs.iter().map(|&a| f64::from(a)).collect()),
+                "kib_per_frame": stats(self.alloc_bytes.iter().map(|&b| b as f64 / 1024.0).collect()),
+                "frees_per_frame_avg": round(self.alloc_frees as f64 / n as f64),
+            },
+            "process": {
+                "allocs_per_s": per_second(process.allocs, seconds),
+                "mib_per_s": (seconds > 0.0).then(|| round(mib(process.bytes) / seconds)),
+                "frees_per_s": per_second(process.frees, seconds),
+                "net_mib": round(mib(process.bytes) - mib(process.freed)),
+            },
+        })
     }
     pub fn reset(&mut self) {
         self.millis.clear();
@@ -635,6 +888,11 @@ impl FrameStats {
         self.static_bytes_uploaded = 0;
         self.static_entities_drawn = 0;
         self.dynamic_entities_drawn = 0;
+        self.allocs.clear();
+        self.alloc_bytes.clear();
+        self.alloc_frees = 0;
+        self.alloc_span = None;
+        self.alloc_process = Counts::default();
     }
     pub fn summary(&self) -> serde_json::Value {
         let mut sorted = self.millis.clone();
@@ -685,6 +943,7 @@ impl FrameStats {
             "dynamic_entities_drawn": self.dynamic_entities_drawn,
             "static_entities_drawn_avg_per_frame": self.static_entities_drawn as f64 / n as f64,
             "dynamic_entities_drawn_avg_per_frame": self.dynamic_entities_drawn as f64 / n as f64,
+            "alloc": if ON { self.alloc_summary() } else { serde_json::Value::Null },
         })
     }
 }

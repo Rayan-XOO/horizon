@@ -9,6 +9,7 @@ use super::{Game, commands::Target};
 use horizon_client::{brewing, effects::EffectInstance, entities::Experience, lan::playerdata};
 use horizon_world::{
     attribute_map::ValueKind,
+    attributes::Operation,
     nbt::{JavaString, Tag},
 };
 
@@ -33,6 +34,28 @@ pub struct NativeEffect {
     pub particles: bool,
 }
 
+/// A `NativeEffect` with its icon flag, as `native_effects_v2` reads it and
+/// `native_set_effects_v2` takes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeEffectV2 {
+    pub effect: NativeEffect,
+    /// Whether its icon shows in the inventory and on the HUD (vanilla's
+    /// `showIcon`, `/effect`'s default true).
+    pub show_icon: bool,
+}
+
+/// A transient attribute modifier on a player, as `native_attribute_modifiers`
+/// lists it: the attribute's name (`minecraft:movement_speed`), the modifier's
+/// id, its amount and its operation (0 add, 1 add multiplied base, 2 add
+/// multiplied total, as the protocol numbers them).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeAttributeModifier {
+    pub attribute: String,
+    pub id: String,
+    pub amount: f64,
+    pub operation: u8,
+}
+
 /// The game's effect for `effect`: None for an unknown id or a duration
 /// below -1 or 0.
 fn instance(effect: &NativeEffect) -> Option<EffectInstance> {
@@ -43,6 +66,13 @@ fn instance(effect: &NativeEffect) -> Option<EffectInstance> {
     let mut e = EffectInstance::new(def.id, effect.duration, i32::from(effect.amplifier));
     e.ambient = effect.ambient;
     e.visible = effect.particles;
+    Some(e)
+}
+
+/// `instance` with the icon flag of a `NativeEffectV2`.
+fn instance_v2(effect: &NativeEffectV2) -> Option<EffectInstance> {
+    let mut e = instance(&effect.effect)?;
+    e.show_icon = effect.show_icon;
     Some(e)
 }
 
@@ -104,7 +134,6 @@ enum Place {
 }
 
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// The player `uuid` as a helper finds them: the acting player inside a
     /// turn (nobody else then), a placed guest outside one.
@@ -121,6 +150,29 @@ impl Game<'_> {
             .map(Place::Guest)
     }
 
+    /// Sets a player's game mode (0 survival, 1 creative, 2 adventure, 3
+    /// spectator, as `native_player_game_mode_changed` names them), as
+    /// `/gamemode` does: a guest's change runs in their own turn, and the
+    /// mods hear it. True when the mode changed; false for an unknown mode,
+    /// a player who is not on, or a change a mod cancelled. API
+    /// 585.
+    pub(super) fn native_set_game_mode(&mut self, player: u128, mode: i32) -> bool {
+        if !(0..=3).contains(&mode) {
+            return false;
+        }
+        let target = match self.native_place(player) {
+            Some(Place::Acting) => Target::Player,
+            Some(Place::Guest(i)) => match self.lan.as_ref() {
+                Some(host) => Target::Guest(host.hub.guests[i].conn),
+                None => return false,
+            },
+            None => return false,
+        };
+        let mode = super::game_mode::mode_from_id(mode);
+        self.for_player(target, |g| g.set_game_mode(mode))
+            .unwrap_or(false)
+    }
+
     /// The player `uuid`'s compound as the server would save it now
     /// (`players/data/<uuid>.dat`, vanilla's `ServerPlayer.saveWithoutId`):
     /// inventory, health, food, experience, effects, attributes, position,
@@ -128,7 +180,7 @@ impl Game<'_> {
     /// give the player back elsewhere. None inside a player's turn (their
     /// live state is swapped out of their record: call from
     /// `native_server_tick`), and for a player not on. API
-    /// @API:player_compound@.
+    /// 478.
     pub(super) fn native_player_compound(&self, uuid: u128) -> Option<Tag> {
         match self.native_place(uuid)? {
             Place::Acting => None,
@@ -160,7 +212,7 @@ impl Game<'_> {
 
     /// The player `uuid`'s food level (0 to 20), saturation and exhaustion,
     /// as vanilla's `FoodData` holds them. None for a player not reached.
-    /// API @API:player_status@.
+    /// API 492.
     pub(super) fn native_player_food(&self, uuid: u128) -> Option<(i32, f32, f32)> {
         match self.native_place(uuid)? {
             Place::Acting => {
@@ -192,7 +244,7 @@ impl Game<'_> {
     /// own turn, where it counts with what the turn did. False, and nothing
     /// set, for a player not reached, a dead one, a value that is not a
     /// number, or a progress outside 0 to 1 or a negative level or total.
-    /// API @API:player_status@.
+    /// API 492.
     pub(super) fn native_set_player_status(
         &mut self,
         uuid: u128,
@@ -249,7 +301,7 @@ impl Game<'_> {
     }
 
     /// The player `uuid`'s effects, as `/effect` and potions gave them. None
-    /// for a player not reached. API @API:player_effects@.
+    /// for a player not reached. API 479.
     pub(super) fn native_effects(&self, uuid: u128) -> Option<Vec<NativeEffect>> {
         let list = match self.native_place(uuid)? {
             Place::Acting => &self.potions.effects.list,
@@ -258,13 +310,30 @@ impl Game<'_> {
         Some(list.iter().map(native_effect).collect())
     }
 
+    /// `native_effects` with each effect's icon flag (`NativeEffectV2`).
+    /// None as `native_effects`. API 479.
+    pub(super) fn native_effects_v2(&self, uuid: u128) -> Option<Vec<NativeEffectV2>> {
+        let list = match self.native_place(uuid)? {
+            Place::Acting => &self.potions.effects.list,
+            Place::Guest(i) => &self.lan.as_ref()?.hub.guests[i].effects.list,
+        };
+        Some(
+            list.iter()
+                .map(|e| NativeEffectV2 {
+                    effect: native_effect(e),
+                    show_icon: e.show_icon,
+                })
+                .collect(),
+        )
+    }
+
     /// Gives the player `uuid` `effect` as vanilla's `LivingEntity.addEffect`
     /// (Bukkit's `addPotionEffect`): it takes the place of a weaker or
     /// shorter one of the same kind, which waits under it. Their client gets
     /// `UpdateMobEffect` with the ambient and particle flags. Whether
     /// anything changed; false also for an unknown effect, a duration of 0
     /// or below -1, a player not reached, and a dead one. API
-    /// @API:player_effects@.
+    /// 479.
     pub(super) fn native_add_effect(&mut self, uuid: u128, effect: &NativeEffect) -> bool {
         let Some(e) = instance(effect) else {
             return false;
@@ -274,7 +343,7 @@ impl Game<'_> {
     }
 
     /// Takes the effect `id` off the player `uuid`, as `/effect clear`:
-    /// whether they had it. API @API:player_effects@.
+    /// whether they had it. API 479.
     pub(super) fn native_remove_effect(&mut self, uuid: u128, id: &str) -> bool {
         let Some(def) = brewing::effect(id) else {
             return false;
@@ -292,11 +361,25 @@ impl Game<'_> {
     /// given as `native_add_effect` gives it: what a mod restoring a saved
     /// player does (HuskSync's potion effects). False, and nothing changed,
     /// when one of them would be refused, and for a player not reached or
-    /// dead. API @API:player_effects@.
+    /// dead. API 479.
     pub(super) fn native_set_effects(&mut self, uuid: u128, effects: &[NativeEffect]) -> bool {
         let Some(list) = effects.iter().map(instance).collect::<Option<Vec<_>>>() else {
             return false;
         };
+        self.set_effect_list(uuid, list)
+    }
+
+    /// `native_set_effects` with each effect's icon flag (`NativeEffectV2`):
+    /// the same refusals. API 479.
+    pub(super) fn native_set_effects_v2(&mut self, uuid: u128, effects: &[NativeEffectV2]) -> bool {
+        let Some(list) = effects.iter().map(instance_v2).collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        self.set_effect_list(uuid, list)
+    }
+
+    /// Replaces the player `uuid`'s effects with `list`, as `native_set_effects`.
+    fn set_effect_list(&mut self, uuid: u128, list: Vec<EffectInstance>) -> bool {
         self.native_player_turn(uuid, |game| {
             game.potions.effects.clear();
             game.apply_effect_status();
@@ -312,7 +395,7 @@ impl Game<'_> {
     /// effects, `/attribute`), as Bukkit's `AttributeInstance.getBaseValue`
     /// and `getValue`. None for an attribute players don't have, and for a
     /// player not reached or between bodies (just respawned, not yet
-    /// ticked). API @API:player_attributes@.
+    /// ticked). API 474.
     pub(super) fn native_attribute(&mut self, uuid: u128, attribute: &str) -> Option<(f64, f64)> {
         let id = namespaced(attribute);
         let motion = match self.native_place(uuid)? {
@@ -325,13 +408,49 @@ impl Game<'_> {
         Some((base.ok()?, value.ok()?))
     }
 
+    /// The transient attribute modifiers of the player `uuid`: every modifier
+    /// on any of their attributes that is not permanent (what
+    /// `native_set_attributes` loads is permanent; these are the ones given
+    /// for a time, as `/attribute ... modifier add` without `permanent`). None
+    /// for a player not reached or between bodies, as `native_attribute`.
+    /// API 474.
+    pub(super) fn native_attribute_modifiers(
+        &mut self,
+        uuid: u128,
+    ) -> Option<Vec<NativeAttributeModifier>> {
+        let motion = match self.native_place(uuid)? {
+            Place::Acting => self.player.as_mut()?,
+            Place::Guest(i) => self.lan.as_mut()?.hub.guests[i].motion.as_deref_mut()?,
+        };
+        let mut out = Vec::new();
+        for (_, key, instance) in motion.attributes.instances() {
+            let permanent = instance.permanent_modifiers();
+            for m in instance.modifiers() {
+                if permanent.iter().any(|p| p.same_identity(m)) {
+                    continue;
+                }
+                out.push(NativeAttributeModifier {
+                    attribute: key.name().to_owned(),
+                    id: m.id().to_owned(),
+                    amount: m.amount(),
+                    operation: match m.operation() {
+                        Operation::AddValue => 0,
+                        Operation::AddMultipliedBase => 1,
+                        Operation::AddMultipliedTotal => 2,
+                    },
+                });
+            }
+        }
+        Some(out)
+    }
+
     /// Sets the base value of the player `uuid`'s attribute `attribute`, as
     /// `/attribute <player> <attribute> base set` (Bukkit's
     /// `AttributeInstance.setBaseValue`); a lower `max_health` caps their
     /// health. Their client gets `UpdateAttributes` with the tick's sync, and
     /// the base is saved. False for an attribute players don't have, a value
     /// that is not a number, and a player not reached or dead. API
-    /// @API:player_attributes@.
+    /// 474.
     pub(super) fn native_set_attribute_base(
         &mut self,
         uuid: u128,
@@ -364,7 +483,7 @@ impl Game<'_> {
     /// attribute takes its base and permanent modifiers, unknown ones are
     /// skipped, the others stay. A lower `max_health` caps their health.
     /// False for anything but a list, and for a player not reached or dead.
-    /// API @API:player_attributes@.
+    /// API 474.
     pub(super) fn native_set_attributes(&mut self, uuid: u128, saved: &Tag) -> bool {
         if !matches!(saved, Tag::List(_)) {
             return false;
@@ -383,7 +502,7 @@ impl Game<'_> {
     /// `Entity.getPersistentData()`, Bukkit's `PersistentDataContainer`):
     /// saved in their file as `NeoForgeData`, beside the keys Horizon keeps
     /// without modelling them; an empty compound when there is none. None
-    /// for a player not reached. API @API:player_persistent_data@.
+    /// for a player not reached. API 486.
     pub(super) fn native_player_persistent_data(&self, uuid: u128) -> Option<Tag> {
         let saved = match self.native_place(uuid)? {
             Place::Acting => self.level.player_extra.as_ref(),
@@ -395,7 +514,7 @@ impl Game<'_> {
     /// Replaces the compound mods keep on the player `uuid` with `data`; an
     /// empty compound takes it away. It is saved with the player. False for
     /// anything but a compound and for a player not reached. API
-    /// @API:player_persistent_data@.
+    /// 486.
     pub(super) fn native_set_player_persistent_data(&mut self, uuid: u128, data: Tag) -> bool {
         let saved = match self.native_place(uuid) {
             Some(Place::Acting) => &mut self.level.player_extra,
@@ -438,6 +557,26 @@ mod tests {
         assert!(instance(&effect("minecraft:no_such_effect", 200)).is_none());
         assert!(instance(&effect("minecraft:speed", 0)).is_none());
         assert!(instance(&effect("minecraft:speed", -2)).is_none());
+    }
+
+    /// `native_set_effects_v2` sets the icon flag it is given, and the rest as
+    /// `native_set_effects` does; a refused effect is refused the same.
+    #[test]
+    fn an_effect_v2_carries_its_icon_flag() {
+        for show_icon in [false, true] {
+            let e = NativeEffectV2 {
+                effect: effect("minecraft:speed", 200),
+                show_icon,
+            };
+            let game = instance_v2(&e).unwrap();
+            assert_eq!(game.show_icon, show_icon);
+            assert_eq!(native_effect(&game), e.effect);
+        }
+        let bad = NativeEffectV2 {
+            effect: effect("minecraft:speed", 0),
+            show_icon: false,
+        };
+        assert!(instance_v2(&bad).is_none());
     }
 
     #[test]

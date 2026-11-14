@@ -59,6 +59,9 @@ pub enum BlockEntity {
     CreakingHeart(Box<CreakingHeart>),
     /// `BannerBlockEntity`: the pattern layers.
     Banner(Banner),
+    /// `CopperGolemStatueBlockEntity`: its own components, which hold the
+    /// custom name of the golem it was (`createStatue`).
+    CopperGolemStatue(Compound),
     /// `CrafterBlockEntity`.
     Crafter(Crafter),
     /// `SpawnerBlockEntity` (`crate::mobs::spawner`).
@@ -77,9 +80,18 @@ pub enum BlockEntity {
     Skull(Skull),
     /// `TheEndGatewayBlockEntity`: its age and configured destination.
     EndGateway(EndGateway),
+    /// `TheEndPortalBlockEntity`: no data, only identity.
+    EndPortal,
     /// `DaylightDetectorBlockEntity`: no data, only the ticker
     /// (`DaylightDetectorBlock.tickEntity`).
     DaylightDetector,
+    /// `BellBlockEntity`: saved identity only; ringing state is kept separately.
+    Bell,
+    /// `ConduitBlockEntity`: the UUID of its `destroyTarget` (`Target`). Its
+    /// shape and animation are kept separately (`block_entity_anim`).
+    Conduit(Option<[i32; 4]>),
+    /// `EnchantingTableBlockEntity`: its custom name is the world's block name.
+    EnchantingTable,
     /// Suspicious sand and gravel: saved loot and the transient brushed face.
     Brushable(Box<Brushable>),
     /// A shelf holds three displayed item stacks.
@@ -401,11 +413,19 @@ pub enum NameOrId {
 pub struct Crafter {
     pub items: [Option<ItemStack>; 9],
     pub disabled: [bool; 9],
-    pub triggered: bool,
+    /// `containerData` slot 9 as saved (`triggered`): any int, triggered
+    /// only at 1 ([`Crafter::is_triggered`]).
+    pub triggered: i32,
     pub crafting_ticks: i32,
     /// The block state's `triggered` when last ticked (not saved): the block
     /// entity flag follows it only when it changes (`CrafterBlock.neighborChanged`).
     pub state_triggered: Option<bool>,
+}
+impl Crafter {
+    /// `CrafterBlockEntity.isTriggered`: `containerData.get(9) == 1`.
+    pub fn is_triggered(&self) -> bool {
+        self.triggered == 1
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct Banner {
@@ -449,7 +469,13 @@ pub struct Jukebox {
     pub items: [Option<ItemStack>; 1],
     /// `ticks_since_song_started`, while a song plays.
     pub ticks: i64,
+    /// `JukeboxBlockEntity.saveAdditional` writes the clock only when its song
+    /// reference exists. Keep this separate from legacy playback adoption.
+    pub song_clock_present: bool,
     pub playing: bool,
+    /// A clock a save brought back, not playing yet: `setSongWithoutPlaying`
+    /// keeps the song and its clock without the sound's level event 1010.
+    pub loaded_clock: bool,
 }
 impl Jukebox {
     /// `JukeboxBlockEntity.getTheItem`: the disc it holds.
@@ -498,6 +524,10 @@ pub struct SignData {
     pub waxed: bool,
     /// `allow_op_features`: the sign's click events may run commands.
     pub allow_op_features: bool,
+    /// `playerWhoMayEdit`: the one player whose editor is on this sign, as a
+    /// UUID. Every other player's click, write and applicator is refused
+    /// while it is set. Not saved (vanilla keeps it out of the NBT).
+    pub allowed_editor: Option<u128>,
 }
 /// `VibrationInfo`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -507,6 +537,11 @@ pub struct Info {
     pub pos: [f64; 3],
     pub source: Option<Who>,
     pub owner: Option<Who>,
+    /// `uuid`: the source's saved identity (`source`), taken when the event
+    /// was posted. `source` is the live entity and comes back `None` on load.
+    pub source_uuid: Option<[i32; 4]>,
+    /// `projectileOwnerUuid` (`projectile_owner`), likewise beside `owner`.
+    pub owner_uuid: Option<[i32; 4]>,
 }
 /// `VibrationSelector`: the closest, then highest-frequency candidate of a tick.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -519,6 +554,7 @@ pub struct Data {
     pub current: Option<Info>,
     pub travel: i32,
     pub selector: Selector,
+    pub reload_particle: bool,
 }
 /// Which sculk block entity this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

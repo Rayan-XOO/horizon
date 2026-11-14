@@ -10,10 +10,18 @@ use horizon_client::{
     net::FRIEND,
 };
 use horizon_core::geometry::Vec3;
-use horizon_friends::invite::{self, Parsed};
 use std::borrow::Cow;
-use std::net::SocketAddr;
 use winit::keyboard::KeyCode;
+
+/// HUD and first-person hand visibility. Other hand-render restrictions still apply.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HudMode {
+    #[default]
+    AllVisible,
+    /// Hide the HUD while allowing the first-person hands and held items.
+    NoHud,
+    AllHidden,
+}
 
 /// This window's state; unavailable on a server or before a window is attached.
 #[derive(Clone, Debug, Default)]
@@ -30,15 +38,15 @@ pub struct NativeClientState {
     pub yaw: f32,
     pub pitch: f32,
     pub menu_blur: f32,
-    /// What covers the world. API @API:session_state@.
+    /// What covers the world. API 561.
     pub screen: NativeScreenKind,
     /// F3's debug screen is showing (`DebugScreenOverlay.showDebugScreen`).
-    /// API @API:session_state@.
+    /// API 561.
     pub debug_screen: bool,
-    /// The world joined, None before one is. API @API:session_state@.
+    /// The world joined, None before one is. API 561.
     pub world: Option<NativeWorldId>,
     /// The head of the bed the player sleeps in, as the server says
-    /// (`LivingEntity.getSleepingPos`). API @API:session_state@.
+    /// (`LivingEntity.getSleepingPos`). API 561.
     pub sleeping_pos: Option<[i32; 3]>,
 }
 
@@ -97,22 +105,11 @@ impl NativeWorldId {
     }
 }
 
-/// The part of a friend's invite anyone may see. A host's code is fresh each
-/// time it shares, so a friend's world is known for that sharing only. The
-/// relay is kept beside the addresses: two hosts on other networks can share
-/// a private address and the fixed direct port.
+/// The part of a friend's invite anyone may see (`horizon_hooks::tunnel::Resolver::public_part`).
+/// A host's code is fresh each time it shares, so a friend's world is known for that sharing only.
+/// Without Play with Friends no invite is read: a `friend:` world shows no part of it.
 fn invite_public_part(code: &str) -> String {
-    match invite::parse(code) {
-        Some(Parsed::Short(code)) => code.nameplate,
-        Some(Parsed::Long(invite)) => {
-            let relay = invite
-                .relay
-                .map(|r| format!("{}/{}", r.address, r.code.nameplate));
-            let endpoints = invite.endpoints.iter().map(SocketAddr::to_string);
-            endpoints.chain(relay).collect::<Vec<_>>().join(",")
-        }
-        None => String::new(),
-    }
+    horizon_hooks::engine::tunnel().map_or_else(String::new, |r| r.public_part(code))
 }
 
 /// A living entity known to the client, before interpolation. No authoritative writes.
@@ -130,7 +127,7 @@ pub struct NativeClientEntity {
     pub head_pitch: f32,
     pub alive: bool,
     pub invisible: bool,
-    /// Its entity type (`minecraft:zombie`). API @API:client_entity_list@.
+    /// Its entity type (`minecraft:zombie`). API 558.
     pub kind: String,
     /// `Entity.getYRot` in degrees, 0 facing south and 90 west.
     pub yaw: f32,
@@ -145,13 +142,13 @@ pub struct NativeClientEntity {
 
 impl NativeClientEntity {
     /// Where this frame draws it (`Entity.getPosition(partialTick)`), given
-    /// `NativeClientState::world_partial_tick`. API @API:client_entity_list@.
+    /// `NativeClientState::world_partial_tick`. API 558.
     pub fn position_at(&self, partial_tick: f64) -> [f64; 3] {
         position_at(self.previous_position, self.position, partial_tick)
     }
 }
 
-/// A dropped item the client shows. API @API:client_entity_list@.
+/// A dropped item the client shows. API 558.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct NativeClientItem {
@@ -199,14 +196,13 @@ pub struct NativeClientProfile {
     pub skin: String,
 }
 
-#[allow(dead_code)]
 impl Game<'_> {
     /// A screenshot as F2 takes it (`ScreenShot.grab`): of the next frame, at
     /// the game's resolution times Screenshot Quality, into `screenshots/` with
     /// vanilla's file name, and the same "Saved screenshot as" line in chat.
     /// The file it will write, as a path string; an error without a window to draw, or while
     /// another screenshot waits for the frame (F2's, an agent's, the world
-    /// icon's), which a mod's would replace. API @API:take_screenshot@.
+    /// icon's), which a mod's would replace. API 557.
     pub(super) fn native_take_screenshot(&mut self) -> Result<String, String> {
         let Some(renderer) = self.renderer.as_ref() else {
             return Err("no window to take it from".into());
@@ -287,7 +283,7 @@ impl Game<'_> {
             .collect()
     }
     /// The dropped items the server shows this window, by the same rules as
-    /// `native_client_entities`. API @API:client_entity_list@.
+    /// `native_client_entities`. API 558.
     pub(super) fn native_client_items(&self) -> Vec<NativeClientItem> {
         if !self.native_window() || self.remote.is_none() {
             return Vec::new();
@@ -308,7 +304,7 @@ impl Game<'_> {
     /// downloaded skin while the client holds it, else
     /// `native_client_resources().texture(name)`. Decodes on each call; None
     /// on a server or for a texture it can't read. API
-    /// @API:client_entity_list@.
+    /// 558.
     pub(super) fn native_client_texture(&self, texture: &str) -> Option<TexturePixels> {
         if !self.native_window() {
             return None;
@@ -541,7 +537,6 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_friends::code::Code;
 
     #[test]
     fn a_world_is_its_save_in_single_player_and_its_address_on_a_server() {
@@ -552,51 +547,6 @@ mod tests {
         assert_eq!(
             NativeWorldId::of(None, "mc.example.com:25565"),
             NativeWorldId::Server("mc.example.com:25565".into())
-        );
-    }
-
-    #[test]
-    fn friends_worlds_are_told_apart_by_their_hosts_never_by_their_secrets() {
-        const PORT: u16 = 50000;
-        const RELAY: &str = "relay.example.com:443";
-        // A short code: its nameplate, then its secret.
-        let short = |nameplate: &str, secret: &str| Code {
-            nameplate: nameplate.into(),
-            secret: secret.into(),
-        };
-        let invite = |secret: u8, host: &str, relay: Option<Code>| {
-            let code = invite::Invite {
-                secret: [secret; invite::SECRET],
-                port: PORT,
-                endpoints: vec![format!("{host}:{PORT}").parse().unwrap()],
-                relay: relay.map(|code| invite::RelayRef {
-                    address: RELAY.into(),
-                    code,
-                }),
-            }
-            .encode();
-            NativeWorldId::of(None, &format!("{FRIEND}{code}"))
-        };
-        assert_ne!(
-            invite(1, "192.168.1.5", None),
-            invite(1, "192.168.1.6", None),
-            "two friends"
-        );
-        assert_ne!(
-            invite(1, "192.168.1.5", Some(short("ABCD", "WXYZ"))),
-            invite(1, "192.168.1.5", Some(short("EFGH", "WXYZ"))),
-            "two friends on other networks behind the same private address"
-        );
-        assert_eq!(
-            invite(1, "192.168.1.5", Some(short("ABCD", "WXYZ"))),
-            invite(2, "192.168.1.5", Some(short("ABCD", "QRST"))),
-            "the invite's and the relay code's secrets take no part"
-        );
-        let typed = |code: Code| NativeWorldId::of(None, &format!("{FRIEND}{code}"));
-        assert_eq!(typed(short("ABCD", "WXYZ")), typed(short("ABCD", "QRST")));
-        assert_eq!(
-            typed(short("ABCD", "WXYZ")),
-            NativeWorldId::Server(format!("{FRIEND}ABCD"))
         );
     }
 

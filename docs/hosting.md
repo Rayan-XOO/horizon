@@ -20,7 +20,7 @@ plan are in [server.md](server.md).
   takes the account's UUID when someone owns that name, as vanilla does, and that player is then refused.
 - **An offline server** (`online_mode = false`) never checks accounts: anyone who reaches it can join under
   any name. Keep it on your LAN or a tailnet (Tailscale, ZeroTier), or share it only with friends you trust.
-  A Horizon player under an offline name can join only such a server.
+  A Horizon game started without a session (no network at Play) can join only such a server.
 - **Secure chat** works as on vanilla's server: in online mode, vanilla clients and Horizon's (Nightly
   2026-11-01 and newer) sign their chat, and with `enforce-secure-profile=true` (the default) unsigned chat is
   refused. On an offline server, or for a player without a chat session, chat stays unsigned and shows as not
@@ -65,6 +65,9 @@ for Windows includes it), else against the SHA-256 GitHub publishes, and never a
 Options: `--version vX.Y.Z`, `--dir FOLDER`, `--bin FOLDER` (Windows: `-Version`, `-Dir`). Other systems,
 such as Linux on ARM, build from source: `cargo build --release -p horizon-client --bin horizon-client -p
 horizon-server` and keep both programs in one folder.
+
+On Nix and NixOS, the repository's flake builds `horizon-server` from source and has a
+`services.horizon-server` module: [nix.md](nix.md).
 
 The Horizon launcher also installs releases. Every release folder holds `horizon-server`, so you can run it
 from there too.
@@ -178,6 +181,7 @@ path = ""                    # the game program; empty: the one beside horizon-s
 resources = ""               # the prepared game files; empty: resources/ here, else the usual places
 restart_on_crash = true
 low_memory = false           # true: less memory, slightly slower ticks (see below)
+parallel_tick = false        # true: the tick shares its work among helper threads (see below)
 
 [backups]
 every = "6h"                 # 30m, 6h, 1d...; "0" turns automatic backups off
@@ -233,8 +237,8 @@ the player's screen. To fill the ring, generate the world ahead of the players w
 
 The far ring goes after everything else: its chunks wait behind the ones inside `view_distance`, are paced
 by how fast each player's game takes them, and aren't read while the world's saves are behind. When the
-average tick goes over 40 ms, the ring pulls in by two chunks a second, never inside `view_distance`; after
-30 s of ticks under 25 ms, it grows back by one chunk every 5 s. What it sent is kept in memory for 5
+average tick goes over 50 ms, the ring pulls in by two chunks a second, never inside `view_distance`; after
+30 s of ticks under 45 ms, it grows back by one chunk every 5 s. What it sent is kept in memory for 5
 minutes (96 MB at most), so a player walking back isn't sent the save again.
 
 Already have a vanilla server? Run `horizon-server init` in its folder, or `horizon-server import
@@ -355,25 +359,46 @@ samples them for everyone in turn, behind the ticks, so far terrain never slows 
 distance or over a player's limits is refused, and a client that keeps breaking the limits is disconnected.
 Tiles are sampled again for each player who asks (there is no cache yet). Vanilla clients never hear of it.
 
-`horizon-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600),
-then prints a short summary and saves it in `reports/`: `perf-<time>.txt` and `perf-<time>.json`. They say where
-the ticks' time went, phase by phase (mobs, block ticks, block entities, the network and the chunks it
-sends, saving...), the slowest ticks, how many entities of each type, chunks, players, memory, CPU, and the
-settings that matter (view and simulation distance, max players). Since format 2 they also give each dimension's
-share of the tick (`level_*`), what each mob type costs per dimension (one tick in four times every mob: ms a
-tick, mobs, µs a mob), the chunk workers' CPU by job (load, generate, decorate, finish, light), the network bytes
-a player sends and receives, and what recording cost the tick (measured, usually well under 1 % of MSPT). They
-hold no names, UUIDs or addresses, so you can attach them to an issue as they are. On the console it is
-`horizon-report [SECONDS]`; `horizon-report stop` writes the report now and `horizon-report status` says how far
-it is. Nothing restarts: the report runs beside the game.
+`horizon-server report` records the running server for 60 seconds (`report 300` for five minutes, up to 600) into
+`reports/profile-<time>Z.hzperf`, a capture the performance tools read ([perf-platform.md](perf-platform.md)), and
+prints a short summary (TPS, MSPT, CPU, memory, players and the heaviest tick phases) and where it went. On the console it is `horizon-report [SECONDS]`; `horizon-report stop` ends it now and
+`horizon-report status` says how far it is. Nothing restarts: the report runs beside the game.
 
-To see a slow stretch tick by tick, `horizon-trace [SECONDS]` (30 by default, up to 300) writes every thread's timed
-steps to `reports/trace-<time>.json`; [ui.perfetto.dev](https://ui.perfetto.dev) opens it as a timeline, one row per
-thread. `horizon-trace stop` ends it early. It holds step names and times only.
+The capture holds the settings, the machine, the Horizon switches and the few game rules that change what a tick
+costs, the health history from before it (TPS and MSPT over the last 10 minutes to 7 days), a sample each second,
+the counters and the slow ticks with their steps. It says where the ticks' time went, phase by phase (mobs, block
+ticks, block entities, the network and the chunks it sends, saving...), in blocks of five seconds and as totals,
+with each dimension's share of the tick (`level_*`) and the 16 slowest ticks with their whole step tree. It counts
+the chunks, entities and block entities of each dimension at the start and at the end, and gives what each mob type
+costs per dimension (one tick in four times every mob: ms a tick, mobs, µs a mob), the chunk workers' CPU by job
+(load, generate, decorate, finish, light), the bytes each player sends and receives in each block, and what recording
+cost the tick (measured, usually well under 1 % of MSPT). It holds no names, UUIDs or addresses (players are
+numbered in the order they joined), no seed and no world name, so you can attach it to an issue as it is. Past 30
+files or 1 GiB the oldest `profile-*.hzperf` is deleted; a file you renamed is never touched. On Linux the tick thread is also sampled 250 times a second (about 0.05 % of the tick thread), and the capture
+holds where the CPU time went, by function and by what the server was doing (step, entity type, block, dimension,
+chunk); `--no-samples` leaves that out. Finishing the file after the window can take a few seconds and does not stall
+ticks. The old `perf-<time>.json` and `.txt` files are no
+longer written; the ones already in `reports/` stay.
 
-Between reports, the log keeps the spikes: a tick slower than 250 ms writes a `Horizon: slow tick` line with
-its phases (`HORIZON_SPIKES=MS` in the engine's environment sets another threshold), and a server more than
-two seconds behind says `Can't keep up!` as vanilla's does, at most every 15 seconds.
+`python3 tools/server_bench.py --profile` records each Horizon run's measure window this way (`--profile=--no-samples`
+passes flags to `horizon-report`) and adds the run's record, MSPT, RSS, CPU and chunk figures, to the capture with
+`horizon-perf attach FILE --name NAME --body JSONFILE`, which keeps whatever else the file holds. Build
+`-p horizon-perf` beside the server first; the capture's path is the run's `profile` in the report.
+
+To see a slow stretch tick by tick, `horizon-trace [SECONDS]` (30 by default, up to 600) writes a capture with every
+thread's timed steps to `reports/profile-<time>Z.hzperf`, one row per thread. `horizon-trace stop` ends it early, and
+`horizon-report --timeline` adds the same steps to a report. The steps are recorded for the first 60 seconds of a
+capture, or until they pass 256 MiB; the capture then says when they stopped. `HORIZON_TRACE=FILE` in the server's
+environment writes such a capture to FILE from the first tick. It holds step names and times only.
+
+To profile your server from a game, join it as an operator of level 4 and run `horizon-ctl profile server start` (or `profile start`, which captures your game and the server in one file). Another operator level is refused and nothing is written. One server capture runs at a time. The server writes its copy to its own `reports/`, logs who started it and when, and sends the file to your game in the background, at most 256 KiB a second and after gameplay packets; the game says where it saved it. Open a capture with `horizon-perf` ([perf-platform.md](perf-platform.md)), which you build from this repository (`cargo build --release -p horizon-perf`).
+
+Between reports, the server keeps its last 256 slow ticks in memory, each with its eight largest steps. A tick
+counts as slow from 250 ms (`HORIZON_SPIKES=MS` in the engine's environment sets another threshold), and every
+capture carries the ring as it stood at its start and adds the slow ticks of its own window. The log no longer has a
+line for them: `horizon-perf query spans --slow` says which steps they spent their time in, and `query ticks --worst 5`
+lists the five worst with their step trees (the newest capture, or name a file last). When a slow tick spent 10 ms or more on one player's packets or one event, the log says so in a `Horizon: … ms tick was busy with:` line with the player's name; the capture never holds names. A server more than two seconds behind still says `Can't keep up!` as
+vanilla's does, at most every 15 seconds.
 
 `config set` changes `server.toml` without opening it: `horizon-server config set world.difficulty=hard
 server.max_players=10`. Each key is a section and a name from the file (`properties.spawn-protection=0` for any
@@ -421,7 +446,9 @@ only. To reach it from your other devices:
 - forward the port over SSH: `ssh -L 8130:127.0.0.1:8130 your-server`, then open the link on your computer.
 
 Any other address, such as `0.0.0.0` or a public IP, is refused unless you set `allow_public = true`, and
-even then the panel warns at every start. It has no passwords to leak: whoever can read the server folder can
+even then the panel warns at every start. With `bind = "0.0.0.0:8130"` it answers on every address of this
+computer, so a LAN whose router hands out a new IP keeps working: open `http://<its LAN IP>:8130`, and the
+login link names that IP. It has no passwords to leak: whoever can read the server folder can
 make a login link, and no one else can. Never put it on the open internet.
 
 ### A bot or a tool of your own
@@ -616,7 +643,8 @@ Players join with any vanilla 26.3 client: only the server decides the damage.
 horizon-server service install
 ```
 
-- **Linux:** a systemd user unit (`--system` for a system unit, with sudo). To keep a user unit running while
+- **Linux:** a systemd user unit (`--system` for a system unit, with sudo from your own account: the unit runs
+  the server as that account, never as root). To keep a user unit running while
   you're logged out: `loginctl enable-linger $USER`.
 - **macOS:** a launchd agent in `~/Library/LaunchAgents`.
 - **Windows:** a task that starts at logon (a real Windows service comes later).
@@ -679,9 +707,8 @@ docker run -d --name horizon -p 25565:25565 --stop-timeout 180 \
 The latest bot benchmark compares Horizon with vanilla 26.3, Paper and Fabric + Lithium:
 [benchmarks/server-four-way-2026-10-19](https://github.com/horizon-rust/horizon/blob/main/benchmarks/server-four-way-2026-10-19/README.md).
 It ran release v2026.10.19 on a 4-thread laptop CPU (i7-7500U), with 1 to 50 players walking, exploring and
-standing around spawn, the bots on another machine. All four servers did the same work. Earlier
-measurements are in [docs/server.md](https://github.com/horizon-rust/horizon/blob/main/docs/server.md). In
-short:
+standing around spawn, the bots on another machine. All four servers did the same work. Against
+Pumpkin: [performance/server-vs-pumpkin.md](performance/server-vs-pumpkin.md). In short:
 
 - **Memory:** 0.7 GB with one player and 1.1 GB with 50, against 3.4 to 4.5 GB for the Java servers
   (each with a 4 GB heap): 3.8 to 4.8 times less.
@@ -714,6 +741,53 @@ the game with huge pages off. Measured on a 4-core EPYC VPS with 20 bots playing
 Turn it on when memory is what you're short of, for example on a small VPS. It applies at the next start.
 A game started without `horizon-server` (`horizon-client --dedicated`, a container of your own) gets the same
 effect from the environment variable `MIMALLOC_ALLOW_THP=0`. On macOS and Windows it changes nothing.
+
+### Parallel tick: `parallel_tick`
+
+Off by default. Under `[engine]`, `parallel_tick = true` starts the game with its parallel tick on: the
+phases of the server tick that give the same result in any order share their work among helper threads (at
+most 8, as many as the machine has cores). It applies at the next start. It is the same switch as the
+environment variable `HORIZON_PARALLEL_TICK=1`, for a host that gives you no way to set one (a game panel
+with a fixed startup command). With the setting off, a `HORIZON_PARALLEL_TICK` already in the server's
+environment still applies.
+
+Natural mob spawning is one of those phases: the spawn attempts of the chunks around your players run on the helper
+threads, and the server thread then takes what they found, in order, if the mob caps still allow it. It has vanilla's odds
+and caps but not the random draws of one vanilla level, so a world does not spawn the same mobs with the setting on as off.
+It stays on one thread while a native mod listens to spawns, with fewer than 512 chunks to try (about two players' worth) and
+on a machine with one core ([how it works](parallel-natural-spawning.md)).
+
+One thing differs from the serial tick while it is on: the rolls a mob makes on the level's random (a fish
+leaving its school, a parrot imitating, a brain's durations) come from a random of the mob's own, so that mobs
+on different threads do not wait for each other. The odds are vanilla's; the values are not the ones the level's
+random would have given ([mob-islands.md](mob-islands.md#every-turn-draws-its-own-random)).
+
+### Mob AI far from players: `[entities] dab`
+
+Off by default, because it is not vanilla's behaviour: mobs far from every player react more slowly. It is
+Pufferfish's "dynamic activation of brain", with the same names and defaults. Add the section to `server.toml`:
+
+```toml
+[entities]
+dab = true                    # false (the default): every mob thinks every tick, as in vanilla
+dab_start_distance = 12       # blocks; a mob this close to the nearest player is never slowed
+dab_max_tick_freq = 20        # ticks; the longest wait between two AI ticks
+dab_activation_dist_mod = 8   # raise it to slow far mobs less, lower it to slow them more
+```
+
+A mob farther than `dab_start_distance` from the nearest player (squared distance `d²`) runs its AI on the ticks where
+`age % interval == 0`, with `interval = clamp(d² >> dab_activation_dist_mod, 1, dab_max_tick_freq)`: 14 ticks at
+60 blocks with the defaults, 20 from about 71 blocks. Only the decisions wait: goals and targets, the brains of villagers,
+piglins, axolotls and the like, and each species' `customServerAiStep`. A far mob still moves (its navigation, move,
+look and jump controls run), falls, floats, is pushed, takes damage and effects, and its despawn check runs.
+
+Never slowed: withers and wardens; a mob with a target or anger, or hurt in the last two seconds; raiders in a raid; a
+mob that is ridden, riding, carrying a passenger or on a lead; a tamed mob that is not sitting.
+
+Unlike Pufferfish, it applies to every mob (Pufferfish limits the brain part to villagers, axolotls, hoglins,
+zombified piglins and goats and has an entity blacklist), and a level with no player counts as far away. It applies at
+the next start, and is the same switch as the environment variables `HORIZON_DAB=1`, `HORIZON_DAB_START_DISTANCE`,
+`HORIZON_DAB_MAX_TICK_FREQ` and `HORIZON_DAB_ACTIVATION_DIST_MOD`.
 
 ## When something goes wrong
 

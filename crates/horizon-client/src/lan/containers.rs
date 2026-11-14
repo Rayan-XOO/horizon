@@ -356,6 +356,8 @@ impl Hub {
             sent_data: Vec::new(),
             hidden: Vec::new(),
             mod_type,
+            craft: None,
+            links: Vec::new(),
         });
         self.send_menu_content(i, items);
     }
@@ -415,6 +417,8 @@ impl Hub {
             sent_data: Vec::new(),
             hidden: Vec::new(),
             mod_type: None,
+            craft: None,
+            links: Vec::new(),
         });
         self.send_menu_content(i, items);
         Some(window)
@@ -1002,8 +1006,8 @@ impl Hub {
             Some(BlockEntity::Crafter(c)) => c
                 .disabled
                 .iter()
-                .chain([&c.triggered])
                 .map(|&d| i32::from(d))
+                .chain([c.triggered])
                 .collect(),
             // A mod's menu: the data slots its tick set. A mod menu type's
             // `ContainerData` has as many as it declares, all sent on open

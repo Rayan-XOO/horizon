@@ -16,6 +16,45 @@ use crate::{
 #[path = "chat_tests.rs"]
 mod tests;
 
+/// `FilterMask.applyWithFormatting` over a player message's signed content, as
+/// the packet's mask `(type, bit set)`: as it is when passed through, none when
+/// fully filtered, and when partly filtered each masked UTF-16 unit becomes a
+/// `#` in `FILTERED_STYLE` (dark grey, hover "chat.filtered").
+pub fn filtered_message(
+    content: &str,
+    (kind, bits): &(i32, Vec<i64>),
+) -> Option<serde_json::Value> {
+    match kind {
+        1 => return None,
+        2 => {}
+        _ => return Some(serde_json::Value::from(content)),
+    }
+    let masked = |i: usize| {
+        bits.get(i / 64)
+            .is_some_and(|w| (*w as u64 >> (i % 64)) & 1 != 0)
+    };
+    let units: Vec<u16> = content.encode_utf16().collect();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    while start < units.len() {
+        let filtered = masked(start);
+        let end = (start..units.len())
+            .find(|&i| masked(i) != filtered)
+            .unwrap_or(units.len());
+        parts.push(if filtered {
+            serde_json::json!({
+                "text": "#".repeat(end - start),
+                "color": "dark_gray",
+                "hover_event": {"action": "show_text", "value": {"translate": "chat.filtered"}},
+            })
+        } else {
+            serde_json::Value::from(String::from_utf16_lossy(&units[start..end]))
+        });
+        start = end;
+    }
+    Some(serde_json::json!({"text": "", "extra": parts}))
+}
+
 /// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
 const COMMAND_HISTORY_FILE: &str = "command_history.txt";
 const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
@@ -529,6 +568,8 @@ impl Chat {
     pub fn set_qol(&mut self, atlas: &HudAtlas, qol: ChatQol) {
         if self.qol != qol {
             self.qol = qol;
+            self.scroll = 0;
+            self.new_since_scroll = false;
             self.rewrap(&atlas.font);
         }
     }
@@ -554,20 +595,25 @@ impl Chat {
             .filter(|q| !q.trim().is_empty());
         if self.search != query {
             self.search = query;
+            self.scroll = 0;
+            self.new_since_scroll = false;
             self.rewrap(font);
         }
     }
     pub fn searching(&self) -> bool {
         self.search.is_some()
     }
-    /// Re-wrap after a width or scale change (ChatComponent.rescaleChat),
-    /// keeping only the messages the Chat option shows.
+    /// Re-wrap after a width or scale change (`ChatComponent.rescaleChat`):
+    /// `resetChatScroll`, then the messages the Chat option shows.
     pub fn rescale(&mut self, atlas: &HudAtlas) {
-        self.rewrap(&atlas.font);
-    }
-    fn rewrap(&mut self, font: &crate::font::Font) {
         self.scroll = 0;
         self.new_since_scroll = false;
+        self.rewrap(&atlas.font);
+    }
+    /// `ChatComponent.refreshTrimmedMessages`: the lines are laid out again
+    /// where the reader was (`chatScrollbarPos` survives a filter change);
+    /// `rescale` resets the scroll itself, as `rescaleChat` does.
+    fn rewrap(&mut self, font: &crate::font::Font) {
         self.lines.clear();
         let mut messages = std::mem::take(&mut self.messages);
         for m in messages.iter_mut().rev() {
@@ -1188,6 +1234,18 @@ impl SuggestLayout {
     };
 }
 
+/// A suggestion accepted by Tab or a click (`SuggestionsList.useSuggestion`).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SuggestionCompletion {
+    /// The suggestion list's original input, also when cycling with Tab.
+    pub original: String,
+    /// The replaced range in `original`, as Java UTF-16 start/end offsets.
+    pub range: (usize, usize),
+    pub text: String,
+    /// The resulting input, after the text field's length limit.
+    pub input: String,
+}
+
 /// The open chat screen: vanilla's `ChatScreen` with its `EditBox` and
 /// `CommandSuggestions` (argument colouring, usage lines, parse errors,
 /// the suggestion list, Tab completion, history).
@@ -1211,6 +1269,7 @@ pub struct ChatScreen {
     /// the command up to the cursor.
     request: Option<(i32, String)>,
     suggestions: Option<SuggestionList>,
+    completion: Option<SuggestionCompletion>,
     usage: Vec<Text>,
     usage_position: i32,
     usage_width: i32,
@@ -1220,6 +1279,9 @@ pub struct ChatScreen {
     /// `CommandSuggestions.setRestrictions`: what the Chat option allows.
     pub abilities: ChatAbilities,
     pub layout: SuggestLayout,
+    /// `MouseHandler.lastClick`: a click within 250 ms of the last one on
+    /// this screen is a double click.
+    last_click: Option<std::time::Instant>,
 }
 /// Local completions waiting for the server's reply to request `id`.
 struct Awaiting {
@@ -1333,6 +1395,7 @@ impl ChatScreen {
             awaiting: None,
             request: None,
             suggestions: None,
+            completion: None,
             usage: Vec::new(),
             usage_position: 0,
             usage_width: 0,
@@ -1341,6 +1404,7 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities,
             layout: SuggestLayout::CHAT,
+            last_click: None,
         };
         s.update_command_info(m, c);
         s
@@ -1370,6 +1434,7 @@ impl ChatScreen {
             awaiting: None,
             request: None,
             suggestions: None,
+            completion: None,
             usage: Vec::new(),
             usage_position: 0,
             usage_width: 0,
@@ -1378,12 +1443,18 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities: ChatAbilities::new(ChatVisibility::Full),
             layout: SuggestLayout::COMMAND_BLOCK,
+            last_click: None,
         };
         s.update_command_info(m, c);
         s
     }
     pub fn value(&self) -> &str {
         &self.input.value
+    }
+    /// Take the most recently accepted suggestion, at most once. Call after
+    /// each key or click to observe every acceptance, including Tab cycling.
+    pub fn take_suggestion_completion(&mut self) -> Option<SuggestionCompletion> {
+        self.completion.take()
     }
     /// Replace the input for a suggest-command link and refresh completions.
     pub fn suggest_command(&mut self, m: &Measure, c: &Commands, command: &str) {
@@ -1751,6 +1822,17 @@ impl ChatScreen {
         self.select(l, l.current as isize);
         self.keep_suggestions = false;
         l.tab_cycles = true;
+        let units = |byte: usize| {
+            l.original[..byte.min(l.original.len())]
+                .encode_utf16()
+                .count()
+        };
+        self.completion = Some(SuggestionCompletion {
+            original: l.original.clone(),
+            range: (units(s.range.0), units(s.range.1)),
+            text: s.text,
+            input: self.input.value.clone(),
+        });
     }
     /// `ChatScreen.keyPressed`.
     pub fn key(
@@ -1889,8 +1971,15 @@ impl ChatScreen {
             }
             self.suggestions = Some(l);
         }
+        // MouseHandler: the same screen's click within 250 ms is a double
+        // click, which selects the word under the pointer.
+        let now = std::time::Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|at| now.duration_since(at).as_millis() < 250);
+        self.last_click = Some(now);
         if self.input.contains(x, y) {
-            self.input.click(m, x, false);
+            self.input.click(m, x, false, double);
             return true;
         }
         false
@@ -1904,7 +1993,11 @@ impl ChatScreen {
             return false;
         }
         let max = l.list.len().saturating_sub(self.layout.line_limit) as i32;
-        l.offset = ((l.offset as f64 - amount.clamp(-1.0, 1.0)) as i32).clamp(0, max) as usize;
+        // Round instead of truncating: touchpad/PixelDelta produces fractional
+        // amounts and truncation drops movement in one direction (#14338).
+        l.offset = (l.offset as f64 - amount.clamp(-1.0, 1.0))
+            .round()
+            .clamp(0.0, max as f64) as usize;
         true
     }
     /// `CommandSuggestions.formatText`: argument colours over the input. The
@@ -2016,6 +2109,11 @@ impl ChatScreen {
     ) {
         let limit = l.list.len().min(self.layout.line_limit);
         let [rx, ry, rw, rh] = l.rect;
+        // SuggestionsList.extractRenderState: the whole list asks for the
+        // pointing hand while the pointer is inside its rectangle.
+        if mouse.0 >= rx && mouse.0 < rx + rw && mouse.1 >= ry && mouse.1 < ry + rh {
+            crate::widgets::request_cursor(crate::widgets::Cursor::PointingHand);
+        }
         let has_prev = l.offset > 0;
         let has_next = l.list.len() > l.offset + limit;
         let moved = l.last_mouse != mouse;
@@ -2040,6 +2138,11 @@ impl ChatScreen {
         for i in 0..limit {
             let y = ry + 12 * i as i32;
             d::fill(out, rx, y, rx + rw, y + 12, self.layout.fill);
+            // A row for the pad: nothing else can pick a suggestion without Tab.
+            crate::widgets::target_as(
+                [rx as f32, y as f32, rw as f32, 12.0],
+                crate::widgets::Kind::Row,
+            );
             if mouse.0 > rx && mouse.0 < rx + rw && mouse.1 > y && mouse.1 < y + 12 {
                 if moved {
                     self.select(l, (i + l.offset) as isize);

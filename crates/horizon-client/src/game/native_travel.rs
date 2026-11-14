@@ -35,7 +35,6 @@ fn teleportable(pos: [f64; 3]) -> bool {
 }
 
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Whether this game is a server (its thread or a dedicated one), never a client.
     fn native_serves(&self) -> bool {
@@ -52,7 +51,7 @@ impl Game<'_> {
     /// another level it happens when the tick's level teleports run, as a command's does. True
     /// when it is done or queued; false for a player not on the server or dead (when that can
     /// be seen), a dimension other than the three, a position outside `/tp`'s bounds, an angle
-    /// that is not finite, and on a client. API @API:teleport_player@.
+    /// that is not finite, and on a client. API 511.
     pub(super) fn native_teleport_player(
         &mut self,
         uuid: u128,
@@ -109,7 +108,7 @@ impl Game<'_> {
     /// where nobody's state is swapped in (a tick hook, a vehicle's hook nobody rides; inside
     /// `native_vehicle_moved_v2` a mod changes `to` instead): false inside a player's hook, for
     /// no such vehicle here, another dimension, a position outside `/tp`'s bounds, and on a
-    /// client. API @API:teleport_vehicle@.
+    /// client. API 512.
     pub(super) fn native_teleport_vehicle(
         &mut self,
         dimension: &str,
@@ -153,7 +152,7 @@ impl Game<'_> {
     /// `Entity.addPassenger`), with its checks: neither rides already, no loop, a free seat,
     /// minecarts carry players only, and `native_entity_mount` may refuse. Both in the level in
     /// place. Inside a player's hook only the acting player and mobs are reached. True when it
-    /// rides now; false otherwise and on a client. API @API:mount@.
+    /// rides now; false otherwise and on a client. API 472.
     pub(super) fn native_mount(&mut self, entity: u32, vehicle: u32) -> bool {
         if !self.native_serves() {
             return false;
@@ -176,7 +175,7 @@ impl Game<'_> {
     /// <entity> dismount` does (Bukkit's `Entity.leaveVehicle`): it lands beside the vehicle,
     /// and `native_entity_mount` may refuse. In the level in place; inside a player's hook only
     /// the acting player and mobs are reached. True when it got off; false when it rode
-    /// nothing, was not reached, and on a client. API @API:mount@.
+    /// nothing, was not reached, and on a client. API 472.
     pub(super) fn native_dismount(&mut self, entity: u32) -> bool {
         if !self.native_serves() {
             return false;
@@ -206,7 +205,7 @@ impl Game<'_> {
     /// Takes every rider off the vehicle `vehicle` (a boat, a minecart or a mob), as
     /// `native_dismount` does each (Bukkit's `Entity.eject`): the server players and mobs on it.
     /// In the level in place; inside a player's hook only the acting player and mobs are
-    /// reached. True when one got off; false otherwise and on a client. API @API:mount@.
+    /// reached. True when one got off; false otherwise and on a client. API 472.
     pub(super) fn native_eject_passengers(&mut self, vehicle: u32) -> bool {
         if !self.native_serves() || self.native_vehicle_target(vehicle).is_none() {
             return false;
@@ -238,6 +237,69 @@ impl Game<'_> {
         any
     }
 
+    /// The vehicle the entity `entity` (a server player or a mob) sits on, by entity id, as
+    /// Bukkit's `Entity.getVehicle` reads it: a boat, a minecart or a mob. None when it rides
+    /// nothing, is not reached (see `native_rider`: inside another player's hook only the acting
+    /// player and mobs are), and on a client. Read-only. API 642.
+    pub(super) fn native_vehicle_of(&self, entity: u32) -> Option<u32> {
+        if !self.native_serves() {
+            return None;
+        }
+        match self.native_rider(entity)? {
+            Target::Player => self.riding,
+            Target::Guest(conn) => {
+                self.lan
+                    .as_ref()?
+                    .hub
+                    .guests
+                    .iter()
+                    .find(|g| g.conn == conn)?
+                    .vehicle
+            }
+            Target::Mob(id) => self.mobs.iter().find(|m| m.id == id)?.extra.mount,
+            _ => None,
+        }
+    }
+
+    /// The entity ids of the server players and mobs riding the vehicle `entity` (a boat, a
+    /// minecart or a mob), in vanilla's `getPassengers` order: the acting player, then the hub's
+    /// guests in the level, then the mobs in the level's order, so the first is the controlling
+    /// passenger where a player rides. Empty when nothing rides it, when it is no vehicle Horizon
+    /// seats riders on, and on a client. Only what `native_rider` reaches: inside another
+    /// player's hook the hub's guests are not listed. Read-only. API 642.
+    pub(super) fn native_passengers_of(&self, entity: u32) -> Vec<u32> {
+        if !self.native_serves() || self.native_vehicle_target(entity).is_none() {
+            return Vec::new();
+        }
+        let mut riders = Vec::new();
+        if self.lan_acting.is_some() && self.riding == Some(entity) {
+            riders.push(self.native_acting_entity());
+        }
+        if self.lan_acting.is_none()
+            && let Some(host) = &self.lan
+        {
+            riders.extend(
+                host.hub
+                    .guests
+                    .iter()
+                    .filter(|g| {
+                        g.placed
+                            && !g.dead
+                            && g.vehicle == Some(entity)
+                            && g.dimension == self.dim.id()
+                    })
+                    .map(|g| g.entity_id as u32),
+            );
+        }
+        riders.extend(
+            self.mobs
+                .iter()
+                .filter(|m| m.extra.mount == Some(entity) && !m.removed && m.alive())
+                .map(|m| m.id),
+        );
+        riders
+    }
+
     /// The rider an entity id names in the level in place: the acting player, a server player
     /// out of their turn (only while nobody's is swapped in), or a living mob.
     fn native_rider(&self, entity: u32) -> Option<Target> {
@@ -266,7 +328,7 @@ impl Game<'_> {
     /// sets it for the mode then); not saved. Where nobody's state is swapped in it is done at
     /// once, else after the players' packets of the server tick. True when done or queued;
     /// false for a player not on the server (when that can be seen) and on a client. API
-    /// @API:set_flight@.
+    /// 507.
     pub(super) fn native_set_flight(&mut self, uuid: u128, allow: bool, flying: bool) -> bool {
         if !self.native_serves() {
             return false;
@@ -303,7 +365,7 @@ impl Game<'_> {
     /// packet's hook or the tick's start, else the next). True when queued; false for a player
     /// seen not on the server or alive (inside a player's hook nobody else can be seen: it is
     /// queued, and does nothing for a living player), and on a client. API
-    /// @API:respawn_player@.
+    /// 500.
     pub(super) fn native_respawn_player(&mut self, uuid: u128) -> bool {
         if !self.native_serves() {
             return false;
@@ -390,5 +452,115 @@ impl Game<'_> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use horizon_client::mod_api::NativeAuthority;
+    use horizon_world::nbt::Compound;
+
+    fn game() -> Game<'static> {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES")
+                .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
+        );
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = execution_role::ExecutionRole::IntegratedServer;
+        options.dedicated = Some(Vec::new());
+        let res: &'static _ = Box::leak(Box::new(loaded.resources));
+        let mut game = Game::new(
+            res,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        game.build_registries();
+        game.set_allow_commands(true);
+        game.native_lifecycle
+            .begin_open(NativeAuthority::IntegratedServer);
+        game.world.chunks.insert(
+            (0, 0),
+            std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+        );
+        game.block_ticks
+            .add_empty_chunk(horizon_core::position::ChunkPos::new(0, 0))
+            .unwrap();
+        game
+    }
+
+    const AT: [f64; 3] = [4.5, 200.0, 4.5];
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_mob_on_a_mob_reads_as_mounted_and_clears_after_a_dismount() {
+        let mut game = game();
+        let dim = game.dim.id();
+        let pig = game
+            .native_summon(dim, "minecraft:pig", AT, Compound::new())
+            .unwrap();
+        let chicken = game
+            .native_summon(dim, "minecraft:chicken", AT, Compound::new())
+            .unwrap();
+        assert_eq!(game.native_vehicle_of(chicken), None);
+        assert!(game.native_passengers_of(pig).is_empty());
+        assert!(game.native_mount(chicken, pig));
+        assert_eq!(game.native_vehicle_of(chicken), Some(pig));
+        assert_eq!(game.native_passengers_of(pig), vec![chicken]);
+        assert_eq!(game.native_vehicle_of(pig), None);
+        assert!(game.native_passengers_of(chicken).is_empty());
+        assert!(game.native_dismount(chicken));
+        assert_eq!(game.native_vehicle_of(chicken), None);
+        assert!(game.native_passengers_of(pig).is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_mob_in_a_boat_is_listed_by_the_boat() {
+        let mut game = game();
+        let dim = game.dim.id();
+        let boat = game
+            .native_summon(dim, "minecraft:oak_boat", AT, Compound::new())
+            .unwrap();
+        let cow = game
+            .native_summon(dim, "minecraft:cow", AT, Compound::new())
+            .unwrap();
+        assert!(game.native_mount(cow, boat));
+        assert_eq!(game.native_vehicle_of(cow), Some(boat));
+        assert_eq!(game.native_passengers_of(boat), vec![cow]);
+        assert_eq!(game.native_vehicle_of(boat), None);
+        assert!(game.native_passengers_of(cow).is_empty());
+    }
+
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn an_unknown_entity_reads_as_nothing() {
+        let mut game = game();
+        let dim = game.dim.id();
+        let boat = game
+            .native_summon(dim, "minecraft:oak_boat", AT, Compound::new())
+            .unwrap();
+        assert_eq!(game.native_vehicle_of(u32::MAX), None);
+        assert!(game.native_passengers_of(u32::MAX).is_empty());
+        assert!(game.native_passengers_of(boat).is_empty());
     }
 }

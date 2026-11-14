@@ -7,6 +7,11 @@ pub struct InterpolatedSampler {
     input: Arc<dyn DensitySampler>,
     cell_size: [i32; 3],
     inverse: [f32; 3],
+    /// The input is pointwise ([`is_pointwise`]), so its lattice samples can
+    /// come from another volume over the same cells.
+    pointwise_input: bool,
+    /// Equal for samplers compiled from the same function by one compiler.
+    identity: Option<(u64, usize)>,
 }
 impl InterpolatedSampler {
     pub fn new(
@@ -19,6 +24,8 @@ impl InterpolatedSampler {
         }
         let cell_size = [cell_size_xz, cell_size_y, cell_size_xz];
         Ok(Self {
+            pointwise_input: is_pointwise(&input),
+            identity: None,
             input,
             cell_size,
             inverse: cell_size.map(|size| 1.0 / size as f32),
@@ -49,7 +56,9 @@ impl InterpolatedSampler {
             self.cell_size,
         )?;
         context.with_buffer(coarse.size(), |context, samples| {
-            self.input.sample_volume(context, samples, coarse)?;
+            if !self.samples_from_lattice(context, samples, coarse)? {
+                self.input.sample_volume(context, samples, coarse)?;
+            }
             if self.fill_whole_cells(output, volume, coarse, samples) {
                 return Ok(());
             }
@@ -87,6 +96,8 @@ impl InterpolatedSampler {
     /// increment once per Y. The X lerps at a level of corners are the top of one
     /// cell and the bottom of the next (the same lerps of the same samples), so they
     /// are computed once.
+    // The replacements Clippy suggests require Rust 1.87 and 1.88, above our 1.85 MSRV.
+    #[allow(clippy::manual_is_multiple_of, clippy::chunks_exact_to_as_chunks)]
     fn fill_whole_cells(
         &self,
         output: &mut [f32],
@@ -99,7 +110,7 @@ impl InterpolatedSampler {
         // Every cell has its own level of corners above it: none is clamped.
         let whole = (0..3).all(|i| {
             volume.minimum()[i].rem_euclid(self.cell_size[i]) == 0
-                && (i == 1 || sizes[i] % cell[i] == 0)
+                && (i == 1 || sizes[i].is_multiple_of(cell[i]))
                 && coarse.sizes()[i] == sizes[i].div_ceil(cell[i]) + 1
         });
         // Lanes run four Xs of one cell; each column stores four Ys at a time.
@@ -141,8 +152,17 @@ impl InterpolatedSampler {
                     // `low + increment * start[1]`, the cell starting at its Y 0.
                     let mut value: [f32; 4] =
                         std::array::from_fn(|lane| bottom[lane] + increment[lane] * 0.0);
-                    let quads = a.chunks_exact_mut(4).zip(b.chunks_exact_mut(4));
-                    let quads = quads.zip(c.chunks_exact_mut(4).zip(d.chunks_exact_mut(4)));
+                    let quads = a
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(b.as_chunks_mut::<4>().0);
+                    let quads = quads.zip(
+                        c.as_chunks_mut::<4>()
+                            .0
+                            .iter_mut()
+                            .zip(d.as_chunks_mut::<4>().0),
+                    );
                     for ((a, b), (c, d)) in quads {
                         let mut rows = [[0.0; 4]; 4];
                         for row in &mut rows {
@@ -181,6 +201,161 @@ impl InterpolatedSampler {
             }
         }
         true
+    }
+
+    /// Samplers with the same identity compute the same function (the graph
+    /// compiler gives its function id), so they share lattice samples.
+    pub fn with_identity(mut self, compiler: u64, function: usize) -> Self {
+        self.identity = Some((compiler, function));
+        self
+    }
+
+    /// Fill `samples` (the input over `coarse`, a volume on the cell lattice)
+    /// from the context's known lattice samples of this sampler, sampling
+    /// only the points none of them holds. The input is pointwise, so each
+    /// value is the one sampling `coarse` whole would give. False when there
+    /// is nothing to reuse.
+    fn samples_from_lattice(
+        &self,
+        context: &mut SamplerContext,
+        samples: &mut [f32],
+        coarse: DensityVolume,
+    ) -> Result<bool, SampleError> {
+        let Some(key) = self.identity else {
+            return Ok(false);
+        };
+        if !self.pointwise_input || !context.lattice.iter().any(|known| known.sampler == key) {
+            return Ok(false);
+        }
+        let lattice = std::mem::take(&mut context.lattice);
+        let result = self.fill_from_known(context, samples, coarse, &lattice);
+        context.lattice = lattice;
+        result.map(|()| true)
+    }
+
+    fn fill_from_known(
+        &self,
+        context: &mut SamplerContext,
+        samples: &mut [f32],
+        coarse: DensityVolume,
+        lattice: &[LatticeSamples],
+    ) -> Result<(), SampleError> {
+        let key = self.identity;
+        let [sx, sy, sz] = coarse.sizes();
+        // Missing Y runs of each column, as (column, first Y, length).
+        let mut missing: Vec<(usize, usize, usize)> = Vec::new();
+        let mut known = vec![false; sy];
+        for z in 0..sz {
+            for x in 0..sx {
+                let column = x + z * sx;
+                let target = &mut samples[column * sy..(column + 1) * sy];
+                known.fill(false);
+                let position = [
+                    coarse.coordinate(0, x),
+                    coarse.minimum()[1],
+                    coarse.coordinate(2, z),
+                ];
+                for piece in lattice.iter().filter(|known| Some(known.sampler) == key) {
+                    let volume = piece.volume;
+                    let relative: [i64; 3] = std::array::from_fn(|i| {
+                        i64::from(position[i]) - i64::from(volume.minimum()[i])
+                    });
+                    let step = |axis: usize| i64::from(self.cell_size[axis]);
+                    if relative[0] < 0
+                        || relative[2] < 0
+                        || relative[0] % step(0) != 0
+                        || relative[1] % step(1) != 0
+                        || relative[2] % step(2) != 0
+                    {
+                        continue;
+                    }
+                    let (px, pz) = (
+                        (relative[0] / step(0)) as usize,
+                        (relative[2] / step(2)) as usize,
+                    );
+                    if px >= volume.sizes()[0] || pz >= volume.sizes()[2] {
+                        continue;
+                    }
+                    let source_column = (px + pz * volume.sizes()[0]) * volume.sizes()[1];
+                    // Coarse Y index y is piece Y index y + offset.
+                    let offset = relative[1] / step(1);
+                    for (y, value) in target.iter_mut().enumerate() {
+                        let source = y as i64 + offset;
+                        if !known[y] && source >= 0 && (source as usize) < volume.sizes()[1] {
+                            *value = piece.values[source_column + source as usize];
+                            known[y] = true;
+                        }
+                    }
+                }
+                let mut y = 0;
+                while y < sy {
+                    if known[y] {
+                        y += 1;
+                        continue;
+                    }
+                    let start = y;
+                    while y < sy && !known[y] {
+                        y += 1;
+                    }
+                    missing.push((column, start, y - start));
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let columns = sx * sz;
+        let runs = missing.iter().filter(|run| run.0 == 0).count();
+        let uniform = missing.len() == runs * columns
+            && missing.chunks(runs).enumerate().all(|(column, chunk)| {
+                chunk
+                    .iter()
+                    .zip(&missing[..runs])
+                    .all(|(a, b)| a.0 == column && (a.1, a.2) == (b.1, b.2))
+            });
+        if uniform {
+            // The same Y runs in every column (the top layer): one volume each.
+            for &(_, start, length) in &missing[..runs] {
+                let volume = DensityVolume::new(
+                    [sx as i32, length as i32, sz as i32],
+                    [
+                        coarse.minimum()[0],
+                        coarse.coordinate(1, start),
+                        coarse.minimum()[2],
+                    ],
+                    coarse.steps(),
+                )?;
+                context.with_buffer(volume.size(), |context, values| {
+                    self.input.sample_volume(context, values, volume)?;
+                    for column in 0..columns {
+                        let base = column * sy + start;
+                        samples[base..base + length]
+                            .copy_from_slice(&values[column * length..(column + 1) * length]);
+                    }
+                    Ok(())
+                })?;
+            }
+        } else {
+            for &(column, start, length) in &missing {
+                let (x, z) = (column % sx, column / sx);
+                let volume = DensityVolume::new(
+                    [1, length as i32, 1],
+                    [
+                        coarse.coordinate(0, x),
+                        coarse.coordinate(1, start),
+                        coarse.coordinate(2, z),
+                    ],
+                    coarse.steps(),
+                )?;
+                context.with_buffer(volume.size(), |context, values| {
+                    self.input.sample_volume(context, values, volume)?;
+                    let base = column * sy + start;
+                    samples[base..base + length].copy_from_slice(values);
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn fill_cell(
@@ -347,7 +522,22 @@ impl DensitySampler for InterpolatedSampler {
             (volume.steps()[i] == self.cell_size[i] || volume.sizes()[i] == 1)
                 && volume.minimum()[i].rem_euclid(self.cell_size[i]) == 0
         }) {
-            return self.input.sample_volume(context, output, volume);
+            self.input.sample_volume(context, output, volume)?;
+            if let (true, Some(key)) = (
+                self.pointwise_input && volume.steps() == self.cell_size,
+                self.identity,
+            ) && let Some(capture) = &mut context.capture
+                && !capture
+                    .iter()
+                    .any(|known| known.sampler == key && known.volume == volume)
+            {
+                capture.push(LatticeSamples {
+                    sampler: key,
+                    volume,
+                    values: output[..volume.size()].into(),
+                });
+            }
+            return Ok(());
         }
         if volume.steps() == [1; 3] {
             return self.sample_block_volume(context, output, volume);
@@ -405,7 +595,7 @@ mod tests {
                 3e38,
             ];
             const SCALE: [f32; 4] = [1.0, 1e-3, 1e30, 3e-39];
-            if hash % 23 == 0 {
+            if hash.is_multiple_of(23) {
                 SPECIAL[(hash >> 5) as usize % 8]
             } else {
                 ((hash >> 8) as f32 / (1 << 24) as f32 - 0.5) * SCALE[(hash >> 3) as usize % 4]

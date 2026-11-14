@@ -14,7 +14,10 @@ use horizon_client::{
     },
     particles::{ParticleOptions, ParticleType},
 };
-use horizon_core::{geometry::Vec3, random::RandomSource};
+use horizon_core::{
+    geometry::Vec3,
+    random::{LegacyRandom, LevelRandom, RandomSource},
+};
 use horizon_world::nbt::Tag;
 use std::collections::{HashMap, HashSet};
 
@@ -46,6 +49,13 @@ impl Game<'_> {
             .entity_types
             .as_ref()
             .is_some_and(|t| t.contains(id))
+    }
+    /// Whether `entity_type_exists` has a registry to answer from.
+    pub(super) fn entity_types_loaded(&self) -> bool {
+        self.spawners
+            .entity_types
+            .as_ref()
+            .is_some_and(|t| !t.is_empty())
     }
     pub(super) fn load_entity_types(&mut self) {
         if self.spawners.entity_types.is_some() {
@@ -115,10 +125,17 @@ impl Game<'_> {
         {
             return Ok(());
         }
+        // While its delay counts down, `serverTick` only takes one off it: no
+        // level, random or event (a server with hundreds of dungeons near its
+        // players built the level for every one of them, every tick).
+        if spawner.spawn_delay > 0 {
+            spawner.spawn_delay -= 1;
+            return Ok(());
+        }
         let pos = [key.0, key.1, key.2];
         let mut random = std::mem::replace(
             &mut self.world.random,
-            horizon_core::random::LegacyRandom::new(0),
+            LevelRandom::for_level(LegacyRandom::new(0)),
         );
         let mut events = Vec::new();
         let mut planned: Vec<Planned> = Vec::new();
@@ -443,7 +460,7 @@ impl Game<'_> {
             let mut events = Vec::new();
             let mut random = std::mem::replace(
                 &mut self.world.random,
-                horizon_core::random::LegacyRandom::new(0),
+                LevelRandom::for_level(LegacyRandom::new(0)),
             );
             if let Some(BlockEntity::Spawner(s)) = self.world.block_entities.get_mut(&key) {
                 match data {
@@ -466,6 +483,37 @@ impl Game<'_> {
         self.lan_acting_permission
             .unwrap_or(self.ui.registries.permission)
             > 0
+    }
+    /// `EntityType.createDefaultStackConfig` on an entity an item made (a
+    /// vehicle, a hanging entity, an armor stand): the item's custom name and
+    /// custom data (`applyComponentsFromItemStack`:
+    /// `Entity.applyImplicitComponent`'s two, saved as `CustomName` and
+    /// `data`), then its `minecraft:entity_data` merged over the entity's own
+    /// compound and loaded (`updateCustomEntityTag`) when it names this type.
+    /// An op-only type (command block and spawner minecarts) takes it from an
+    /// op player only, never from a dispenser (`by_player` false).
+    pub(super) fn apply_item_stack_config(
+        &mut self,
+        target: super::commands::Target,
+        kind: &str,
+        stack: &horizon_client::items::ItemStack,
+        by_player: bool,
+    ) {
+        let op = by_player && self.acting_player_is_op();
+        let configures = stack
+            .data()
+            .is_some_and(|d| d.custom_name.is_some() || d.other("minecraft:custom_data").is_some())
+            || horizon_client::block_entity_item::spawn_egg_entity_data(stack, kind, op).is_some();
+        if !configures {
+            return;
+        }
+        let Some(own) = self.entity_nbt(target) else {
+            return;
+        };
+        let tag =
+            horizon_client::block_entity_item::stack_configured_entity_by(stack, kind, &own, op);
+        // The entity's own compound, its name and data merged in: it loads back.
+        let _ = self.apply_entity_nbt(target, tag);
     }
     /// Ticks spawners, trial spawners and vaults near the player on a remote
     /// client (`tick_remote`).
@@ -596,6 +644,47 @@ pub(super) fn nearby_remote_spawner_keys<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `BaseSpawner.serverTick` with a player in range: a running delay only
+    /// goes down by one a tick, drawing nothing from the level random and
+    /// adding no mob. At 0 the spawn runs: with nothing to spawn it calls
+    /// `delay`, which draws the next delay in [MinSpawnDelay, MaxSpawnDelay).
+    #[test]
+    #[ignore = "needs prepared resources (HORIZON_TEST_RESOURCES)"]
+    fn a_running_delay_counts_down_without_drawing() {
+        let mut game = super::super::native_machines::tests::server_game();
+        game.player = Some(
+            horizon_client::motion::PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5))
+                .unwrap(),
+        );
+        let key = (8, 64, 12);
+        let spawner = Spawner {
+            spawn_delay: 3,
+            ..Spawner::default()
+        };
+        game.world
+            .block_entities
+            .put(key, BlockEntity::Spawner(Box::new(spawner)));
+        let delay = |game: &Game<'_>| match game.world.block_entities.get(&key) {
+            Some(BlockEntity::Spawner(s)) => s.spawn_delay,
+            _ => panic!("the spawner is gone"),
+        };
+        for expected in [2, 1, 0] {
+            let mut before = game.world.random.clone();
+            game.tick_spawner(key).unwrap();
+            assert_eq!(delay(&game), expected);
+            assert_eq!(
+                game.world.random.next_long(),
+                before.next_long(),
+                "no draw at delay {expected}"
+            );
+            assert!(game.mobs.is_empty());
+        }
+        let mut before = game.world.random.clone();
+        game.tick_spawner(key).unwrap();
+        assert!((200..800).contains(&delay(&game)), "{}", delay(&game));
+        assert_ne!(game.world.random.next_long(), before.next_long());
+    }
 
     #[test]
     fn dummy_container_at_min_coordinate_does_not_panic_or_tick() {

@@ -4,6 +4,7 @@
 //! the inventory, each mod's `carry-report.json` and its harness result
 //! (`tools/mod_port_harness.py`).
 use crate::{
+    datapacks::{self, Installed},
     inventory::Record,
     resourcepacks::{Outcome, Report, State},
 };
@@ -68,8 +69,9 @@ pub struct Row {
     /// Unported dependencies, kept apart so the launcher can translate the fixed sentence.
     #[serde(default)]
     pub waiting: usize,
-    /// Made for 1.20 or older (data folders named as before 1.21): not carried, and not one
-    /// Port can carry over either.
+    /// Made for 1.20 or older (data folders named as before 1.21). Carried under 1.21's
+    /// folder names, it is partial at best; not carried (an older build's carry), it is not
+    /// one Port can carry over.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub old_layout: bool,
 }
@@ -95,29 +97,33 @@ impl Row {
 /// The licence family of an SPDX id or a `mods.toml` licence text.
 pub fn license_kind(license: &str) -> &'static str {
     let l = license.to_ascii_lowercase();
+    // Whole words of the text, or a family with its version run on ("GPLv3", "MPL2"): "limited"
+    // holds "mit", "template" "mpl" and "Discord" "isc", but none of those is a family's word.
+    let has = |k: &str| {
+        l.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+            t.strip_prefix(k).is_some_and(|rest| {
+                let digits = rest.strip_prefix('v').unwrap_or(rest);
+                rest.is_empty()
+                    || (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+    };
     if l.is_empty() || l.starts_with("unknown") {
         "unknown"
     } else if l.contains("-nc") || l.contains("-nd") || l.contains("noncommercial") {
         "restricted"
     } else if l.contains("all-rights-reserved") || l.contains("all rights reserved") || l == "arr" {
         "all-rights-reserved"
-    } else if ["gpl", "mpl", "eupl", "general public"]
+    } else if ["gpl", "lgpl", "agpl", "mpl", "eupl"]
         .iter()
-        .any(|k| l.contains(k))
+        .any(|k| has(k))
+        || l.contains("general public")
     {
         "copyleft"
-    } else if [
-        "mit",
-        "apache",
-        "bsd",
-        "cc0",
-        "cc-by",
-        "unlicense",
-        "isc",
-        "zlib",
-    ]
-    .iter()
-    .any(|k| l.contains(k))
+    } else if ["mit", "apache", "bsd", "cc0", "unlicense", "isc", "zlib"]
+        .iter()
+        .any(|k| has(k))
+        || l.contains("cc-by")
     {
         "permissive"
     } else {
@@ -198,12 +204,38 @@ fn plain_not_needed(class: &str) -> &'static str {
     }
 }
 
-/// Whether the carry found the mod made for 1.20 or older ([`crate::carry::old_layout`]).
-fn old_layout(work: &Path, key: &str) -> bool {
-    std::fs::read(work.join("mods").join(key).join("carry-report.json"))
+/// What the carry found of a mod made for 1.20 or older ([`crate::carry::old_layout`]).
+enum OldLayout {
+    /// Not one, or not carried yet.
+    No,
+    /// Found by an older build, which carried nothing.
+    NotCarried,
+    /// Carried under 1.21's folder names: why it is partial.
+    Renamed(String),
+}
+
+fn old_layout(work: &Path, key: &str) -> OldLayout {
+    let carry = std::fs::read(work.join("mods").join(key).join("carry-report.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .is_some_and(|c| c["old_layout"] == true)
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let Some(carry) = carry.filter(|c| c["old_layout"] == true) else {
+        return OldLayout::No;
+    };
+    let count = |k: &str| carry[k].as_u64().unwrap_or(0);
+    let renamed = count("folders_renamed");
+    if renamed == 0 {
+        return OldLayout::NotCarried;
+    }
+    let recipes = match count("recipes_old_result") {
+        0 => String::new(),
+        1 => "1 recipe result names `item`, which 26.3 skips; ".to_owned(),
+        n => format!("{n} recipe results name `item`, which 26.3 skips; "),
+    };
+    OldLayout::Renamed(format!(
+        "made for Minecraft 1.20 or older: {renamed} data files moved to 1.21's folder names, \
+         their JSON still 1.20's ({recipes}NBT in loot functions, ingredients and predicates \
+         not upgraded yet)"
+    ))
 }
 
 /// A carried-over mod: ported when its harness passes with nothing left
@@ -300,6 +332,26 @@ fn carried(work: &Path, key: &str) -> Option<(Status, String)> {
     }
 }
 
+/// A data-only jar: on in new worlds, partial because nobody compared it with the Java pack.
+fn data_pack(installed: &Installed) -> (Status, String) {
+    if !installed.error.is_empty() {
+        return (
+            Status::NotYet,
+            format!("data pack not installed: {}", installed.error),
+        );
+    }
+    let mut reason =
+        "data pack: on in new worlds of this profile, not in older ones; not compared with the Java pack"
+            .to_owned();
+    if installed.assets {
+        reason.push_str("; its assets (names, textures) are not loaded");
+    }
+    if !installed.notes.is_empty() {
+        let _ = write!(reason, "; {}", installed.notes.join("; "));
+    }
+    (Status::Partial, reason)
+}
+
 fn resource_row(path: &str, outcome: Option<&Outcome>, record: Option<&Record>) -> Row {
     let state = outcome.map_or(State::Missing, |o| o.state);
     let shader = path.starts_with("shaderpacks/");
@@ -339,26 +391,34 @@ fn resource_row(path: &str, outcome: Option<&Outcome>, record: Option<&Record>) 
 
 pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
     let resourcepacks = Report::load(work);
+    let packs = datapacks::load(work);
     let mut rows: Vec<Row> = records
         .iter()
         .map(|r| {
             if r.path.starts_with("resourcepacks/") || r.path.starts_with("shaderpacks/") {
                 return resource_row(&r.path, resourcepacks.files.get(&r.path), Some(r));
             }
-            let old = old_layout(work, &r.key);
+            let layout = old_layout(work, &r.key);
+            let old = !matches!(layout, OldLayout::No);
             let (status, reason) = if r.class == "unknown" {
                 let why =
                     "unclassified: its jar (mods.toml, file census) or a reviewed row decides";
                 (Status::NotYet, why.to_owned())
             } else if r.tier == "none" || matches!(r.class.as_str(), "library" | "performance") {
                 (Status::NotNeeded, not_needed(&r.class).to_owned())
-            } else if old {
+            } else if matches!(layout, OldLayout::NotCarried) {
                 let why = "made for Minecraft 1.20 or older: its data folders (recipes/, \
                            loot_tables/, tags/blocks/...) are named as before 1.21, which 26.3 \
                            does not read; not carried";
                 (Status::NotYet, why.to_owned())
-            } else if let Some(c) = carried(work, &r.key) {
-                c
+            } else if let Some(installed) = packs.get(&r.key) {
+                data_pack(installed)
+            } else if let Some((status, why)) = carried(work, &r.key) {
+                match layout {
+                    // Its harness checks blocks and items, not 1.20's recipes and loot tables.
+                    OldLayout::Renamed(old) => (Status::Partial, format!("{old}; {why}")),
+                    _ => (status, why),
+                }
             } else {
                 let mut why = not_yet(&r.tier).to_owned();
                 if r.tier == "data" && r.jar.is_some() {
@@ -443,7 +503,7 @@ pub fn summary(rows: &[Row]) -> Summary {
             Status::NotNeeded => continue,
             Status::Ported => s.carried += 1,
             Status::Partial => (s.carried, s.partial) = (s.carried + 1, s.partial + 1),
-            // Not one port can carry over: the 1.20 data would not load.
+            // Not carried by an older build: not one Port can carry over.
             Status::NotYet if r.old_layout => s.later += 1,
             Status::NotYet if r.class == "content" && r.tier == "data" => s.ready += 1,
             Status::NotYet
@@ -740,6 +800,21 @@ mod tests {
     #[test]
     fn licence_families() {
         assert_eq!(license_kind("MIT"), "permissive");
+        assert_eq!(license_kind("Apache-2.0"), "permissive");
+        assert_eq!(license_kind("BSD-3-Clause"), "permissive");
+        assert_eq!(license_kind("GPL-3.0-or-later"), "copyleft");
+        // Words that only hold a family's letters.
+        assert_eq!(license_kind("Custom, limited redistribution"), "custom");
+        assert_eq!(license_kind("See the template"), "custom");
+        assert_eq!(license_kind("Ask on Discord"), "custom");
+        // A version run on to the family's name.
+        for spelled in [
+            "GPLv3", "LGPLv3", "AGPLv3", "MPLv2", "GPL3", "LGPLv2.1", "gplv2+",
+        ] {
+            assert_eq!(license_kind(spelled), "copyleft", "{spelled}");
+        }
+        assert_eq!(license_kind("Apache2"), "permissive");
+        assert_eq!(license_kind("mplvx"), "custom");
         assert_eq!(license_kind("CC0-1.0"), "permissive");
         assert_eq!(license_kind("LGPL-3.0-only"), "copyleft");
         assert_eq!(

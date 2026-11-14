@@ -8,7 +8,7 @@
 //! the one that was is put back. A level nobody opened is not opened.
 use super::{Game, commands::Target, creatures::seen};
 use horizon_client::mobs::{Mob, MobWorld, Seen, Who, ai::do_hurt_target, goals::Cx};
-use horizon_world::nbt::Compound;
+use horizon_world::nbt::{Compound, Tag};
 
 // Native mods use these; nothing in Horizon does.
 #[allow(dead_code)]
@@ -19,8 +19,28 @@ impl Game<'_> {
     /// A server's player is found too (`minecraft:player`, in its level). None
     /// on a client, for no such entity, and for a player while a guest's
     /// packet is handled (the hub is taken out then): call it from a tick or
-    /// console hook. API @API:npc_entity_by_uuid@.
+    /// console hook. API 536.
     pub(super) fn native_entity_by_uuid(&mut self, uuid: u128) -> Option<(String, u32, String)> {
+        if let Some(found) = self.native_find_entity_by_uuid(uuid) {
+            return Some(found);
+        }
+        // The levels not in place: each one is put in place to look (`npc_in_level`).
+        let words = horizon_client::lan::playerdata::uuid_ints(uuid);
+        let dims: Vec<&'static str> = self.levels.parked_dims().iter().map(|d| d.id()).collect();
+        for dimension in dims {
+            if let Some(Some((id, kind))) =
+                self.npc_in_level(dimension, |g| g.uuid_holder_here(words))
+            {
+                return Some((dimension.to_owned(), id, kind));
+            }
+        }
+        None
+    }
+    /// `native_entity_by_uuid` from `&self`, for many read-only lookups: the server's players and the
+    /// entities of the level in place. A level not in place keeps its entities in its own state, and
+    /// reading one means putting it in place (a `&mut` swap), so those levels are left to
+    /// `native_entity_by_uuid`. Same answer as it for these; None on a client. API 639.
+    pub(super) fn native_find_entity_by_uuid(&self, uuid: u128) -> Option<(String, u32, String)> {
         if self.remote.is_some() || self.options.execution_role.is_client() {
             return None;
         }
@@ -32,33 +52,63 @@ impl Game<'_> {
             return Some((dimension, id, "minecraft:player".into()));
         }
         let words = horizon_client::lan::playerdata::uuid_ints(uuid);
-        let dims: Vec<&'static str> = std::iter::once(self.dim)
-            .chain(self.levels.parked_dims())
-            .map(|d| d.id())
-            .collect();
-        for dimension in dims {
-            let found = self.npc_in_level(dimension, |g| {
-                // The UUIDs the level remembers, checked against its entities: a
-                // remembered id may belong to an entity that is gone.
-                let id = g
-                    .persist
-                    .uuids
-                    .iter()
-                    .find(|(_, w)| **w == words)
-                    .map(|(id, _)| *id)?;
-                let t = g.level_entity(i32::try_from(id).ok()?)?;
-                if let Target::Mob(m) = t
-                    && !g.mobs.iter().any(|x| x.id == m && !x.removed)
-                {
-                    return None;
-                }
-                Some((id, g.target_type(t)))
-            });
-            if let Some(Some((id, kind))) = found {
-                return Some((dimension.to_owned(), id, kind));
-            }
+        let (id, kind) = self.uuid_holder_here(words)?;
+        Some((self.dim.id().to_owned(), id, kind))
+    }
+    /// The entity of the level in place that `words` names, with its type: the UUIDs the level
+    /// remembers, checked against its entities (a remembered id may belong to an entity that is gone).
+    fn uuid_holder_here(&self, words: [i32; 4]) -> Option<(u32, String)> {
+        let id = self
+            .persist
+            .uuids
+            .iter()
+            .find(|(_, w)| **w == words)
+            .map(|(id, _)| *id)?;
+        let t = self.level_entity(i32::try_from(id).ok()?)?;
+        if let Target::Mob(m) = t
+            && !self.mobs.iter().any(|x| x.id == m && !x.removed)
+        {
+            return None;
         }
-        None
+        // The mod API has no natural fence knots (#13036).
+        if let Target::Knot(_) = t {
+            return None;
+        }
+        Some((id, self.target_type(t)))
+    }
+    /// The `minecraft:marker` entities of the loaded level `dimension`: each one's id, its position
+    /// and its `data` compound (empty for a marker saved without data), as `/data get entity <marker>
+    /// data` shows it. Reads only the level's list of kept entities (displays, interactions, markers),
+    /// not every entity, so a mod can poll it for the markers it uses as anchors (a region, a spawn
+    /// point) far more cheaply than it could filter `native_level_entities`. Empty on a client and for
+    /// a level not loaded. API 632.
+    pub(super) fn native_level_markers(
+        &mut self,
+        dimension: &str,
+    ) -> Vec<(u32, [f64; 3], Compound)> {
+        self.npc_in_level(dimension, |g| {
+            let markers: Vec<_> = g
+                .others
+                .iter()
+                .filter(|o| matches!(o.kind.as_str(), "minecraft:marker" | "marker"))
+                .map(|o| (o.id, [o.position.x, o.position.y, o.position.z]))
+                .collect();
+            markers
+                .into_iter()
+                .map(|(id, at)| {
+                    let data = match g
+                        .entity_nbt(Target::Other(id))
+                        .as_ref()
+                        .and_then(|t| t.get("data"))
+                    {
+                        Some(Tag::Compound(c)) => c.clone(),
+                        _ => Compound::default(),
+                    };
+                    (id, at, data)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
     /// Merges `nbt` into entity `id`'s data in the loaded level `dimension`,
     /// as `/execute in <dimension> run data merge entity` does: what
@@ -66,7 +116,7 @@ impl Game<'_> {
     /// level (with `native_entity_by_uuid`, an entity found by its UUID).
     /// False on a client, for a level not loaded, no such entity, or what
     /// `native_entity_merge_nbt` refuses (a player, a kind Horizon can't
-    /// reload yet, data that changes nothing). API @API:npc_entity_by_uuid@.
+    /// reload yet, data that changes nothing). API 536.
     pub(super) fn native_merge_entity_nbt(
         &mut self,
         dimension: &str,
@@ -79,6 +129,17 @@ impl Game<'_> {
         })
         .unwrap_or(false)
     }
+    /// The data of entity `id` in the loaded level `dimension`, as `native_entity_nbt` gives it for the
+    /// level in place (`/execute in <dimension> run data get entity`, without the `id`). Read after
+    /// `native_find_entity_by_uuid` or `native_entity_by_uuid` found the entity. None on a client, for a
+    /// level not loaded, and for no such entity. API 639.
+    pub(super) fn native_entity_nbt_in(&mut self, dimension: &str, id: u32) -> Option<Compound> {
+        self.npc_in_level(dimension, |g| {
+            let entity = g.native_entity(id)?;
+            g.native_entity_nbt(entity)
+        })
+        .flatten()
+    }
     /// Turns entity `id` of the loaded level `dimension` to `yaw` and `pitch`
     /// in degrees, as `/rotate` does (`Entity.forceSetRotation`: `setYRot`,
     /// `setXRot` clamped to -90..90, its body and head with it), without
@@ -90,7 +151,7 @@ impl Game<'_> {
     /// with `native_mob_look_at` instead, or spawn it with `no_ai`. False on
     /// a client, for a level not loaded, no such entity (a player is turned
     /// by teleporting them), another kind, or an angle that isn't finite.
-    /// API @API:npc_entity_rotation@.
+    /// API 537.
     pub(super) fn native_set_entity_rotation(
         &mut self,
         dimension: &str,
@@ -141,7 +202,7 @@ impl Game<'_> {
     /// over, as they do from vanilla's callers: call it again (an NPC
     /// library's navigator does so each tick) or give the mob goals of its
     /// own (`native_register_goals`). A mob with `no_ai` keeps the path but
-    /// doesn't walk it. API @API:npc_mob_navigation@.
+    /// doesn't walk it. API 539.
     pub(super) fn native_mob_navigate(
         &mut self,
         dimension: &str,
@@ -160,13 +221,59 @@ impl Game<'_> {
         })
         .unwrap_or(false)
     }
+    /// The walkable path mob `mob` of the loaded level `dimension` would take
+    /// to `to` (`PathNavigation.createPath`, the engine's own pathfinder for
+    /// that mob's kind), without moving it: the block positions from the
+    /// mob's own block on, in walking order, and whether the path reaches
+    /// `to` within `reach` blocks. When `to` can't be reached, the path ends at
+    /// the nearest node vanilla reached, with `reached` false. None for no path
+    /// at all (beyond the follow range, as vanilla's), a level not loaded, no
+    /// such living mob, a negative `reach` or a value that isn't finite. Nothing
+    /// is set on the mob: pass the nodes to a mob's own walk or to your NPC's
+    /// movement yourself. API 595.
+    pub(super) fn native_mob_path(
+        &mut self,
+        dimension: &str,
+        mob: u32,
+        to: [f64; 3],
+        reach: i32,
+    ) -> Option<(Vec<[i32; 3]>, bool)> {
+        if !to.into_iter().all(f64::is_finite) || reach < 0 {
+            return None;
+        }
+        let at = to.map(|v| v.floor() as i32);
+        self.npc_drive(dimension, mob, |m, w| {
+            m.create_path_to(w, at, reach).map(|path| {
+                let nodes = path.nodes.iter().map(|n| [n.x, n.y, n.z]).collect();
+                (nodes, path.reached)
+            })
+        })
+        .flatten()
+    }
+    /// Strikes lightning at `pos` in the loaded level `dimension`, as `/summon
+    /// lightning_bolt` does; with `visual_only` only the bolt is shown, with no
+    /// fire, damage or sound-of-strike event (`EntityType.LIGHTNING_BOLT`'s
+    /// `visualOnly`). False for a non-finite position and a level not loaded or
+    /// a client. API 594.
+    pub(super) fn native_lightning_bolt(
+        &mut self,
+        dimension: &str,
+        pos: [f64; 3],
+        visual_only: bool,
+    ) -> bool {
+        if !pos.into_iter().all(f64::is_finite) {
+            return false;
+        }
+        self.npc_in_level(dimension, |g| g.spawn_bolt(pos, visual_only))
+            .is_some()
+    }
     /// Walks mob `mob` towards where entity `target` (a mob, a player or any
     /// other entity of the same level) stands now, as
     /// `PathNavigation.moveTo(entity, speed)` does (done within a block). A
     /// path to where it is now: to follow it, call it again as it moves
     /// (vanilla's follow and attack goals ask every few ticks). False as
     /// `native_mob_navigate`, or for no such target in that level. API
-    /// @API:npc_mob_navigation@.
+    /// 539.
     pub(super) fn native_mob_follow(
         &mut self,
         dimension: &str,
@@ -187,14 +294,14 @@ impl Game<'_> {
         .unwrap_or(false)
     }
     /// Stops mob `mob`'s walk (`PathNavigation.stop`): false for a level not
-    /// loaded or no such living mob. API @API:npc_mob_navigation@.
+    /// loaded or no such living mob. API 539.
     pub(super) fn native_mob_stop(&mut self, dimension: &str, mob: u32) -> bool {
         self.npc_drive(dimension, mob, |m, _| m.nav_stop())
             .is_some()
     }
     /// Whether mob `mob` is walking a path (`PathNavigation.isInProgress`):
     /// false once it arrived, got stuck or was stopped, and for a level not
-    /// loaded or no such living mob. API @API:npc_mob_navigation@.
+    /// loaded or no such living mob. API 539.
     pub(super) fn native_mob_navigating(&mut self, dimension: &str, mob: u32) -> bool {
         self.npc_in_level(dimension, |g| {
             g.mobs
@@ -209,7 +316,7 @@ impl Game<'_> {
     /// holds for that tick only, so call it each tick to keep looking; a mob
     /// with `no_ai` doesn't turn (`native_set_entity_rotation` turns it).
     /// False for a level not loaded, no such living mob or a point that isn't
-    /// finite. API @API:npc_mob_navigation@.
+    /// finite. API 539.
     pub(super) fn native_mob_look_at(&mut self, dimension: &str, mob: u32, at: [f64; 3]) -> bool {
         if !at.into_iter().all(f64::is_finite) {
             return false;
@@ -227,7 +334,7 @@ impl Game<'_> {
     /// when the blow was dealt (whether it hurt is the damage hooks' to
     /// tell); false for a level not loaded, no such living mob or target, the
     /// mob itself, or a player while a guest's packet is handled (the hub is
-    /// taken out then). API @API:npc_mob_attack@.
+    /// taken out then). API 538.
     pub(super) fn native_mob_attack(&mut self, dimension: &str, mob: u32, target: u32) -> bool {
         if mob == target {
             return false;
@@ -287,7 +394,7 @@ impl Game<'_> {
             log::warn!("mob {mob} attacking {target}: {e}");
         }
         if let Some(conn) = guest {
-            self.lan_guest_mob_events(to_guest.into_iter().map(|e| (conn, e)).collect());
+            self.lan_guest_mob_events(to_guest.into_iter().map(|e| (conn, mob, e)).collect());
         }
         true
     }
@@ -331,6 +438,10 @@ impl Game<'_> {
         {
             return None;
         }
+        // The mod API has no natural fence knots (#13036).
+        if let Target::Knot(_) = t {
+            return None;
+        }
         self.target_position(t)
     }
 }
@@ -363,3 +474,7 @@ impl Game<'_> {
         Some(out)
     }
 }
+
+#[cfg(test)]
+#[path = "native_lookup_tests.rs"]
+mod lookup_tests;

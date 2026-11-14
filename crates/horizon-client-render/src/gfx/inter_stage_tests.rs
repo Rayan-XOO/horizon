@@ -98,8 +98,24 @@ fn interfaces(source: &str) -> Vec<Interface> {
 
 /// The shaders as the renderer assembles them, by the `.wgsl` files each is made of.
 fn composed() -> Vec<(&'static str, Vec<&'static str>, String)> {
-    let entity = crate::overlay::wgsl_constants() + include_str!("../entity.wgsl");
+    let entity = super::entity_shader();
     vec![
+        (
+            "HDR",
+            vec!["hdr.wgsl", "hdr_light.wgsl"],
+            super::hdr::shader(),
+        ),
+        ("terrain", vec!["terrain.wgsl"], super::terrain_shader()),
+        (
+            "stars",
+            vec!["stars.wgsl"],
+            include_str!("../hdr_light.wgsl").to_owned() + include_str!("stars.wgsl"),
+        ),
+        (
+            "custom sky",
+            vec!["custom_sky.wgsl"],
+            include_str!("../hdr_light.wgsl").to_owned() + include_str!("custom_sky.wgsl"),
+        ),
         ("entity", vec!["entity.wgsl"], entity.clone()),
         (
             "GPU culling occlusion test",
@@ -124,19 +140,45 @@ fn composed() -> Vec<(&'static str, Vec<&'static str>, String)> {
         (
             "improved transparency world",
             vec!["terrain.wgsl", "oit.wgsl", "oit_world.wgsl"],
-            include_str!("../terrain.wgsl").to_owned()
+            super::terrain_shader()
                 + include_str!("../oit.wgsl")
                 + include_str!("../oit_world.wgsl"),
         ),
         (
             "visibility buffer",
             vec!["terrain.wgsl", "visbuffer.wgsl"],
-            include_str!("../terrain.wgsl").to_owned() + include_str!("../visbuffer.wgsl"),
+            super::terrain_shader() + include_str!("../visbuffer.wgsl"),
+        ),
+        // Ray tracing's unpacking of compact sections (gfx/ray_scene.rs's `Unpacker`).
+        (
+            "ray tracing unpack",
+            vec!["terrain.wgsl", "rt_unpack.wgsl"],
+            super::surface_setup::ray_query::ray_scene::unpack_shader(),
+        ),
+        // A native mod's world warp (gfx/world_warp.rs): its copies with the plainest warp.
+        (
+            "world warp terrain",
+            vec![
+                "terrain.wgsl",
+                "world_warp.wgsl",
+                "world_warp_fragment.wgsl",
+            ],
+            super::world_warp::terrain_shader(super::world_warp::IDENTITY).unwrap(),
+        ),
+        (
+            "world warp entities",
+            vec!["entity.wgsl", "static_entity.wgsl", "world_warp.wgsl"],
+            super::world_warp::entity_shader(super::world_warp::IDENTITY).unwrap(),
+        ),
+        (
+            "world primitives",
+            vec!["world_primitives.wgsl"],
+            super::world_primitives::shader(),
         ),
         (
             "improved transparency world border",
             vec!["border.wgsl", "oit.wgsl", "oit_border.wgsl"],
-            include_str!("../border.wgsl").to_owned()
+            super::border_shader()
                 + include_str!("../oit.wgsl")
                 + include_str!("../oit_border.wgsl"),
         ),

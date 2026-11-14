@@ -96,6 +96,19 @@ pub struct SamplerContext {
     sparse: bool,
     /// Planes of y-fixed slices already sampled (`with_planes`).
     planes: Option<std::collections::HashMap<slice::PlaneKey, Vec<f32>>>,
+    /// Lattice samples kept by interpolated samplers' aligned volumes.
+    capture: Option<Vec<LatticeSamples>>,
+    /// Known lattice samples interpolated samplers may read instead of
+    /// sampling their (pointwise) input again.
+    lattice: Vec<LatticeSamples>,
+}
+/// An interpolated sampler's input values over a volume on its cell lattice.
+#[derive(Clone, Debug)]
+pub struct LatticeSamples {
+    /// The interpolated sampler's identity.
+    sampler: (u64, usize),
+    volume: DensityVolume,
+    values: Arc<[f32]>,
 }
 impl SamplerContext {
     fn with_buffer<T>(
@@ -118,6 +131,24 @@ impl SamplerContext {
         if let Some(planes) = &mut self.planes {
             planes.clear();
         }
+        self.capture = None;
+        self.lattice = Vec::new();
+    }
+    /// Keep the input samples of interpolated samplers sampled on their own
+    /// cell lattice from now until [`Self::take_lattice_capture`].
+    pub fn capture_lattice(&mut self) {
+        self.capture = Some(Vec::new());
+    }
+    pub fn take_lattice_capture(&mut self) -> Vec<LatticeSamples> {
+        self.capture.take().unwrap_or_default()
+    }
+    /// Lattice samples (captured with the same samplers) that interpolated
+    /// samplers with a pointwise input reuse instead of sampling it again.
+    pub fn set_lattice(&mut self, lattice: Vec<LatticeSamples>) {
+        self.lattice = lattice;
+    }
+    pub fn clear_lattice(&mut self) {
+        self.lattice = Vec::new();
     }
     /// Release retained storage between worlds or after unusually large work.
     pub fn clear_scratch(&mut self) {
@@ -158,6 +189,73 @@ pub trait DensitySampler: std::fmt::Debug + Send + Sync {
     ) -> Result<(), SampleError> {
         self.sample_volume(context, buffer, volume)
     }
+    /// `Some(inputs)` when each value `sample_volume` writes depends only on
+    /// its own block position and on the same values of `inputs`: never on
+    /// the volume's origin, extent or other samples, nor on world fields.
+    /// Values of a pointwise graph (see [`is_pointwise`]) can then be taken
+    /// from another volume over the same lattice. `None` (the default) is the
+    /// conservative answer.
+    fn pointwise_inputs(&self) -> Option<Vec<&Arc<dyn DensitySampler>>> {
+        None
+    }
+}
+/// Whether every sampler reachable from `root` is pointwise.
+pub fn is_pointwise(root: &Arc<dyn DensitySampler>) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![root];
+    while let Some(sampler) = stack.pop() {
+        if !seen.insert(Arc::as_ptr(sampler) as *const () as usize) {
+            continue;
+        }
+        match sampler.pointwise_inputs() {
+            Some(inputs) => stack.extend(inputs),
+            None => return false,
+        }
+    }
+    true
+}
+/// `sample_needed` with a mask of needed Ys, `sample_volume` without one.
+fn sample_with(
+    sampler: &dyn DensitySampler,
+    context: &mut SamplerContext,
+    buffer: &mut [f32],
+    volume: DensityVolume,
+    needed: Option<&[u64]>,
+) -> Result<(), SampleError> {
+    match needed {
+        Some(needed) => sampler.sample_needed(context, buffer, volume, needed),
+        None => sampler.sample_volume(context, buffer, volume),
+    }
+}
+/// A [`DensitySampler::sample_needed`] mask that has a bit for every Y of every column of
+/// `volume`; any other mask means every value is needed.
+fn usable_mask(needed: &[u64], volume: DensityVolume) -> Option<&[u64]> {
+    let [size_x, size_y, size_z] = volume.sizes();
+    (size_y <= 64 && needed.len() >= size_x * size_z).then_some(needed)
+}
+/// The Ys of each column (one bit per Y, if at most 64) a caller that needs `needed` (all of
+/// them without a mask) reads from a sampler it consults only where `reads(values[index])`.
+fn needed_where(
+    values: &[f32],
+    volume: DensityVolume,
+    needed: Option<&[u64]>,
+    reads: impl Fn(f32) -> bool,
+) -> Option<Vec<u64>> {
+    let size_y = volume.sizes()[1];
+    if size_y > 64 {
+        return None;
+    }
+    let columns = values[..volume.size()].chunks_exact(size_y);
+    Some(
+        columns
+            .enumerate()
+            .map(|(column, values)| {
+                let read = (values.iter().enumerate())
+                    .fold(0, |bits, (y, &value)| bits | u64::from(reads(value)) << y);
+                read & needed.map_or(u64::MAX, |needed| needed[column])
+            })
+            .collect(),
+    )
 }
 fn check_buffer(buffer: &[f32], volume: DensityVolume) -> Result<(), SampleError> {
     if buffer.len() < volume.size() {
@@ -196,6 +294,9 @@ fn visit(
 #[derive(Clone, Copy, Debug)]
 pub struct ConstantSampler(pub f32);
 impl DensitySampler for ConstantSampler {
+    fn pointwise_inputs(&self) -> Option<Vec<&Arc<dyn DensitySampler>>> {
+        Some(Vec::new())
+    }
     fn sample_value(&self, _: &mut SamplerContext, _: [i32; 3]) -> Result<f32, SampleError> {
         Ok(self.0)
     }
@@ -276,6 +377,9 @@ impl GradientSampler {
     }
 }
 impl DensitySampler for GradientSampler {
+    fn pointwise_inputs(&self) -> Option<Vec<&Arc<dyn DensitySampler>>> {
+        Some(Vec::new())
+    }
     fn sample_value(&self, _: &mut SamplerContext, position: [i32; 3]) -> Result<f32, SampleError> {
         self.compute(position[self.axis as usize])
     }
@@ -328,6 +432,9 @@ pub struct NoiseSampler {
     pub y_scale: f64,
 }
 impl DensitySampler for NoiseSampler {
+    fn pointwise_inputs(&self) -> Option<Vec<&Arc<dyn DensitySampler>>> {
+        Some(Vec::new())
+    }
     fn sample_value(
         &self,
         _: &mut SamplerContext,
@@ -377,6 +484,18 @@ pub struct ShiftedNoiseSampler {
     pub shift_z: Arc<dyn DensitySampler>,
 }
 impl DensitySampler for ShiftedNoiseSampler {
+    fn pointwise_inputs(&self) -> Option<Vec<&Arc<dyn DensitySampler>>> {
+        Some(
+            [
+                Some(&self.shift_x),
+                self.shift_y.as_ref(),
+                Some(&self.shift_z),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        )
+    }
     fn sample_value(
         &self,
         context: &mut SamplerContext,

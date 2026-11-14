@@ -93,6 +93,7 @@ fn projectile_kind(kind: &str) -> Option<ProjectileKind> {
         "minecraft:ender_pearl" => ProjectileKind::EnderPearl,
         "minecraft:small_fireball" => ProjectileKind::SmallFireball,
         "minecraft:fireball" => ProjectileKind::LargeFireball { power: 1 },
+        "minecraft:dragon_fireball" => ProjectileKind::DragonFireball,
         "minecraft:llama_spit" => ProjectileKind::LlamaSpit,
         "minecraft:wind_charge" => ProjectileKind::WindCharge,
         "minecraft:breeze_wind_charge" => ProjectileKind::BreezeWindCharge,
@@ -107,6 +108,19 @@ fn projectile_kind(kind: &str) -> Option<ProjectileKind> {
         "minecraft:wither_skull" => ProjectileKind::WitherSkull { dangerous: false },
         _ => ProjectileKind::Thrown(horizon_client::projectiles::thrown_type(kind)?),
     })
+}
+
+/// `ShulkerBullet.tick` on a server's client: only the server steers it, so
+/// the client moves it by its motion and applies the effects of the blocks it
+/// went through (`applyEffectsFromBlocks`): a bubble column pushes it. The
+/// surface's particles are the server's to send (`sendBubbleColumnParticles`).
+fn remote_bullet_tick(p: &mut Projectile, w: &impl ProjectileWorld) {
+    p.set_old_pos_and_rot();
+    p.age += 1;
+    let from = p.position;
+    p.position = p.position.add_vector(p.velocity);
+    p.bubble_columns_along(w, from);
+    p.bubble_surfaces.clear();
 }
 
 /// A server's client ticks a projectile itself: it flies on between the
@@ -150,6 +164,7 @@ pub(super) fn remote_projectile_power(projectiles: &mut [Projectile], id: i32, p
             p.kind,
             ProjectileKind::SmallFireball
                 | ProjectileKind::LargeFireball { .. }
+                | ProjectileKind::DragonFireball
                 | ProjectileKind::WitherSkull { .. }
                 | ProjectileKind::WindCharge
                 | ProjectileKind::BreezeWindCharge
@@ -248,6 +263,22 @@ impl Game<'_> {
         }
     }
 
+    /// `DragonFireball.getTrailParticle`: dragon breath, where
+    /// `createParticleTrail` puts every hurting projectile's trail.
+    pub(super) fn dragon_breath_trails(&mut self) {
+        let trail = ParticleOptions::simple(ParticleType::DragonBreath);
+        let at: Vec<Vec3> = self
+            .creatures
+            .projectiles
+            .iter()
+            .filter(|p| p.kind == ProjectileKind::DragonFireball)
+            .map(|p| p.position)
+            .collect();
+        for p in at {
+            self.particles.add(&trail, [p.x, p.y + 0.5, p.z], [0.0; 3]);
+        }
+    }
+
     pub(super) fn throwable_bubbles(&mut self, at: Vec<([f64; 3], [f64; 3])>) {
         let bubble = ParticleOptions::simple(ParticleType::Bubble);
         for (position, speed) in at {
@@ -286,14 +317,57 @@ impl Game<'_> {
         velocity: [f64; 3],
         data: i32,
     ) -> bool {
+        self.remove_remote_projectile(id as u32);
+        self.spawn_remote_projectile_inner(id, kind, position, rotation, velocity, data)
+    }
+
+    /// Whether the client tracks `id` already: asked by `AddEntity` before it tracks the new one.
+    pub(super) fn tracks_remote_entity(&self, id: i32) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|r| r.tracked_entity(id).is_some())
+    }
+
+    /// `AddEntity`'s `spawn_remote_projectile`. Only an id the client already tracked (`replace`)
+    /// can still be in `falling` or `tnts`, so a new id skips those passes; the crystals and the
+    /// small lists are filtered every time, since the client adds to some of those itself.
+    pub(super) fn spawn_added_projectile(
+        &mut self,
+        p: &horizon_protocol::packets::play::AddEntity,
+        kind: &str,
+        rotation: (f32, f32),
+        replace: bool,
+    ) {
+        if replace {
+            self.spawn_remote_projectile(p.id, kind, p.position, rotation, p.velocity, p.data);
+        } else {
+            self.crystals.retain(|c| c.id != p.id as u32);
+            self.remove_remote_small_projectiles(p.id as u32);
+            self.spawn_remote_projectile_inner(
+                p.id, kind, p.position, rotation, p.velocity, p.data,
+            );
+        }
+    }
+
+    /// `spawn_remote_projectile` without first removing an entity under the same id: for
+    /// `AddEntity` of an id the client does not track yet, which no list holds.
+    pub(super) fn spawn_remote_projectile_inner(
+        &mut self,
+        id: i32,
+        kind: &str,
+        position: [f64; 3],
+        rotation: (f32, f32),
+        velocity: [f64; 3],
+        data: i32,
+    ) -> bool {
         let id = id as u32;
         let at = Vec3::new(position[0], position[1], position[2]);
         let velocity = Vec3::new(velocity[0], velocity[1], velocity[2]);
         let (yaw, pitch) = rotation;
-        self.remove_remote_projectile(id);
         match kind {
             "minecraft:evoker_fangs" => self.insert_fangs(id, position, yaw, 0, 0),
             "minecraft:tnt" => self.tnts.push(super::tnt::PrimedTnt {
+                used_portal: false,
                 rotation: [0.0, 0.0],
                 join: Default::default(),
                 no_gravity: false,
@@ -303,6 +377,9 @@ impl Game<'_> {
                 velocity,
                 fuse: 80,
                 on_ground: false,
+                fall_distance: 0.0,
+                stuck: Vec3::ZERO,
+                in_water: false,
                 owner: None,
                 guest: None,
                 power: 4.0,
@@ -323,6 +400,7 @@ impl Game<'_> {
                 portal: Default::default(),
                 drop_item: false,
                 fall_distance: 0.0,
+                on_ground: false,
                 stuck: Vec3::ZERO,
                 damage: Default::default(),
                 saved: None,
@@ -343,9 +421,6 @@ impl Game<'_> {
             | "minecraft:experience_bottle" => {
                 self.potions.add_remote_thrown(id, kind, at, velocity);
             }
-            "minecraft:dragon_fireball" => self
-                .dragon_fireballs
-                .push(super::dragon::DragonFireball::remote(id, at, velocity)),
             "minecraft:area_effect_cloud" => self.potions.clouds.push(RemoteCloud {
                 id,
                 at: position,
@@ -368,14 +443,8 @@ impl Game<'_> {
                     .next_int_bound(100_000)
                     .unwrap_or(0);
                 let time = super::dragon::Crystal::start_time(at, drawn, self.clock.still());
-                self.crystals.push(super::dragon::Crystal {
-                    id,
-                    position: at,
-                    show_bottom: true,
-                    time,
-                    beam: None,
-                    invulnerable: false,
-                });
+                self.crystals
+                    .push(super::dragon::Crystal::new(id, at, true, time));
             }
             _ => {
                 let Some(k) = projectile_kind(kind) else {
@@ -521,8 +590,11 @@ impl Game<'_> {
                     (_, 0, Value::Byte(flags)) => {
                         if let Some(a) = p.arrow.as_mut() {
                             a.synced_fire = flags & 1 != 0;
+                        } else {
+                            p.synced_fire = flags & 1 != 0;
                         }
                     }
+                    (_, 1, Value::Int(air_supply)) => p.air_supply = *air_supply,
                     // AbstractArrow.ID_FLAGS (critical) and IN_GROUND.
                     (ProjectileKind::Arrow { critical, .. }, 8, Value::Byte(flags)) => {
                         *critical = flags & 1 != 0;
@@ -657,8 +729,9 @@ impl Game<'_> {
         let mut falling = std::mem::take(&mut self.falling);
         for f in &mut falling {
             if let Ok(FallStep::Landed(_)) = self.fall_step(f, false, &[]) {
-                // Block.updateEntityMovementAfterFallOn, then the air drag.
-                f.velocity = Vec3::new(f.velocity.x * 0.98, 0.0, f.velocity.z * 0.98);
+                // Block.updateEntityMovementAfterFallOn, then getAirDrag 0.98F.
+                let drag = f64::from(0.98_f32);
+                f.velocity = Vec3::new(f.velocity.x * drag, 0.0, f.velocity.z * drag);
             }
         }
         self.falling = falling;
@@ -693,12 +766,7 @@ impl Game<'_> {
                             );
                         }
                     }
-                    // ShulkerBullet.tick: only the server steers it.
-                    ProjectileKind::ShulkerBullet { .. } => {
-                        p.set_old_pos_and_rot();
-                        p.age += 1;
-                        p.position = p.position.add_vector(p.velocity);
-                    }
+                    ProjectileKind::ShulkerBullet { .. } => remote_bullet_tick(p, &world),
                     _ => remote_projectile_tick(p, &world),
                 }
             }
@@ -721,6 +789,7 @@ impl Game<'_> {
             .map(|p| p.position)
             .collect();
         self.smoke_trails(trails);
+        self.dragon_breath_trails();
         self.shulker_bullet_trails();
         self.throwable_bubbles(bubbles);
         // FireworkRocketEntity.tick: a rocket attached to another entity
@@ -759,37 +828,6 @@ impl Game<'_> {
         self.tick_remote_hooks();
         self.end.step_remote_eyes();
         self.tick_remote_clouds();
-        // The dragon's fireballs fly on between the tracker's updates, with
-        // their dragon_breath trail (`AbstractHurtingProjectile.getTrailParticle`).
-        let trail = ParticleOptions::simple(ParticleType::DragonBreath);
-        for b in &mut self.dragon_fireballs {
-            let at = b.position;
-            let water = self
-                .res
-                .facts()
-                .get(self.world.block(
-                    at.x.floor() as i32,
-                    at.y.floor() as i32,
-                    at.z.floor() as i32,
-                ))
-                .fluid
-                == horizon_client::blocks::Fluid::Water;
-            if water {
-                // applyInertia, before the move: four bubbles on the motion
-                // the fireball already has.
-                let (at, speed) = horizon_client::projectiles::water_bubble_at(
-                    [at.x, at.y, at.z],
-                    [b.velocity.x, b.velocity.y, b.velocity.z],
-                );
-                let bubble = ParticleOptions::simple(ParticleType::Bubble);
-                for _ in 0..4 {
-                    self.particles.add(&bubble, at, speed);
-                }
-            }
-            b.remote_step(water);
-            let p = b.position;
-            self.particles.add(&trail, [p.x, p.y + 0.5, p.z], [0.0; 3]);
-        }
     }
 
     /// `AreaEffectCloud.clientTick` for each cloud a server tracks.
@@ -800,16 +838,19 @@ impl Game<'_> {
     }
 
     pub(super) fn remove_remote_projectile(&mut self, id: u32) {
-        self.fangs.list.retain(|f| f.id != id);
         self.tnts.retain(|t| t.id != id);
         self.falling.retain(|f| f.id != id);
+        self.crystals.retain(|c| c.id != id);
+        self.remove_remote_small_projectiles(id);
+    }
+
+    pub(super) fn remove_remote_small_projectiles(&mut self, id: u32) {
+        self.fangs.list.retain(|f| f.id != id);
         self.creatures.projectiles.retain(|p| p.id != id);
         self.tridents.retain(|t| t.id != id);
         self.rockets.retain(|r| r.id != id);
-        self.crystals.retain(|c| c.id != id);
         self.potions.remove_remote_thrown(id);
         self.potions.clouds.retain(|c| c.id != id);
-        self.dragon_fireballs.retain(|b| b.id != id);
         self.end.remove_remote_eye(id);
         self.remove_remote_hook(id);
     }
@@ -827,7 +868,6 @@ impl Game<'_> {
         self.dragon = None;
         self.potions.clear_thrown();
         self.potions.clouds.clear();
-        self.dragon_fireballs.clear();
         self.end.clear_remote_eyes();
         self.clear_remote_hooks();
     }
@@ -899,6 +939,47 @@ mod tests {
         fn targets(&self) -> &[(Who, Aabb)] {
             &[]
         }
+    }
+
+    /// An upward bubble column at (0, 100, 0) with water over it.
+    struct Column;
+    impl ProjectileWorld for Column {
+        fn clip(&self, _: Vec3, _: Vec3) -> Option<(Vec3, [i32; 3], [i32; 3])> {
+            None
+        }
+        fn in_water(&self, _: Aabb) -> bool {
+            false
+        }
+        fn targets(&self) -> &[(Who, Aabb)] {
+            &[]
+        }
+        fn bubble_column(&self, p: [i32; 3]) -> Option<(bool, bool)> {
+            (p == [0, 100, 0]).then_some((false, false))
+        }
+    }
+
+    /// `ShulkerBullet.tick` applies the blocks' effects on the client too
+    /// (`applyEffectsFromBlocks` after its move), so a bullet in a bubble
+    /// column gets `Projectile.onInsideBubbleColumn`'s 0.06 up and its fall
+    /// reset there, between the server's updates.
+    #[test]
+    fn a_client_shulker_bullet_in_a_bubble_column_is_pushed_up() {
+        let mut p = Projectile::new(
+            ProjectileKind::ShulkerBullet {
+                target: Some(Who::Player),
+                dir: None,
+                steps: 0,
+                delta: [0.0; 3],
+                seed: 0,
+            },
+            Vec3::new(0.5, 100.1, 0.5),
+            None,
+        );
+        p.fall_distance = 5.0;
+        remote_bullet_tick(&mut p, &Column);
+        assert_eq!(p.velocity, Vec3::new(0.0, 0.06, 0.0));
+        assert_eq!(p.fall_distance, 0.0);
+        assert!(p.bubble_surfaces.is_empty());
     }
 
     /// A thrown item, as a server's client tracks it: the spawn position and

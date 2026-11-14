@@ -21,9 +21,17 @@ use horizon_core::{
     random::RandomSource,
 };
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashMap, fs, path::Path};
+use std::{
+    borrow::{Borrow, Cow},
+    collections::HashMap,
+    fs,
+    path::Path,
+};
 
 pub use crate::biome::{SpawnCost, parse_costs, parse_entries};
+
+mod parallel;
+pub use parallel::{Lane, Member, Pack, commit};
 
 thread_local! {
     static ATTEMPT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
@@ -35,7 +43,23 @@ pub fn attempt_counters(publish: bool) {
     }
     let counts = ATTEMPT_COUNTS.with(|c| c.replace([0; 2]));
     if publish {
-        crate::spans::counters(&[("sa_attempts", counts[0]), ("sa_spawns", counts[1])]);
+        horizon_perf_format::counter("natural_spawning.attempts", &[]).add(counts[0]);
+        horizon_perf_format::counter("natural_spawning.spawns", &[]).add(counts[1]);
+    }
+}
+/// Takes the attempts this thread counted (a lane's, to hand to the pass's thread) and drops
+/// its spawns: the pass counts those when it commits them.
+pub fn take_attempts() -> u64 {
+    ATTEMPT_COUNTS.with(|c| c.replace([0; 2]))[0]
+}
+/// Adds the attempts a lane counted to this thread's.
+pub fn add_attempts(n: u64) {
+    if crate::spans::enabled() {
+        ATTEMPT_COUNTS.with(|c| {
+            let mut counts = c.get();
+            counts[0] += n;
+            c.set(counts);
+        });
     }
 }
 fn attempt_count(index: usize) {
@@ -364,6 +388,13 @@ pub trait NaturalLevel: SpawnLevel {
     /// Where the players `getNearestPlayer(x, y, z, -1, false)` measures to
     /// are: every one that is not a spectator.
     fn nearest_player_positions(&self) -> &[[f64; 3]];
+    /// Those of [`Self::nearest_player_positions`] within `extent` of
+    /// `(x, z)` on both axes, and possibly others: the caller tests each. A
+    /// level with many players indexes them ([`PlayerSquares`]).
+    fn player_positions_near(&self, x: f64, z: f64, extent: f64, out: &mut Vec<[f64; 3]>) {
+        let _ = (x, z, extent);
+        out.extend_from_slice(self.nearest_player_positions());
+    }
     /// The world spawn point, when it is in this dimension.
     fn respawn(&self) -> Option<[i32; 3]>;
     /// `ServerLevel.canSpawnEntitiesInChunk`.
@@ -578,7 +609,7 @@ pub fn spawn_aabb(s: Species, x: f64, y: f64, z: f64, width: f32, height: f32) -
 /// `checkSpawnObstruction` of a freshly created mob with the given box, with
 /// the mobs already `spawned` in the way; None in a generation region, which
 /// has no entities (`WorldGenRegion.getEntities`).
-pub(crate) fn spawn_obstruction<L: NaturalLevel>(
+pub fn spawn_obstruction<L: NaturalLevel>(
     s: Species,
     l: &L,
     bounds: Aabb,
@@ -756,7 +787,10 @@ fn vanilla_mobs_at<L: NaturalLevel>(
 }
 
 /// `WeightedList.getRandom`.
-pub fn weighted_pick(list: &[SpawnEntry], random: &mut impl RandomSource) -> Option<SpawnEntry> {
+pub fn weighted_pick<'a>(
+    list: &'a [SpawnEntry],
+    random: &mut impl RandomSource,
+) -> Option<&'a SpawnEntry> {
     let total: i64 = list.iter().map(|e| i64::from(e.weight)).sum();
     if total <= 0 {
         return None;
@@ -765,7 +799,7 @@ pub fn weighted_pick(list: &[SpawnEntry], random: &mut impl RandomSource) -> Opt
     for e in list {
         selection -= i64::from(e.weight);
         if selection < 0 {
-            return Some(e.clone());
+            return Some(e);
         }
     }
     None
@@ -861,7 +895,24 @@ pub struct SpawnState {
     near_list: Vec<usize>,
     /// The mobs counted near each player (`playerMobCounts`), by category.
     player_counts: Vec<[i32; 8]>,
-    last_checked: Option<([i32; 3], String, f64)>,
+    /// Scratch for [`Nearest`] and `players_near`, kept to be reused.
+    nearby: Vec<[f64; 3]>,
+    tracked: Vec<usize>,
+    /// The position and charge of the last `can_spawn`; `after_spawn` always
+    /// follows it for the same type and position.
+    last_checked: Option<([i32; 3], f64)>,
+}
+/// The allocations of a [`SpawnState`], handed on from one pass to the next
+/// (`SpawnState::new_in`, `SpawnState::into_parts`). Only looked up by key or
+/// indexed, never iterated, so what a pass left in them is not observable.
+#[derive(Debug, Default)]
+pub struct SpawnBuffers {
+    charges: Vec<([i32; 3], f64)>,
+    players_near: FxHashMap<(i32, i32), (u32, u32)>,
+    near_list: Vec<usize>,
+    player_counts: Vec<[i32; 8]>,
+    nearby: Vec<[f64; 3]>,
+    tracked: Vec<usize>,
 }
 impl SpawnState {
     /// `getSpawnableChunkCount` and `getMobCategoryCounts` (by
@@ -872,25 +923,60 @@ impl SpawnState {
     /// `NaturalSpawner.createState`: every non-persistent entity of a
     /// spawning category in a loaded chunk adds its biome's spawn charge, its
     /// category count and (for mobs) the local caps of the players near it.
-    pub fn new<L: NaturalLevel>(
+    pub fn new<'a, L: NaturalLevel, I>(
         l: &L,
         spawnable_chunks: i32,
         players: Vec<SpawnPlayer>,
-        entities: &[Counted],
+        entities: I,
         chunk_loaded: impl Fn(i32, i32) -> bool,
-    ) -> Self {
+    ) -> Self
+    where
+        I: IntoIterator,
+        I::Item: std::borrow::Borrow<Counted<'a>>,
+    {
+        let buffers = SpawnBuffers::default();
+        Self::new_in(
+            l,
+            spawnable_chunks,
+            players,
+            buffers,
+            entities,
+            chunk_loaded,
+        )
+    }
+    /// [`SpawnState::new`] over the allocations of an earlier pass.
+    pub fn new_in<'a, L: NaturalLevel, I>(
+        l: &L,
+        spawnable_chunks: i32,
+        players: Vec<SpawnPlayer>,
+        mut buffers: SpawnBuffers,
+        entities: I,
+        chunk_loaded: impl Fn(i32, i32) -> bool,
+    ) -> Self
+    where
+        I: IntoIterator,
+        I::Item: std::borrow::Borrow<Counted<'a>>,
+    {
+        buffers.charges.clear();
+        buffers.players_near.clear();
+        buffers.near_list.clear();
+        buffers.player_counts.clear();
+        buffers.player_counts.resize(players.len(), [0; 8]);
         let mut state = Self {
             spawnable_chunks,
             counts: [0; 8],
-            charges: Vec::new(),
-            player_counts: vec![[0; 8]; players.len()],
+            charges: buffers.charges,
+            player_counts: buffers.player_counts,
             cells: PlayerCells::new(players.iter().map(|p| (p.position[0], p.position[2]))),
             players,
-            players_near: FxHashMap::default(),
-            near_list: Vec::new(),
+            players_near: buffers.players_near,
+            near_list: buffers.near_list,
+            nearby: buffers.nearby,
+            tracked: buffers.tracked,
             last_checked: None,
         };
         for e in entities {
+            let e = e.borrow();
             if e.is_mob && e.persistent || e.category == Category::Misc {
                 continue;
             }
@@ -908,6 +994,18 @@ impl SpawnState {
         }
         state
     }
+    /// Reclaims the player buffer and the allocations for the next pass.
+    pub fn into_parts(self) -> (Vec<SpawnPlayer>, SpawnBuffers) {
+        let buffers = SpawnBuffers {
+            charges: self.charges,
+            players_near: self.players_near,
+            near_list: self.near_list,
+            player_counts: self.player_counts,
+            nearby: self.nearby,
+            tracked: self.tracked,
+        };
+        (self.players, buffers)
+    }
     fn add_charge(&mut self, pos: [i32; 3], charge: f64) {
         if charge != 0.0 {
             self.charges.push((pos, charge));
@@ -918,15 +1016,15 @@ impl SpawnState {
     /// non-spectators within 128 blocks of the chunk's centre.
     fn players_near(&mut self, cx: i32, cz: i32) -> std::ops::Range<usize> {
         let (list, players, cells) = (&mut self.near_list, &self.players, &self.cells);
+        let tracked = &mut self.tracked;
         let (start, len) = *self.players_near.entry((cx, cz)).or_insert_with(|| {
             let start = list.len() as u32;
             // Every player within 128 blocks of the chunk's centre stands in
             // a chunk within 8 of it: those 8 chunks hold every answer.
-            let mut tracked = Vec::new();
-            cells.within_8(cx, cz, &mut tracked);
+            cells.within_8(cx, cz, tracked);
             if !tracked.is_empty() {
                 let (x, z) = (f64::from(cx * 16 + 8), f64::from(cz * 16 + 8));
-                list.extend(tracked.into_iter().filter(|&i| {
+                list.extend(tracked.iter().copied().filter(|&i| {
                     let p = &players[i];
                     let (dx, dz) = (x - p.position[0], z - p.position[2]);
                     !p.spectator && dx * dx + dz * dz < 16384.0
@@ -975,11 +1073,11 @@ impl SpawnState {
     fn can_spawn<L: NaturalLevel>(&mut self, l: &L, entity: &str, pos: [i32; 3]) -> bool {
         match l.spawn_cost(entity, pos[0], pos[1], pos[2]) {
             None => {
-                self.last_checked = Some((pos, entity.to_owned(), 0.0));
+                self.last_checked = Some((pos, 0.0));
                 true
             }
             Some(cost) => {
-                self.last_checked = Some((pos, entity.to_owned(), cost.charge));
+                self.last_checked = Some((pos, cost.charge));
                 self.energy_change(pos, cost.charge) <= cost.energy_budget
             }
         }
@@ -1014,7 +1112,7 @@ impl SpawnState {
         pos: [i32; 3],
     ) {
         let charge = match &self.last_checked {
-            Some((p, t, c)) if *p == pos && t == entity => *c,
+            Some((p, c)) if *p == pos => *c,
             _ => l
                 .spawn_cost(entity, pos[0], pos[1], pos[2])
                 .map_or(0.0, |c| c.charge),
@@ -1027,7 +1125,7 @@ impl SpawnState {
 
 /// What a spawn pass did, in vanilla's order (for differential tests).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Event {
+pub enum Event<'a> {
     /// `getFilteredSpawningCategories`.
     Categories(Vec<Category>),
     /// `canSpawnForCategoryLocal` for the chunk.
@@ -1038,9 +1136,9 @@ pub enum Event {
     Try(i32, i32),
     /// The type passed `isValidSpawnPostitionForType`; the spawn state's
     /// potential test answered.
-    Test(String, [i32; 3], bool),
+    Test(&'a str, [i32; 3], bool),
     /// A mob spawned.
-    Spawn(String, [f64; 3], f32),
+    Spawn(&'a str, [f64; 3], f32),
 }
 /// A mob the spawner is about to add: the level runs `finalizeSpawn` and
 /// adds it, returning its finalized box and whether a tropical fish schools.
@@ -1070,7 +1168,7 @@ pub fn spawn_for_chunk<L: NaturalLevel, R: RandomSource>(
     categories: &[Category],
     chunk: (i32, i32),
     spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     for &category in categories {
         let local = state.can_spawn_local(category, chunk.0, chunk.1);
@@ -1089,11 +1187,11 @@ pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource>(
     category: Category,
     chunk: (i32, i32),
     spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     let x = chunk.0 * 16 + random.next_int_bound(16).unwrap_or(0);
     let z = chunk.1 * 16 + random.next_int_bound(16).unwrap_or(0);
-    let top = l.heightmap(Heightmap::WorldSurface, x, z) + 1;
+    let top = l.heightmap(Heightmap::WorldSurface, x, z);
     let min = l.min_y();
     let y = min + random.next_int_bound(top - min + 1).unwrap_or(0);
     trace(Event::Start(category, [x, y, z]));
@@ -1112,7 +1210,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     chunk: (i32, i32),
     start: [i32; 3],
     spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     let [x0, y, z0] = start;
     if l.mob_data().state(l.state(x0, y, z0)).flags & super::data::REDSTONE_CONDUCTOR != 0 {
@@ -1120,11 +1218,11 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     }
     let mut spawned: Vec<Aabb> = Vec::new();
     let mut cluster = 0u32;
-    let mut nearest = Nearest::new(start);
-    for _ in 0..3 {
+    let mut nearest = Nearest::new(start, std::mem::take(&mut state.nearby));
+    'groups: for _ in 0..3 {
         let (mut x, mut z) = (x0, z0);
         // The group's entry, its type and where it was picked.
-        let mut current: Option<(SpawnEntry, Option<MobType>, [i32; 3])> = None;
+        let mut current: Option<(Cow<'_, SpawnEntry>, Option<MobType>, [i32; 3])> = None;
         let mut group_index = 0u32;
         let mut max = (random.next_float() * 4.0).ceil() as i32;
         let mut ll = 0;
@@ -1148,7 +1246,11 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 {
                     None
                 } else {
-                    weighted_pick(&mobs_at(l, category, x, y, z), random)
+                    // Borrowed from the level unless a mod's hook changed the list.
+                    match mobs_at(l, category, x, y, z) {
+                        Cow::Borrowed(list) => weighted_pick(list, random).map(Cow::Borrowed),
+                        Cow::Owned(list) => weighted_pick(&list, random).cloned().map(Cow::Owned),
+                    }
                 };
                 let Some(entry) = list else {
                     break;
@@ -1174,7 +1276,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 continue;
             };
             let passed = state.can_spawn(l, &entry.entity, [x, y, z]);
-            trace(Event::Test(entry.entity.clone(), [x, y, z], passed));
+            trace(Event::Test(&entry.entity, [x, y, z], passed));
             if !passed {
                 continue;
             }
@@ -1206,13 +1308,9 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             spawned.push(result.bounds);
             cluster += 1;
             state.after_spawn(l, &entry.entity, type_category, [x, y, z]);
-            trace(Event::Spawn(
-                entry.entity.clone(),
-                [xx, f64::from(y), zz],
-                yaw,
-            ));
+            trace(Event::Spawn(&entry.entity, [xx, f64::from(y), zz], yaw));
             if cluster >= max_cluster_size(species) {
-                return;
+                break 'groups;
             }
             // TropicalFish.isMaxGroupSizeReached.
             if species == Species::TropicalFish && !result.school {
@@ -1220,6 +1318,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             }
         }
     }
+    state.nearby = nearest.nearby;
 }
 /// `getNearestPlayer(x, y, z, -1, false)`'s squared distance for the
 /// attempts of one start. The spawn checks only compare it with 24² and the
@@ -1230,15 +1329,19 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
 /// `MARGIN` from the start measures every player.
 struct Nearest {
     /// The players that can be within 128 blocks, once an attempt asked.
-    nearby: Option<Vec<[f64; 3]>>,
+    nearby: Vec<[f64; 3]>,
+    /// Whether `nearby` holds the players for this start.
+    ready: bool,
     start: (f64, f64),
 }
 impl Nearest {
     const REACH: f64 = 128.0;
     const MARGIN: f64 = 64.0;
-    fn new(start: [i32; 3]) -> Self {
+    /// Over `buffer`'s allocation (the contents are dropped).
+    fn new(start: [i32; 3], buffer: Vec<[f64; 3]>) -> Self {
         Self {
-            nearby: None,
+            nearby: buffer,
+            ready: false,
             start: (f64::from(start[0]) + 0.5, f64::from(start[2]) + 0.5),
         }
     }
@@ -1253,18 +1356,73 @@ impl Nearest {
             return all.iter().map(distance).reduce(f64::min);
         }
         // The others are farther than REACH, across, from every point within
-        // MARGIN of the start.
-        let nearby = self.nearby.get_or_insert_with(|| {
-            all.iter()
-                .filter(|p| {
-                    let dx = ((p[0] - sx).abs() - Self::MARGIN).max(0.0);
-                    let dz = ((p[2] - sz).abs() - Self::MARGIN).max(0.0);
-                    dx * dx + dz * dz <= Self::REACH * Self::REACH
-                })
-                .copied()
-                .collect()
-        });
-        Some(nearby.iter().map(distance).fold(f64::INFINITY, f64::min))
+        // MARGIN of the start. Every one of them is within MARGIN + REACH of
+        // the start on both axes: a level with many players hands over only
+        // those (the nearest is the same in any order).
+        if !self.ready {
+            self.ready = true;
+            self.nearby.clear();
+            l.player_positions_near(sx, sz, Self::MARGIN + Self::REACH, &mut self.nearby);
+            self.nearby.retain(|p| {
+                let dx = ((p[0] - sx).abs() - Self::MARGIN).max(0.0);
+                let dz = ((p[2] - sz).abs() - Self::MARGIN).max(0.0);
+                dx * dx + dz * dz <= Self::REACH * Self::REACH
+            });
+        }
+        Some(
+            self.nearby
+                .iter()
+                .map(distance)
+                .fold(f64::INFINITY, f64::min),
+        )
+    }
+}
+/// Player positions by the 256-block square they stand in, for
+/// [`NaturalLevel::player_positions_near`]: every spawn start asks for the
+/// players near it, and a server's players are spread over the map.
+pub struct PlayerSquares {
+    squares: FxHashMap<(i64, i64), Vec<[f64; 3]>>,
+    /// Positions too far out (or not numbers) for a square: always handed over.
+    unsquared: Vec<[f64; 3]>,
+}
+impl PlayerSquares {
+    const SIDE: f64 = 256.0;
+    /// Further out than any world border.
+    const FAR: f64 = 1.0e9;
+    pub fn new(positions: &[[f64; 3]]) -> Self {
+        let mut squares = FxHashMap::<(i64, i64), Vec<[f64; 3]>>::default();
+        let mut unsquared = Vec::new();
+        for &p in positions {
+            if p[0].abs() < Self::FAR && p[2].abs() < Self::FAR {
+                squares.entry(Self::square(p[0], p[2])).or_default().push(p);
+            } else {
+                unsquared.push(p);
+            }
+        }
+        Self { squares, unsquared }
+    }
+    fn square(x: f64, z: f64) -> (i64, i64) {
+        (
+            (x / Self::SIDE).floor() as i64,
+            (z / Self::SIDE).floor() as i64,
+        )
+    }
+    /// Every position within `extent` (at most a square's side) of `(x, z)`
+    /// on both axes, and some others.
+    pub fn near(&self, x: f64, z: f64, extent: f64, out: &mut Vec<[f64; 3]>) {
+        out.extend_from_slice(&self.unsquared);
+        if !(x.abs() < Self::FAR && z.abs() < Self::FAR && extent <= Self::SIDE) {
+            out.extend(self.squares.values().flatten().copied());
+            return;
+        }
+        let (sx, sz) = Self::square(x, z);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(square) = self.squares.get(&(sx + dx, sz + dz)) {
+                    out.extend_from_slice(square);
+                }
+            }
+        }
     }
 }
 /// `isRightDistanceToPlayerAndSpawnPoint`.
@@ -1380,7 +1538,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
         let Some(entry) = weighted_pick(&mobs, random) else {
             continue;
         };
-        let count = sample_count(&entry, random);
+        let count = sample_count(entry, random);
         let mut group_index = 0u32;
         let mut x = xo + random.next_int_bound(16).unwrap_or(0);
         let mut z = zo + random.next_int_bound(16).unwrap_or(0);
@@ -1483,6 +1641,26 @@ fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i
 mod tests {
     use super::*;
 
+    /// Attempts and spawns counted while spans are on reach the perf counters once published, and a reset publishes nothing.
+    #[test]
+    fn attempt_counters_publish_what_the_tick_counted() {
+        let attempts = horizon_perf_format::counter("natural_spawning.attempts", &[]);
+        let spawns = horizon_perf_format::counter("natural_spawning.spawns", &[]);
+        let before = (attempts.get(), spawns.get());
+        crate::spans::enable(true);
+        attempt_counters(false);
+        for _ in 0..7 {
+            attempt_count(0);
+        }
+        for _ in 0..3 {
+            attempt_count(1);
+        }
+        attempt_counters(true);
+        attempt_counters(true);
+        crate::spans::enable(false);
+        assert_eq!((attempts.get() - before.0, spawns.get() - before.1), (7, 3));
+    }
+
     /// The grid finds the players whose chunk is within 8 of a chunk on both
     /// axes, in their order, as a look at every player does.
     #[test]
@@ -1524,6 +1702,58 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(found, scan, "chunk ({cx}, {cz})");
+            }
+        }
+    }
+
+    /// The squares hand back every player within the extent of a point on
+    /// both axes, also for points on square edges and players past the
+    /// border; a nearest-player search over them finds what a full one does.
+    #[test]
+    fn player_squares_keep_every_near_player() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |m: f64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f64 / 1_000_000.0 * 2.0 * m - m
+        };
+        let mut players: Vec<[f64; 3]> = (0..200)
+            .map(|_| [next(3_000.0), next(100.0), next(3_000.0)])
+            .collect();
+        players.extend([
+            [0.0, 64.0, 0.0],
+            [256.0, 64.0, -256.0],
+            [-1.0e-9, 64.0, 255.999],
+            [3.0e9, 64.0, 0.0],
+        ]);
+        let squares = PlayerSquares::new(&players);
+        let mut near = Vec::new();
+        let points = players.iter().map(|p| (p[0] + 100.0, p[2] - 200.0)).chain([
+            (0.0, 0.0),
+            (255.5, -0.5),
+            (2.0e9, 0.0),
+        ]);
+        for (x, z) in points {
+            for extent in [24.0, 160.0, 256.0, 300.0] {
+                near.clear();
+                squares.near(x, z, extent, &mut near);
+                for p in &players {
+                    if (p[0] - x).abs() <= extent && (p[2] - z).abs() <= extent {
+                        assert!(near.contains(p), "{p:?} near ({x}, {z}) within {extent}");
+                    }
+                }
+                let nearest = |list: &[[f64; 3]]| {
+                    list.iter()
+                        .map(|p| (p[0] - x).powi(2) + (p[2] - z).powi(2))
+                        .filter(|d| *d <= extent * extent)
+                        .fold(f64::INFINITY, f64::min)
+                };
+                assert_eq!(
+                    nearest(&near),
+                    nearest(&players),
+                    "({x}, {z}) within {extent}"
+                );
             }
         }
     }

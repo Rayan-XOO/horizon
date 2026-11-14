@@ -30,6 +30,12 @@ pub struct Census {
     pub sounds: usize,
     pub classes: usize,
     pub mixin_configs: usize,
+    /// Files under `data/<namespace>/`, of any kind.
+    #[serde(default)]
+    pub data_files: usize,
+    /// A `pack.mcmeta` at the top: the jar is also a data or resource pack.
+    #[serde(default)]
+    pub pack_mcmeta: bool,
 }
 
 const NOT_MODS: [&str; 5] = ["minecraft", "neoforge", "forge", "fabricloader", "java"];
@@ -115,10 +121,13 @@ pub fn metadata(tomls: &[String]) -> Result<JarInfo, String> {
             }
         }
     }
-    tomls
+    let lines: Vec<JarInfo> = tomls.iter().map(|t| mods_toml_lines(t)).collect();
+    // A lone template still names its (placeholder) mod id: last resort.
+    lines
         .iter()
-        .map(|t| mods_toml_lines(t))
-        .find(real)
+        .position(real)
+        .or_else(|| lines.iter().position(|i| !i.mod_id.is_empty()))
+        .map(|i| lines.into_iter().nth(i).unwrap_or_default())
         .ok_or_else(|| first_error.unwrap_or_else(|| "mods.toml: no [[mods]] modId".into()))
 }
 
@@ -273,6 +282,10 @@ pub fn census(names: &[String]) -> Census {
         } else if n.ends_with(".mixins.json") || (parts.len() == 1 && n.contains("mixins")) {
             c.mixin_configs += 1;
         }
+        c.pack_mcmeta |= n == "pack.mcmeta";
+        if parts.len() > 2 && parts[0] == "data" && !n.ends_with('/') {
+            c.data_files += 1;
+        }
         // assets/<ns>/<kind>/... and data/<ns>/<kind>/...
         let (Some(root), Some(kind)) = (parts.first(), parts.get(2)) else {
             continue;
@@ -373,6 +386,22 @@ mandatory = true
         assert_eq!(info.depends, ["geckolib", "curios"]);
     }
 
+    /// A jar whose only metadata file is an unfilled template (placeholder mod id and
+    /// `[[dependencies.${id}]]`) is read line by line, not refused with the TOML error.
+    #[test]
+    fn lone_placeholder_template_is_not_a_toml_error() {
+        let t = "[[mods]]
+modId = \"${mod_id}\"
+
+[[dependencies.${mod_id}]]
+modId = \"neoforge\"
+";
+        assert!(mods_toml(t).is_err());
+        let info = metadata(&[t.to_owned()]).unwrap();
+        assert_eq!(info.mod_id, "${mod_id}");
+        assert!(metadata(&[String::new()]).is_err());
+    }
+
     /// Drip Sounds' Forge jar carries an unfilled NeoForge template beside its
     /// `mods.toml`; a file no parser reads still gives its id line by line.
     #[test]
@@ -398,7 +427,9 @@ mandatory = true
             ),
             ("ruby", "Ruby", "MIT")
         );
-        assert!(metadata(&[template.to_owned()]).is_err());
+        // A lone template still names its placeholder id (see
+        // `lone_placeholder_template_is_not_a_toml_error`).
+        assert_eq!(metadata(&[template.to_owned()]).unwrap().mod_id, "${id}");
     }
 
     #[test]

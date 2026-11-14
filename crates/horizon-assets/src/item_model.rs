@@ -917,6 +917,46 @@ impl NumericProperty {
 /// (`None` removes a prototype component).
 pub type Components = BTreeMap<String, Value>;
 
+/// A stack's components read in place: its patch first, then its item's defaults. Reading one copies
+/// nothing, where [`ItemModels::components`] clones the defaults for a stack with a patch (an enchanted
+/// sword's are a few dozen JSON values, on every draw of it).
+#[derive(Clone, Copy)]
+pub struct ComponentsView<'a> {
+    prototype: &'a Components,
+    patch: &'a BTreeMap<String, Option<Value>>,
+}
+
+impl<'a> ComponentsView<'a> {
+    pub fn get(&self, key: &str) -> Option<&'a Value> {
+        match self.patch.get(key) {
+            Some(patched) => patched.as_ref(),
+            None => self.prototype.get(key),
+        }
+    }
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+    /// Components with no patch: `components` as they are.
+    pub fn of(components: &'a Components) -> Self {
+        static NO_PATCH: BTreeMap<String, Option<Value>> = BTreeMap::new();
+        Self {
+            prototype: components,
+            patch: &NO_PATCH,
+        }
+    }
+    /// The merged map, for what needs one whole.
+    pub fn to_map(&self) -> Components {
+        let mut out = self.prototype.clone();
+        for (key, value) in self.patch {
+            match value {
+                Some(v) => out.insert(key.clone(), v.clone()),
+                None => out.remove(key),
+            };
+        }
+        out
+    }
+}
+
 /// An item stack as the resolver reads it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StackView {
@@ -1087,14 +1127,15 @@ impl ItemModels {
         if stack.patch.is_empty() {
             return std::borrow::Cow::Borrowed(prototype);
         }
-        let mut out = prototype.clone();
-        for (key, value) in &stack.patch {
-            match value {
-                Some(v) => out.insert(key.clone(), v.clone()),
-                None => out.remove(key),
-            };
+        std::borrow::Cow::Owned(self.components_view(stack).to_map())
+    }
+    /// The stack's components, read in place (see [`ComponentsView`]).
+    pub fn components_view<'a>(&'a self, stack: &'a StackView) -> ComponentsView<'a> {
+        static NONE: Components = BTreeMap::new();
+        ComponentsView {
+            prototype: self.prototypes.get(&stack.item).unwrap_or(&NONE),
+            patch: &stack.patch,
         }
-        std::borrow::Cow::Owned(out)
     }
     /// `ItemModelResolver.updateForTopItem`.
     pub fn resolve(&self, stack: &StackView, ctx: &Context, env: &dyn ItemEnv) -> ResolvedItem {
@@ -1112,7 +1153,7 @@ impl ItemModels {
         ctx: &Context,
         env: &dyn ItemEnv,
     ) {
-        let components = self.components(stack);
+        let components = self.components_view(stack);
         let Some(Value::String(model_id)) = components.get("minecraft:item_model") else {
             return;
         };
@@ -1122,7 +1163,7 @@ impl ItemModels {
         let mut state = Resolve {
             models: self,
             stack,
-            components: &components,
+            components,
             ctx,
             env,
         };
@@ -1140,7 +1181,7 @@ impl ItemModels {
         self.properties(stack).2
     }
     fn properties(&self, stack: &StackView) -> (bool, bool, f32) {
-        match self.components(stack).get("minecraft:item_model") {
+        match self.components_view(stack).get("minecraft:item_model") {
             Some(Value::String(id)) => identifier(id)
                 .ok()
                 .and_then(|id| self.definitions.get(&id))
@@ -1159,7 +1200,7 @@ impl ItemModels {
 struct Resolve<'a> {
     models: &'a ItemModels,
     stack: &'a StackView,
-    components: &'a Components,
+    components: ComponentsView<'a>,
     ctx: &'a Context<'a>,
     env: &'a dyn ItemEnv,
 }
@@ -1455,9 +1496,9 @@ impl Resolve<'_> {
     fn numeric(&self, property: &NumericProperty) -> f32 {
         let owner = self.ctx.owner;
         match property {
-            NumericProperty::BundleFullness => {
-                self.env.bundle_fullness(self.stack, self.components)
-            }
+            NumericProperty::BundleFullness => self
+                .env
+                .bundle_fullness(self.stack, &self.components.to_map()),
             NumericProperty::Compass {
                 wobble,
                 target,
@@ -1723,14 +1764,13 @@ fn stack_from_template(template: &Value) -> Option<StackView> {
 
 /// `RangeSelectItemModel.lastIndexLessOrEqual`.
 fn last_index_less_or_equal(entries: &[(f32, ItemModelNode)], needle: f32) -> Option<usize> {
-    let haystack: Vec<f32> = entries.iter().map(|e| e.0).collect();
-    let found = if haystack.len() < 16 {
-        haystack
+    let found = if entries.len() < 16 {
+        entries
             .iter()
-            .position(|h| *h > needle)
-            .map_or(haystack.len() as i64 - 1, |i| i as i64 - 1)
+            .position(|e| e.0 > needle)
+            .map_or(entries.len() as i64 - 1, |i| i as i64 - 1)
     } else {
-        match binary_search(&haystack, needle) {
+        match binary_search(entries, needle) {
             Ok(index) => index as i64,
             Err(insertion) => insertion as i64 - 1,
         }
@@ -1739,8 +1779,8 @@ fn last_index_less_or_equal(entries: &[(f32, ItemModelNode)], needle: f32) -> Op
 }
 /// `Arrays.binarySearch(float[], float)`, including its handling of equal
 /// values (-0.0 below 0.0, NaN above everything).
-fn binary_search(a: &[f32], key: f32) -> std::result::Result<usize, usize> {
-    let (mut low, mut high) = (0i64, a.len() as i64 - 1);
+fn binary_search(entries: &[(f32, ItemModelNode)], key: f32) -> std::result::Result<usize, usize> {
+    let (mut low, mut high) = (0i64, entries.len() as i64 - 1);
     let bits = |v: f32| -> i32 {
         if v.is_nan() {
             0x7fc0_0000
@@ -1750,7 +1790,7 @@ fn binary_search(a: &[f32], key: f32) -> std::result::Result<usize, usize> {
     };
     while low <= high {
         let mid = (low + high) >> 1;
-        let value = a[mid as usize];
+        let value = entries[mid as usize].0;
         if value < key {
             low = mid + 1;
         } else if value > key {

@@ -4,6 +4,7 @@
 //! (`data/minecraft/...`) and the registries report.
 use crate::chunk::LevelShapes;
 use horizon_protocol::{
+    entity_data,
     packets::configuration::{RegistryData, RegistryEntry, RegistryTags, TagEntry, UpdateTags},
     registry::{Builtin, Dynamic},
 };
@@ -133,6 +134,8 @@ pub struct SyncData {
     /// ClientboundUpdateRecipesPacket's payload.
     pub recipes: Vec<u8>,
     pub advancements: super::advancements::ServerAdvancements,
+    /// The registry ids of the particle types effects show, looked up once (`effect_meta`).
+    effect_particle_ids: std::sync::Mutex<super::effect_meta::ParticleTypeIds>,
 }
 
 use crate::crafting::qualified;
@@ -226,6 +229,7 @@ impl SyncData {
     /// No registries, tags or recipes: enough for tests of the login phase.
     pub fn empty() -> Self {
         Self {
+            effect_particle_ids: Default::default(),
             builtin: Builtin::default(),
             dynamic: Dynamic::default(),
             registries: Vec::new(),
@@ -278,7 +282,19 @@ impl SyncData {
         biomes: Option<&crate::biome::Biomes>,
         kept: Option<&Self>,
     ) -> Result<Self, String> {
-        Self::load_with_frozen(resources, overlay, biomes, kept, None)
+        Self::load_with_frozen(resources, overlay, biomes, kept, None, false)
+    }
+
+    /// [`Self::load_with_kept`] over the packs `kept` was itself loaded with (a world's own
+    /// biomes or flags over the data its packs gave): the recipes and advancements, read
+    /// from the same files, are `kept`'s rather than read again (~0.7 s with a large modpack).
+    pub fn load_over(
+        resources: &Path,
+        overlay: &horizon_world::loot::PackOverlay,
+        biomes: Option<&crate::biome::Biomes>,
+        kept: &Self,
+    ) -> Result<Self, String> {
+        Self::load_with_frozen(resources, overlay, biomes, Some(kept), None, true)
     }
 
     /// First lazy load after world entry: damage definitions are the same
@@ -288,7 +304,7 @@ impl SyncData {
         overlay: &horizon_world::loot::PackOverlay,
         damage: &FrozenDamage,
     ) -> Result<Self, String> {
-        Self::load_with_frozen(resources, overlay, None, None, Some(damage))
+        Self::load_with_frozen(resources, overlay, None, None, Some(damage), false)
     }
 
     fn load_with_frozen(
@@ -297,6 +313,7 @@ impl SyncData {
         biomes: Option<&crate::biome::Biomes>,
         kept: Option<&Self>,
         damage: Option<&FrozenDamage>,
+        same_files: bool,
     ) -> Result<Self, String> {
         use crate::spans::startup;
         // The recipe book, the recipe sync and the advancements read the
@@ -438,6 +455,7 @@ impl SyncData {
             None
         };
         let mut sync = Self {
+            effect_particle_ids: Default::default(),
             content_identity,
             builtin,
             dynamic,
@@ -448,15 +466,18 @@ impl SyncData {
                 super::commands::CommandTree::load(resources)
             }),
             recipes: Vec::new(),
-            advancements: {
-                let (recipes, groups) = startup::time("sync.network_recipes", || {
-                    super::recipes::network_recipes(resources, overlay)
-                });
-                startup::time("sync.advancements", || {
-                    super::advancements::ServerAdvancements::load(
-                        resources, overlay, recipes, groups,
-                    )
-                })
+            advancements: match kept.filter(|_| same_files) {
+                Some(kept) => kept.advancements.clone(),
+                None => {
+                    let (recipes, groups) = startup::time("sync.network_recipes", || {
+                        super::recipes::network_recipes(resources, overlay)
+                    });
+                    startup::time("sync.advancements", || {
+                        super::advancements::ServerAdvancements::load(
+                            resources, overlay, recipes, groups,
+                        )
+                    })
+                }
             },
         };
         sync.recipes = startup::time("sync.update_recipes", || {
@@ -488,6 +509,49 @@ impl SyncData {
         self.registries
             .iter()
             .any(|(_, e)| e.from_pack.contains(&true))
+    }
+
+    /// `LivingEntity.updateSynchronizedMobEffectParticles`: DATA_EFFECT_PARTICLES
+    /// (10) and DATA_EFFECT_AMBIENCE_ID (11) for the visible `effects`, as
+    /// (effect, ambient). The entries are left out when there is nothing to
+    /// show, which is their default.
+    pub fn effect_meta<'a>(
+        &self,
+        effects: impl IntoIterator<Item = (&'a str, bool)>,
+    ) -> Vec<(u8, i32, entity_data::Value)> {
+        let mut ids = self
+            .effect_particle_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut particles = Vec::new();
+        let mut all_ambient = true;
+        for (effect, ambient) in effects {
+            let effect = effect.trim_start_matches("minecraft:");
+            let particle = super::effect_meta::particle_of(effect, ambient, |name| {
+                ids.get_or_insert_with(name, || self.id("minecraft:particle_type", name))
+            });
+            let Some(particle) = particle else {
+                continue;
+            };
+            particles.push(particle);
+            all_ambient &= ambient;
+        }
+        if particles.is_empty() {
+            return Vec::new();
+        }
+        let mut meta = vec![(
+            10,
+            entity_data::serializer::PARTICLES,
+            entity_data::Value::Particles(particles),
+        )];
+        if all_ambient {
+            meta.push((
+                11,
+                entity_data::serializer::BOOLEAN,
+                entity_data::Value::Bool(true),
+            ));
+        }
+        meta
     }
 
     /// The id of a name in a built-in or synchronized registry.
