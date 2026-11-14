@@ -79,7 +79,7 @@ public class SetupActivity extends Activity
                             } catch (Exception ignored) {
                             }
                         }
-                        requestPermissions(new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+                        requestPermissions(new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE);
                     })
                     .setNegativeButton(Ui.t("Папка приложения", "App folder"), (d, w) -> {
                         try {
@@ -158,8 +158,11 @@ public class SetupActivity extends Activity
                     "В этой сборке нет адреса пакета данных Horizon. Положите horizon-derived.zip в папку игры (Android/data/dev.horizonlab.horizon/files) или установите сборку, где он указан.",
                     "This build has no Horizon data pack address. Put horizon-derived.zip in the game folder (Android/data/dev.horizonlab.horizon/files) or install a build that has one."));
         }
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, 1);
+        if (android.os.Build.VERSION.SDK_INT >= 33 && state == null
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED
+                && !getSharedPreferences("setup", MODE_PRIVATE).getBoolean("notif-asked", false)) {
+            getSharedPreferences("setup", MODE_PRIVATE).edit().putBoolean("notif-asked", true).apply();
+            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, REQUEST_NOTIFICATIONS);
         }
         if (nativeStatus().contains("\trun\t")) {
             running();
@@ -398,8 +401,11 @@ public class SetupActivity extends Activity
 
     @Override
     public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
-        recreate();
+        if (request == REQUEST_STORAGE) recreate();
     }
+
+    private static final int REQUEST_STORAGE = 1;
+    private static final int REQUEST_NOTIFICATIONS = 3;
 
     @Override
     protected void onDestroy() {
