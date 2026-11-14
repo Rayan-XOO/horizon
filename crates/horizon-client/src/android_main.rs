@@ -13,17 +13,33 @@ use winit::platform::android::activity::AndroidApp;
 
 static MOD_API_LEVEL: [u8; 27] = horizon_mods::api_level::MARK;
 
+/// The "Horizon" folder in shared storage when the launcher chose it and it can be written.
+fn shared_home(internal: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path = std::fs::read_to_string(internal.join("home-path.txt")).ok()?;
+    let path = std::path::PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() || std::fs::create_dir_all(&path).is_err() {
+        return None;
+    }
+    let probe = path.join(".horizon-write-test");
+    std::fs::write(&probe, b"1").ok()?;
+    let _ = std::fs::remove_file(probe);
+    Some(path)
+}
+
 /// Called by android-activity on its own thread once the activity starts.
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     std::hint::black_box(&MOD_API_LEVEL);
     // The game's home: the app's external files folder
     // (/sdcard/Android/data/dev.horizonlab.horizon/files), which a file manager or
-    // `adb push` can reach; internal storage when there is none.
-    let home = app
+    // `adb push` can reach; internal storage when there is none. The launcher can move it to a
+    // "Horizon" folder in the root of the storage (Storage.java), which `home-path.txt` names;
+    // used only while it can be written (the all-files permission can be taken back).
+    let app_home = app
         .external_data_path()
         .or_else(|| app.internal_data_path())
         .unwrap_or_else(|| "/data/local/tmp/horizon".into());
+    let home = app.internal_data_path().and_then(|internal| shared_home(&internal)).unwrap_or_else(|| app_home.clone());
     let _ = std::fs::create_dir_all(&home);
     // SAFETY: nothing else runs yet; the game reads these on this thread.
     unsafe {
@@ -44,7 +60,7 @@ fn android_main(app: AndroidApp) {
             std::env::set_var("HORIZON_SPIKES", text.trim());
         }
     }
-    let _ = std::fs::create_dir_all(home.join("..").join("cache"));
+    let _ = std::fs::create_dir_all(app_home.join("..").join("cache"));
     let _ = std::env::set_current_dir(&home);
     // The folders players drop things into, ready in the Files app's Horizon root.
     for dir in ["saves", "resourcepacks", "mods", "shaderpacks"] {
@@ -57,7 +73,19 @@ fn android_main(app: AndroidApp) {
         apply_vulkan_driver(&internal);
         apply_safe_mode(&internal, &home);
         android_msa::prepare(&internal, &home);
+        // ViaHorizon (the launcher's beta tab): joining 1.20.2–26.2 servers through the
+        // protocol adapter.
+        if internal.join("no-glow.txt").is_file() {
+            // SAFETY: still before the game's threads start.
+            unsafe { std::env::set_var("HORIZON_NO_GLOW", "1") };
+        }
+        if internal.join("viahorizon.txt").is_file() {
+            // SAFETY: still before the game's threads start.
+            unsafe { std::env::set_var("HORIZON_OLDER_SERVERS", "1") };
+            log::info!("ViaHorizon on: servers 1.20.2 to 26.2 can be joined");
+        }
     }
+    log::info!("CPU: {:?} fast cores of {}", horizon_threads::fast_core_count(), std::thread::available_parallelism().map_or(0, |n| n.get()));
     let _ = game::ANDROID_APP.set(app.clone());
     // A panic here is already in the crash report (crash::install). Catch it so the activity is
     // still finished below: a NativeActivity whose loop died shows a dead window otherwise.

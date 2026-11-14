@@ -33,11 +33,9 @@ use horizon_client::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::Instant};
 use winit::{
-    application::ApplicationHandler,
     dpi::PhysicalPosition,
     keyboard::KeyCode,
     event::{DeviceId, ElementState, MouseButton, Touch, TouchPhase, WindowEvent},
-    event_loop::ActiveEventLoop,
 };
 
 /// Held this long without moving, a look finger breaks blocks.
@@ -63,6 +61,9 @@ enum Finger {
         since: Instant,
         moved: bool,
         attacking: bool,
+        /// Held still with something used over time in hand (food, a potion, a bow, a
+        /// shield, a spyglass...): the hold keeps use (right click) down instead of attacking.
+        uses: bool,
     },
     /// Holding a controller button; with pass-through on (the bool), moving it turns the view.
     Press(Button, [f64; 2], bool),
@@ -208,7 +209,7 @@ impl TouchLayout {
             (Id::Sneak, off(w - 86.0, h - 24.0, 12.0)),
             (Id::Sprint, at(w - 44.0, h - 92.0, 11.0)),
             (Id::Attack, at(w - 82.0, h - 70.0, 13.0)),
-            (Id::Use, off(w - 80.0, h - 80.0, 14.0)),
+            (Id::Use, at(w - 120.0, h - 52.0, 13.0)),
             (Id::Mount, at(w - 78.0, h - 104.0, 10.0)),
             (Id::AimToggle, off(w - 14.0, 40.0, 9.0)),
             (Id::Chat, at(w / 2.0 - 48.0, 12.0, 9.0)),
@@ -447,6 +448,13 @@ pub(super) struct Touches {
     ime_shown: bool,
     /// A menu tap since the last frame: ask for the keyboard again if a field wants it.
     ime_retap: bool,
+    /// The player tapped while a text field had the focus (outside the chat): the keyboard may
+    /// show for that field until it loses the focus or Done is pressed. A field that takes the
+    /// focus by itself as its screen opens doesn't bring the keyboard up.
+    ime_armed: bool,
+    /// The screen (and page) a menu tap went down on: a tap that opens another screen whose
+    /// field takes the focus by itself is not a tap on that field.
+    ime_tap_on: String,
     /// A controller, keyboard or mouse plays: the controls are hidden until a touch.
     pub(super) hardware: bool,
     /// A mouse has been used: the pointer is captured while playing.
@@ -476,6 +484,8 @@ impl Default for Touches {
             press_at: [0.0; 2],
             ime_shown: false,
             ime_retap: false,
+            ime_armed: false,
+            ime_tap_on: String::new(),
             hardware: false,
             mouse: false,
             pointer_captured: None,
@@ -845,6 +855,19 @@ impl Game<'_> {
     }
 
     /// A text box has focus (the soft keyboard is wanted).
+    /// Which screen, title screen and settings page is up, to tell a tap on a field from a
+    /// tap that opened a new screen.
+    fn ime_screen(&self) -> String {
+        format!(
+            "{} {:?} {:?} {} {}",
+            self.screen.id(),
+            self.title.as_ref().map(|t| std::mem::discriminant(&t.mode)),
+            (self.screen == super::Screen::Options).then(|| self.ui.options.page()),
+            self.sign_edit.is_some(),
+            self.book.is_some(),
+        )
+    }
+
     fn touch_text_focused(&self) -> bool {
         use super::Screen;
         matches!(self.screen, Screen::Chat | Screen::CommandBlock)
@@ -1090,16 +1113,19 @@ impl Game<'_> {
         let mut attack = false;
         let mut held = [false; 2];
         let mut aim_start = None;
+        let hold_uses = self.touch_hold_uses();
         for finger in self.touch.fingers.values_mut() {
-            if let Finger::Look { since, moved, attacking, start, .. } = finger
+            if let Finger::Look { since, moved, attacking, start, uses, .. } = finger
                 && !*moved
                 && !*attacking
                 && since.elapsed().as_millis() >= HOLD_MS
             {
                 *attacking = true;
+                *uses = hold_uses;
                 aim_start = Some(*start);
             }
             match finger {
+                Finger::Look { attacking: true, uses: true, .. } => held[0] = true,
                 Finger::Look { attacking: true, .. } => attack = true,
                 Finger::Trigger { i, .. } => held[*i] = true,
                 _ => {}
@@ -1137,12 +1163,21 @@ impl Game<'_> {
     #[cfg(target_os = "android")]
     fn touch_ime(&mut self) {
         use super::android_ime::{self, ImeInput};
-        let want = self.touch_text_focused()
+        let focused = self.touch_text_focused()
             || (self.screen == super::Screen::Options && self.ui.options.wants_text())
             || (self.screen == super::Screen::WorldOptions
                 && self.world_options.as_ref().and_then(|o| o.rules.as_ref()).is_some_and(|r| r.typing()))
             || (self.screen != super::Screen::Options
                 && self.title.as_mut().is_some_and(|t| t.focused_field().is_some()));
+        // The chat opens with the keyboard, as it always has; every other text field waits for
+        // a tap with the field focused (the tap that focuses it, or one on it).
+        let chat = self.screen == super::Screen::Chat;
+        if !focused {
+            self.touch.ime_armed = false;
+        } else if self.touch.ime_retap && self.touch.ime_tap_on == self.ime_screen() {
+            self.touch.ime_armed = true;
+        }
+        let want = focused && (chat || self.touch.ime_armed);
         if want != self.touch.ime_shown || (want && self.touch.ime_retap) {
             self.touch.ime_shown = want;
             android_ime::show(want);
@@ -1150,6 +1185,10 @@ impl Game<'_> {
         self.touch.ime_retap = false;
         for input in android_ime::take() {
             self.last_input = Instant::now();
+            if matches!(input, ImeInput::Enter) && !chat && self.sign_edit.is_none() && self.book.is_none() {
+                // Done on the keyboard: it goes away, the field keeps its text.
+                self.touch.ime_armed = false;
+            }
             self.pad_osk_output(match input {
                 ImeInput::Text(text) => osk::Output::Text(text),
                 ImeInput::Backspace => osk::Output::Backspace,
@@ -1379,6 +1418,7 @@ impl Game<'_> {
                     // Asked again on the next frame: a tap on a text field brings the
                     // keyboard back after the system's back gesture hid it.
                     self.touch.ime_retap = true;
+                    self.touch.ime_tap_on = self.ime_screen();
                     Finger::Pointer
                 } else if self.touch.editing {
                     if let Some(action) = gui.panel_hit(p) {
@@ -1427,7 +1467,7 @@ impl Game<'_> {
                     self.selected = slot;
                     Finger::Done
                 } else {
-                    Finger::Look { last: pos, start: pos, since: Instant::now(), moved: false, attacking: false }
+                    Finger::Look { last: pos, start: pos, since: Instant::now(), moved: false, attacking: false, uses: false }
                 };
                 self.touch.fingers.insert(id, finger);
             }
@@ -1448,20 +1488,20 @@ impl Game<'_> {
                         spec.y = ((p[1] + off[1]) / gui.h).clamp(0.0, 1.0);
                     }
                 }
-                Some(Finger::Look { last, start, since, moved, attacking })
+                Some(Finger::Look { last, start, since, moved, attacking, uses })
                     if attacking && false =>
                 {
                     // Breaking: the target follows the finger, the view stays.
-                    self.touch.fingers.insert(id, Finger::Look { last: pos, start: pos, since, moved, attacking });
+                    self.touch.fingers.insert(id, Finger::Look { last: pos, start: pos, since, moved, attacking, uses });
                     self.touch.aim_at = self.touch_ndc(pos);
                     let _ = (last, start);
                 }
-                Some(Finger::Look { last, start, since, moved, attacking }) => {
+                Some(Finger::Look { last, start, since, moved, attacking, uses }) => {
                     let (dx, dy) = (pos[0] - last[0], pos[1] - last[1]);
                     let far = ((pos[0] - start[0]).hypot(pos[1] - start[1])) / f64::from(scale) > SLOP;
                     self.touch
                         .fingers
-                        .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking });
+                        .insert(id, Finger::Look { last: pos, start, since, moved: moved || far, attacking, uses });
                     self.mouse.on_move(0.0, 0.0, dx, dy, true, true);
                     self.last_input = Instant::now();
                 }
@@ -1629,6 +1669,17 @@ impl Game<'_> {
     }
 
     /// Touch aiming hides the crosshair, as Bedrock's Touch mode.
+    /// A finger held still in the world uses instead of breaking (Bedrock): the main hand,
+    /// or else the off hand, holds something used over time (food, a potion, a bow, a
+    /// crossbow, a trident, a shield, a spyglass, a goat horn, a brush...).
+    fn touch_hold_uses(&self) -> bool {
+        let lasting = |stack: Option<&super::ItemStack>| {
+            stack.is_some_and(|s| self.use_duration(s) > 0)
+        };
+        let main = self.inventory.get(self.selected).and_then(|s| s.as_ref());
+        lasting(main) || (main.is_none_or(|m| !self.items().get(&m.item).is_some_and(|i| i.block.is_some())) && lasting(self.offhand.as_ref()))
+    }
+
     pub(super) fn touch_hides_crosshair(&self) -> bool {
         // The crosshair always shows: place and break act at it.
         false

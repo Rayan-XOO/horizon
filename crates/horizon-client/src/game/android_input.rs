@@ -353,7 +353,6 @@ impl super::Game<'_> {
     /// plays (a touch brings them back, `touch_event`).
     pub(super) fn android_input_frame(&mut self, event_loop: &dyn super::event_loop::EventLoopCtl) {
         use winit::{
-            application::ApplicationHandler,
             dpi::PhysicalPosition,
             event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
         };

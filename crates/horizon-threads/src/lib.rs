@@ -281,7 +281,42 @@ pub fn favour_current() -> bool {
     if std::thread::available_parallelism().map_or(1, |n| n.get()) <= 4 {
         return false;
     }
+    #[cfg(target_os = "android")]
+    if !android_room_for_all() {
+        // Two big cores (Helio G85/G88/G99, Snapdragon 6xx/7xx, Exynos 850...): the render,
+        // server, network and chunk threads all pinned to them fought over two cores while six
+        // little ones idled, and a frame waited behind world generation (40 fps falling to 15
+        // once chunks started to load). Only the render thread keeps the big cores there.
+        return false;
+    }
     favour()
+}
+
+/// The render thread: on the fast cores wherever there are fast cores.
+pub fn favour_render_thread() -> bool {
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) <= 4 {
+        return false;
+    }
+    favour()
+}
+
+/// Enough fast cores that every favoured thread (render, server, network, chunk decoders) can
+/// stay on them without queueing behind each other.
+#[cfg(target_os = "android")]
+fn android_room_for_all() -> bool {
+    fast_cpus().is_some_and(|fast| fast.len() >= 4)
+}
+
+/// How many of the cores are the fast kind, `None` where they are all one kind (for the log).
+pub fn fast_core_count() -> Option<usize> {
+    #[cfg(target_os = "android")]
+    {
+        fast_cpus().map(|f| f.len())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        performance_cores()
+    }
 }
 
 #[cfg(target_vendor = "apple")]

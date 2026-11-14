@@ -176,3 +176,29 @@ extern "system" fn Java_dev_horizonlab_horizon_HorizonActivity_nativeImeInset(
 pub(super) fn ime_inset() -> f32 {
     IME_INSET.load(std::sync::atomic::Ordering::Relaxed) as f32
 }
+
+/// The system's thermal status (`PowerManager.getCurrentThermalStatus`, 0 none to 6
+/// shutdown, -1 unknown) and the battery's temperature in tenths of a degree (-1 unknown),
+/// from `HorizonActivity.thermalStatus` and `batteryTenthsC`.
+pub(super) fn thermal() -> (i32, i32) {
+    let Some(app) = super::ANDROID_APP.get() else {
+        return (-1, -1);
+    };
+    // SAFETY: as in `show`.
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }) else {
+        return (-1, -1);
+    };
+    let Ok(mut env) = vm.attach_current_thread_permanently() else {
+        return (-1, -1);
+    };
+    let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+    let mut int = |method: &str| match env.call_method(&activity, method, "()I", &[]).and_then(|v| v.i()) {
+        Ok(v) => v,
+        Err(_) => {
+            // An older APK's activity without the method: nothing left pending.
+            let _ = env.exception_clear();
+            -1
+        }
+    };
+    (int("thermalStatus"), int("batteryTenthsC"))
+}

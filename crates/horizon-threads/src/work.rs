@@ -94,7 +94,9 @@ fn id_of(space: Space, name: &str, verify: bool) -> u16 {
         return 0;
     }
     let (names, key) = (&NAMES[space as usize], name.as_ptr() as usize);
-    let slot = (key >> 3).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (usize::BITS - 10);
+    // Fibonacci hashing: 2^64 / phi, or 2^32 / phi on 32-bit targets.
+    const GOLDEN: usize = if usize::BITS == 64 { 0x9E37_79B9_7F4A_7C15_u64 as usize } else { 0x9E37_79B9 };
+    let slot = (key >> 3).wrapping_mul(GOLDEN) >> (usize::BITS - 10);
     let hit = CACHE.with(|c| c[space as usize][slot].get());
     if hit.0 == key && hit.1 != 0 && (!verify || names.name(hit.1) == Some(name)) {
         return hit.1;

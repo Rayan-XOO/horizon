@@ -41,6 +41,8 @@ public class HorizonActivity extends NativeActivity {
         super.onCreate(state);
         applyCutout(this);
         sink = new TextSink(this);
+        sink.setFocusable(false);
+        sink.setFocusableInTouchMode(false);
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
         renewAccount();
         hideSystemBars();
@@ -58,6 +60,13 @@ public class HorizonActivity extends NativeActivity {
                 } else {
                     ime = Math.max(0, in.getSystemWindowInsetBottom() - in.getStableInsetBottom());
                 }
+                // The bars came back (a swipe, a dialog, the keyboard closing) while playing:
+                // hidden again after a moment, as immersive sticky mode does.
+                if (android.os.Build.VERSION.SDK_INT >= 30 && ime == 0
+                        && in.isVisible(android.view.WindowInsets.Type.navigationBars())) {
+                    v.removeCallbacks(rehide);
+                    v.postDelayed(rehide, 1500);
+                }
                 try {
                     nativeImeInset(ime);
                 } catch (UnsatisfiedLinkError e) {
@@ -74,18 +83,28 @@ public class HorizonActivity extends NativeActivity {
         if (hasFocus) hideSystemBars();
     }
 
+    private final Runnable rehide = new Runnable() {
+        public void run() {
+            if (hasWindowFocus()) hideSystemBars();
+        }
+    };
+
     /** Full screen: the navigation and status bars stay hidden; a swipe from the edge shows them for a moment. */
     @SuppressWarnings("deprecation")
     private void hideSystemBars() {
         android.view.Window window = getWindow();
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false);
-            android.view.WindowInsetsController c = window.getInsetsController();
+            android.view.WindowInsetsController c = window.getDecorView().getWindowInsetsController();
+            if (c == null) c = window.getInsetsController();
             if (c != null) {
-                c.hide(android.view.WindowInsets.Type.systemBars());
                 c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                c.hide(android.view.WindowInsets.Type.systemBars());
             }
-        } else {
+        }
+        // Some skins (MIUI, older One UI) still read the old flags: set them as well.
+        {
             window.getDecorView().setSystemUiVisibility(
                 android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
@@ -137,6 +156,27 @@ public class HorizonActivity extends NativeActivity {
         if (lp.layoutInDisplayCutoutMode == mode) return;
         lp.layoutInDisplayCutoutMode = mode;
         a.getWindow().setAttributes(lp);
+    }
+
+    /** Called from the game thread for the perf line: 0 none .. 6 shutdown, -1 unknown. */
+    public int thermalStatus() {
+        if (android.os.Build.VERSION.SDK_INT < 29) return -1;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm == null ? -1 : pm.getCurrentThermalStatus();
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** Called from the game thread for the perf line: the battery's temperature in tenths of a degree, -1 unknown. */
+    public int batteryTenthsC() {
+        try {
+            android.content.Intent b = registerReceiver(null, new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+            return b == null ? -1 : b.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, -1);
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     /** Called from the game thread: the profile screen (name, skin). */
@@ -259,7 +299,14 @@ public class HorizonActivity extends NativeActivity {
                     imm.showSoftInput(sink, InputMethodManager.SHOW_FORCED);
                 } else {
                     imm.hideSoftInputFromWindow(sink.getWindowToken(), 0);
+                    // Not focusable again: a focused text view keeps an input connection, and
+                    // with a hardware keyboard the keyboard app then takes every key (WASD typed
+                    // into a text bar, Esc and Shift never reach the game).
+                    sink.setFocusable(false);
+                    sink.setFocusableInTouchMode(false);
                     sink.clearFocus();
+                    imm.restartInput(sink);
+                    a.hideSystemBars();
                 }
             }
         }
@@ -272,11 +319,13 @@ public class HorizonActivity extends NativeActivity {
 
         @Override
         public boolean onCheckIsTextEditor() {
-            return true;
+            return isFocused();
         }
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo info) {
+            // Only while a text field in the game wants the keyboard.
+            if (!isFocusable()) return null;
             // Plain text: a password variation would lock some keyboards to Latin letters.
             info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             info.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_FULLSCREEN

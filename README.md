@@ -12,8 +12,8 @@
 <p align="center">
   <a href="https://github.com/Rayan-XOO/horizon/releases/latest"><img src="https://img.shields.io/github/v/release/Rayan-XOO/horizon?label=release" alt="Latest release"></a>
   <a href="https://github.com/Rayan-XOO/horizon/releases"><img src="https://img.shields.io/github/downloads/Rayan-XOO/horizon/total" alt="Downloads"></a>
-  <img src="https://img.shields.io/badge/version-0.3.0-2EA043" alt="Version 0.3.0">
-  <img src="https://img.shields.io/badge/Android-8.0%2B%20arm64-3DDC84?logo=android&logoColor=white" alt="Android 8.0+">
+  <img src="https://img.shields.io/badge/version-0.4.7-2EA043" alt="Version 0.4.7">
+  <img src="https://img.shields.io/badge/Android-8.0%2B%20arm64%20%7C%20armv7-3DDC84?logo=android&logoColor=white" alt="Android 8.0+">
   <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Rayan-XOO/horizon" alt="License"></a>
 </p>
@@ -71,11 +71,11 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 
 ### Установка
 
-1. Скачай `horizon.apk` со страницы [Releases](https://github.com/Rayan-XOO/horizon/releases).
-2. Открой его на телефоне (разреши «установку из неизвестных источников») или `adb install -r horizon.apk`.
-3. Нужен Android 8.0+ и arm64.
+1. Скачай последнюю версию, **0.4.7**: [horizon-0.4.7.apk](https://github.com/Rayan-XOO/horizon/releases/download/android-v0.4.7/horizon-0.4.7.apk) (все версии на странице [Releases](https://github.com/Rayan-XOO/horizon/releases)).
+2. Открой его на телефоне (разреши «установку из неизвестных источников») или `adb install -r horizon-0.4.7.apk`.
+3. Нужен Android 8.0+, arm64 или 32-битный ARM (armv7).
 
-**Обновление на 0.3.0.** С 0.2.1–0.2.5 обновление ставится поверх, данные остаются. Сборка 0.2.8 была подписана другим ключом: её нужно сначала удалить (сохрани папку `saves`, см. ниже), затем установить 0.3.0.
+**Обновление.** С 0.2.1 и новее обновление ставится поверх, данные остаются. Сборка 0.2.8 была подписана другим ключом: её нужно сначала удалить (сохрани папку `saves`, см. ниже), затем установить новую.
 
 **Обновление с 0.2.0 и старше.** С версии 0.2.1 приложение подписано новым ключом, поэтому поверх старой версии оно не встанет. Старую придётся один раз удалить, а при удалении Android стирает данные игры. Перед этим скопируй миры из `Android/data/dev.horizonlab.horizon/files/saves` куда-нибудь в другое место, а после установки верни обратно.
 
@@ -114,6 +114,8 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 
 Папка игры видна в приложении «Файлы» как «Horizon» (на Samsung через «Файлы» от Google или любой файловый менеджер с SAF). Там лежат `resourcepacks`, `shaderpacks` и `saves`, так что ресурспаки и шейдеры можно просто туда скопировать, без провода и `Android/data`.
 
+**Папка Horizon в корне памяти (с 0.4.7).** Лаунчер предлагает перенести файлы игры (`saves`, `mods`, `resourcepacks`, `shaderpacks`, `logs`, скачанные файлы) в папку `/storage/emulated/0/Horizon`, рядом с `Download` и `Android`. Для этого Android попросит «Доступ ко всем файлам». Всё уже скачанное переносится, ничего не теряется, и эта папка остаётся при удалении приложения. Если доступ не дать, всё остаётся в `Android/data/dev.horizonlab.horizon/files`, как раньше. Сменить можно в лаунчере: «Настройки» → «Папка игры».
+
 Как подготовить все файлы на ПК целиком, без загрузки на телефоне, написано в [ANDROID.md](ANDROID.md).
 
 ### Управление
@@ -145,7 +147,7 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 ### Известные проблемы
 
 - Ест около **2,2 ГБ ОЗУ**, на слабых телефонах может вылетать. Попробуй дальность прорисовки 4-6.
-- Это **ранняя, экспериментальная** версия: баги будут. Лог: `/storage/emulated/0/Android/data/dev.horizonlab.horizon/files/logs/latest.log`, отчёты о вылетах рядом в `crash-reports/`. Открывается любым файловым менеджером (на новых Android папка Android/data видна не всем менеджерам, тогда нужен менеджер с доступом к ней или `adb pull`).
+- Это **ранняя, экспериментальная** версия: баги будут. Логи проще всего отправить кнопкой «Поделиться логами» в лаунчере (zip с логами и отчётами о вылетах). Сам лог: `logs/latest.log` в папке игры (`/storage/emulated/0/Horizon` или `/storage/emulated/0/Android/data/dev.horizonlab.horizon/files`), отчёты о вылетах рядом в `crash-reports/`. Открывается любым файловым менеджером (на новых Android папка Android/data видна не всем менеджерам, тогда нужен менеджер с доступом к ней или `adb pull`).
 
 ### Частые вопросы
 
@@ -216,11 +218,11 @@ Screenshots from the original Horizon on PC; the phone build renders the same ga
 
 ### Install
 
-1. Grab `horizon.apk` from [Releases](https://github.com/Rayan-XOO/horizon/releases).
-2. Open it on your phone (allow "install unknown apps") or run `adb install -r horizon.apk`.
-3. Needs Android 8.0+ and an arm64 device.
+1. Grab the latest version, **0.4.7**: [horizon-0.4.7.apk](https://github.com/Rayan-XOO/horizon/releases/download/android-v0.4.7/horizon-0.4.7.apk) (every version is on [Releases](https://github.com/Rayan-XOO/horizon/releases)).
+2. Open it on your phone (allow "install unknown apps") or run `adb install -r horizon-0.4.7.apk`.
+3. Needs Android 8.0+ on arm64 or 32-bit ARM (armv7).
 
-**Upgrading to 0.3.0.** From 0.2.1–0.2.5 it installs over the top and keeps your data. The 0.2.8 build was signed with a different key: uninstall it first (back up `saves`, see below), then install 0.3.0.
+**Upgrading.** From 0.2.1 or newer it installs over the top and keeps your data. The 0.2.8 build was signed with a different key: uninstall it first (back up `saves`, see below), then install the new one.
 
 **Upgrading from 0.2.0 or older.** Starting with 0.2.1 the app is signed with a new key, so it won't install over the old one. Uninstall the old version once; Android wipes the game data when you do. Copy your worlds from `Android/data/dev.horizonlab.horizon/files/saves` somewhere safe first and put them back after installing.
 
@@ -259,6 +261,8 @@ Don't uninstall the app unless you have to: Android wipes its folder, including 
 
 The game folder also shows up in the Files app as "Horizon" (on Samsung use Google's "Files" app or any file manager with SAF). Inside are `resourcepacks`, `shaderpacks` and `saves`, so you can just drop resource packs and shaders in there, no cable or `Android/data` needed.
 
+**A Horizon folder in the storage root (since 0.4.7).** The launcher offers to move the game files (`saves`, `mods`, `resourcepacks`, `shaderpacks`, `logs`, the downloaded files) to `/storage/emulated/0/Horizon`, next to `Download` and `Android`. Android asks for "All files access" for that. Everything already downloaded moves over, nothing is lost, and the folder stays when the app is uninstalled. Without the permission everything stays in `Android/data/dev.horizonlab.horizon/files`, as before. Change it in the launcher: "Settings" → "Game folder".
+
 To prepare everything on a PC without the on-phone download, see [ANDROID.md](ANDROID.md).
 
 ### Controls
@@ -289,7 +293,7 @@ The port requires **arm64**, **Android 8.0+ (API 26)**, and a GPU with **Vulkan*
 ### Known issues
 
 - Uses around **2.2 GB of RAM**, weaker phones may crash. Try render distance 4-6.
-- This is an **early, experimental** build, so expect bugs. Log: `/storage/emulated/0/Android/data/dev.horizonlab.horizon/files/logs/latest.log`, crash reports next to it in `crash-reports/`. Any file manager can open it (on newer Android, Android/data needs a file manager that has access to it, or use `adb pull`).
+- This is an **early, experimental** build, so expect bugs. The easiest way to send logs is the launcher's "Share logs" button (a zip with the logs and crash reports). The log itself: `logs/latest.log` in the game folder (`/storage/emulated/0/Horizon` or `/storage/emulated/0/Android/data/dev.horizonlab.horizon/files`), crash reports next to it in `crash-reports/`. Any file manager can open it (on newer Android, Android/data needs a file manager that has access to it, or use `adb pull`).
 
 ### FAQ
 

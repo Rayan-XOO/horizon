@@ -365,6 +365,7 @@ mod android_ime;
 #[cfg(target_os = "android")]
 mod android_input;
 mod touch;
+mod perf_log;
 mod pad_craft;
 mod pad_menu;
 mod paintings;
@@ -2375,6 +2376,8 @@ struct Game<'a> {
     pad: pad::Pads,
     /// Fingers on a touch screen (Android).
     touch: touch::Touches,
+    /// The periodic performance line in the log (Android).
+    perf_log: perf_log::PerfLog,
     frames: u64,
     /// The glint clock and options, read once at the start of each frame
     /// (game/item_draw.rs).
@@ -11100,6 +11103,7 @@ impl Game<'_> {
                     self.frame_ticks = elapsed.as_secs_f32() * 20.0;
                     self.previous = now;
                     horizon_threads::frame_hint(elapsed);
+                    self.perf_log_frame(elapsed);
                     self.upload_pace.frame(elapsed);
                     self.studio_fly(elapsed);
                     // Arrow-key camera controls belong to gameplay; chat and
@@ -11557,6 +11561,7 @@ impl<'a> Game<'a> {
             last_input: now,
             pad: Default::default(),
             touch: Default::default(),
+            perf_log: Default::default(),
             frames: 0,
             glint_frame: Default::default(),
             kept_block_entities: Default::default(),
@@ -12309,7 +12314,7 @@ pub fn run_with() -> Result<()> {
         // macOS and Windows. While terrain loads, the workers
         // (horizon_threads::jobs) and other programs outnumber the cores, and a frame that gave its core up (in a GPU submit) waited
         // 10 to 200 ms to get one back.
-        horizon_threads::favour_current();
+        horizon_threads::favour_render_thread();
     }
     // A dedicated server too: vanilla's "Server Shutdown Thread" (`DedicatedServer.initServer`'s
     // shutdown hook) halts the server and saves its players and levels on SIGTERM, SIGINT or SIGHUP.

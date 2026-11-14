@@ -1973,7 +1973,12 @@ impl OptionsUi {
         match self.page() {
             Page::Language => self.language_search.focused,
             Page::Packs => self.pack_screen.as_ref().is_some_and(|p| p.search_focused()),
-            _ => self.settings_search_active(),
+            Page::ControllerRadialName => self.radial_name_typing(),
+            // The settings shells (Video, Controls, Accessibility...) keep their own focus.
+            _ => match self.shell() {
+                Some(shell) => shell.typing(),
+                None => self.settings_search_active(),
+            },
         }
     }
     fn settings_search_active(&self) -> bool {

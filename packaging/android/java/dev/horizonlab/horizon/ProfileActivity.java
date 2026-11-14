@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputFilter;
@@ -47,11 +46,16 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
     private LinearLayout codeBox, advancedBox;
     private TextView code, codeHint;
     private Button copy, browser, advanced, mods;
+    private Button settingsTab, betaTab, folder, via;
+    private View settingsPage, betaPage;
+    private TextView folderStatus;
+    private boolean waitingAccess;
     private String verifyUri = "https://www.microsoft.com/link";
     private boolean slim;
 
-    private static final int PANEL = Color.rgb(26, 27, 33);
-    private static final int FIELD = Color.rgb(20, 21, 26);
+    private static final int PANEL = Color.argb(176, 0, 0, 0);
+    private static final int FIELD = Color.rgb(0, 0, 0);
+    private static final int RIM = Color.rgb(90, 90, 90);
 
     @Override
     protected void onCreate(Bundle state) {
@@ -63,8 +67,6 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.HORIZONTAL);
-        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[] {Color.rgb(22, 30, 30), Ui.BG, Color.rgb(8, 8, 11)}));
         int pad = Ui.dp(this, 16);
         root.setPadding(pad, pad, pad, pad);
 
@@ -72,11 +74,12 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         LinearLayout left = new LinearLayout(this);
         left.setOrientation(LinearLayout.VERTICAL);
         left.setPadding(p, p, p, p);
-        left.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+        left.setBackground(Ui.rounded(this, PANEL, RIM, 0));
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = Ui.text(this, "Horizon", 22, Ui.TEXT, true);
+        TextView title = Ui.text(this, "HORIZON", 24, Ui.TEXT, true);
+        title.setLetterSpacing(0.08f);
         head.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         TextView ver = Ui.text(this, version(), 12, Ui.MUTED, false);
         head.addView(ver);
@@ -85,7 +88,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         LinearLayout who = new LinearLayout(this);
         who.setOrientation(LinearLayout.HORIZONTAL);
         preview = new SkinView(this);
-        preview.setBackground(Ui.rounded(this, FIELD, 0, 12));
+        preview.setBackground(Ui.rounded(this, Color.argb(120, 0, 0, 0), 0, 0));
         int pv = Ui.dp(this, 6);
         preview.setPadding(pv, pv, pv, pv);
         who.addView(preview, new LinearLayout.LayoutParams(0, -1, 1));
@@ -103,7 +106,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         name.setTextSize(16);
         name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(16)});
         name.setPadding(p, Ui.dp(this, 8), p, Ui.dp(this, 8));
-        name.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+        name.setBackground(Ui.rounded(this, FIELD, Color.rgb(160, 160, 160), 0));
+        name.setTypeface(Ui.font(this));
         name.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE
                 | android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         name.setText(readName());
@@ -131,17 +135,47 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         left.addView(play, Ui.gap(this, 6));
         root.addView(left, new LinearLayout.LayoutParams(0, -1, 1));
 
-        // Right: settings.
+        // Right: settings, and the beta tab.
+        LinearLayout right = new LinearLayout(this);
+        right.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        settingsTab = Ui.button(this, Ui.t("Настройки", "Settings"), false);
+        betaTab = Ui.button(this, Ui.t("Бета", "Beta"), false);
+        tabs.addView(settingsTab, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(0, -2, 1);
+        tabLp.leftMargin = Ui.dp(this, 6);
+        tabs.addView(betaTab, tabLp);
+        right.addView(tabs);
+        FrameLayout pages = new FrameLayout(this);
+        LinearLayout.LayoutParams pagesLp = new LinearLayout.LayoutParams(-1, 0, 1);
+        pagesLp.topMargin = Ui.dp(this, 6);
+        right.addView(pages, pagesLp);
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackground(Ui.rounded(this, PANEL, Ui.EDGE, 16));
+        scroll.setBackground(Ui.rounded(this, PANEL, RIM, 0));
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 16), Ui.dp(this, 16));
         scroll.addView(card);
+        pages.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+        settingsPage = scroll;
+        ScrollView betaScroll = new ScrollView(this);
+        betaScroll.setBackground(Ui.rounded(this, PANEL, RIM, 0));
+        betaScroll.setVerticalScrollBarEnabled(false);
+        LinearLayout beta = new LinearLayout(this);
+        beta.setOrientation(LinearLayout.VERTICAL);
+        beta.setPadding(Ui.dp(this, 16), Ui.dp(this, 4), Ui.dp(this, 16), Ui.dp(this, 16));
+        betaScroll.addView(beta);
+        pages.addView(betaScroll, new FrameLayout.LayoutParams(-1, -1));
+        betaPage = betaScroll;
+        settingsTab.setOnClickListener(v -> showTab(false));
+        betaTab.setOnClickListener(v -> showTab(true));
+        buildBeta(beta);
+        showTab(false);
         LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -1, 1.15f);
         rightLp.leftMargin = Ui.dp(this, 14);
-        root.addView(scroll, rightLp);
+        root.addView(right, rightLp);
 
         Ui.section(card, Ui.t("Аккаунт Microsoft", "Microsoft account"));
         accountStatus = Ui.text(this, accountLine(), 15, Ui.TEXT, true);
@@ -156,7 +190,7 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         codeBox = new LinearLayout(this);
         codeBox.setOrientation(LinearLayout.VERTICAL);
         codeBox.setPadding(p, p, p, p);
-        codeBox.setBackground(Ui.rounded(this, FIELD, Ui.GREEN_DARK, 10));
+        codeBox.setBackground(Ui.rounded(this, FIELD, Ui.GREEN_DARK, 0));
         codeBox.setVisibility(View.GONE);
         codeHint = Ui.text(this, "", 13, Ui.MUTED, false);
         codeBox.addView(codeHint);
@@ -197,7 +231,8 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         clientId.setHint("00000000-0000-0000-0000-000000000000");
         clientId.setText(Msa.clientId(this));
         clientId.setPadding(p, p, p, p);
-        clientId.setBackground(Ui.rounded(this, FIELD, Ui.EDGE, 8));
+        clientId.setBackground(Ui.rounded(this, FIELD, Color.rgb(160, 160, 160), 0));
+        clientId.setTypeface(Ui.font(this));
         clientId.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         advancedBox.addView(clientId, Ui.gap(this, 6));
         deviceCode = Ui.button(this, Ui.t("Войти по коду", "Sign in with a code"), false);
@@ -265,21 +300,80 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
             }
         });
         card.addView(cutout, Ui.gap(this, 4));
+        Button glow = Ui.button(this, glowLabel(), false);
+        glow.setOnClickListener(v -> {
+            File f = new File(getFilesDir(), "no-glow.txt");
+            try {
+                if (f.isFile()) f.delete();
+                else write(f, "1\n".getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) {
+            }
+            glow.setText(glowLabel());
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Сработает при следующем запуске игры.", "Takes effect the next time the game starts."));
+        });
+        card.addView(glow, Ui.gap(this, 6));
 
         Ui.section(card, Ui.t("Моды", "Mods"));
         card.addView(Ui.text(this, Ui.t(
-                ".hnmod со сборкой для Android или .hmod. Или положите файл в Android/data/dev.horizonlab.horizon/files/mods/.",
-                "A .hnmod with an Android build, or a .hmod. Or drop the file into Android/data/dev.horizonlab.horizon/files/mods/."),
+                ".hnmod со сборкой для Android или .hmod. Или положите файл в папку mods/ в папке игры.",
+                "A .hnmod with an Android build, or a .hmod. Or drop the file into mods/ in the game folder."),
                 12, Ui.MUTED, false));
         mods = Ui.button(this, Ui.t("Установить мод", "Install a mod"), false);
         mods.setOnClickListener(this);
         card.addView(mods, Ui.gap(this, 8));
 
-        setContentView(root);
+        Ui.section(card, Ui.t("Папка игры", "Game folder"));
+        folderStatus = Ui.text(this, folderLine(), 12, Ui.MUTED, false);
+        card.addView(folderStatus);
+        folder = Ui.button(this, folderButton(), false);
+        folder.setOnClickListener(v -> askSharedFolder());
+        card.addView(folder, Ui.gap(this, 6));
+
+        Ui.section(card, Ui.t("Логи", "Logs"));
+        card.addView(Ui.text(this, Ui.t(
+                "Для отчёта об ошибке: логи, отчёты о вылетах и модель телефона в одном zip.",
+                "For a bug report: the logs, crash reports and the phone model in one zip."),
+                12, Ui.MUTED, false));
+        LinearLayout logRow = new LinearLayout(this);
+        logRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button shareLogs = Ui.button(this, Ui.t("Поделиться логами", "Share logs"), false);
+        shareLogs.setOnClickListener(v -> {
+            try {
+                LogShare.share(this);
+            } catch (Exception e) {
+                message.setTextColor(Ui.WARN);
+                message.setText(Ui.t("Не удалось собрать логи: ", "Could not collect the logs: ") + e.getMessage());
+            }
+        });
+        Button saveLogs = Ui.button(this, Ui.t("В Загрузки", "To Downloads"), false);
+        saveLogs.setOnClickListener(v -> {
+            try {
+                String where = LogShare.saveToDownloads(this);
+                message.setTextColor(Ui.GREEN);
+                message.setText(Ui.t("Сохранено: ", "Saved: ") + where);
+            } catch (Exception e) {
+                message.setTextColor(Ui.WARN);
+                message.setText(Ui.t("Не удалось сохранить: ", "Could not save: ") + e.getMessage());
+            }
+        });
+        logRow.addView(shareLogs, new LinearLayout.LayoutParams(0, -2, 1.3f));
+        LinearLayout.LayoutParams logLp = new LinearLayout.LayoutParams(0, -2, 1);
+        logLp.leftMargin = Ui.dp(this, 8);
+        logRow.addView(saveLogs, logLp);
+        card.addView(logRow, Ui.gap(this, 6));
+
+        FrameLayout screen = new FrameLayout(this);
+        screen.addView(new Ui.Panorama(this), new FrameLayout.LayoutParams(-1, -1));
+        screen.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        setContentView(screen);
         hideBars();
         refreshAccount();
         updateModel();
         showPreview();
+        if (!Storage.asked(this) && !Storage.inShared(this)) {
+            screen.post(this::askSharedFolder);
+        }
     }
 
     @Override
@@ -496,6 +590,175 @@ public class ProfileActivity extends Activity implements View.OnClickListener {
         deviceCode.setEnabled(false);
         microsoft.setEnabled(false);
         Msa.start(this, id, listener);
+    }
+
+    private void showTab(boolean beta) {
+        settingsPage.setVisibility(beta ? View.GONE : View.VISIBLE);
+        betaPage.setVisibility(beta ? View.VISIBLE : View.GONE);
+        settingsTab.setAlpha(beta ? 0.55f : 1f);
+        betaTab.setAlpha(beta ? 1f : 0.55f);
+    }
+
+    /** The beta tab: which Minecraft the game is, and the experimental older-server support. */
+    private void buildBeta(LinearLayout beta) {
+        Ui.section(beta, Ui.t("Версия Minecraft", "Minecraft version"));
+        beta.addView(Ui.text(this, Ui.t(
+                "Horizon сейчас — это Minecraft 26.3. Другие версии готовятся.",
+                "Horizon is Minecraft 26.3 for now. Other versions are in the works."),
+                12, Ui.MUTED, false));
+        String[] versions = {"26.3", "26.2", "1.21.x", "1.20.1", "1.16.5", "1.12.2", "1.7.10"};
+        for (int i = 0; i < versions.length; i++) {
+            boolean current = i == 0;
+            Button b = Ui.button(this, current
+                    ? "> " + versions[i] + "  " + Ui.t("(выбрана)", "(selected)")
+                    : versions[i] + "  " + Ui.t("— Скоро", "— Soon"), false);
+            b.setEnabled(current);
+            if (current) b.setTextColor(Ui.GREEN);
+            beta.addView(b, Ui.gap(this, i == 0 ? 8 : 4));
+        }
+
+        Ui.section(beta, "ViaHorizon");
+        beta.addView(Ui.text(this, Ui.t(
+                "Вход на серверы других версий: от 1.20.2 до 26.2. Версия сервера определяется сама. Экспериментально: что-то может работать не так. Серверы старше 1.20.2 (1.7–1.20.1) пока не поддерживаются.",
+                "Join servers of other versions: 1.20.2 to 26.2. The server's version is detected by itself. Experimental: some things may not work right. Servers older than 1.20.2 (1.7–1.20.1) aren't supported yet."),
+                12, Ui.MUTED, false));
+        via = Ui.button(this, viaLabel(), false);
+        via.setOnClickListener(v -> {
+            File f = new File(getFilesDir(), "viahorizon.txt");
+            try {
+                if (viaOn()) f.delete();
+                else write(f, "on\n".getBytes(StandardCharsets.UTF_8));
+            } catch (Exception ignored) {
+            }
+            via.setText(viaLabel());
+        });
+        beta.addView(via, Ui.gap(this, 6));
+    }
+
+    private String glowLabel() {
+        return new File(getFilesDir(), "no-glow.txt").isFile()
+                ? Ui.t("Обводка «Свечения»: выкл (быстрее)", "Glowing outline: off (faster)")
+                : Ui.t("Обводка «Свечения»: вкл", "Glowing outline: on");
+    }
+
+    private boolean viaOn() {
+        return new File(getFilesDir(), "viahorizon.txt").isFile();
+    }
+
+    private String viaLabel() {
+        return viaOn() ? Ui.t("ViaHorizon: включён", "ViaHorizon: on") : Ui.t("ViaHorizon: выключен", "ViaHorizon: off");
+    }
+
+    private String folderLine() {
+        return Ui.t("Сейчас: ", "Now: ") + Storage.home(this).getAbsolutePath();
+    }
+
+    private String folderButton() {
+        return Storage.inShared(this)
+                ? Ui.t("Вернуть в папку приложения", "Move back to the app folder")
+                : Ui.t("Перенести в папку Horizon", "Move to the Horizon folder");
+    }
+
+    /**
+     * Offers the "Horizon" folder in the root of the storage (needs all-files access), or, when
+     * the game is already there, moving it back. Asked once on the first start too.
+     */
+    private void askSharedFolder() {
+        Storage.markAsked(this);
+        if (Storage.inShared(this)) {
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle(Ui.t("Папка приложения", "App folder"))
+                    .setMessage(Ui.t(
+                            "Перенести миры, моды, логи и файлы игры обратно в Android/data? Папка Horizon станет пустой.",
+                            "Move the worlds, mods, logs and game files back to Android/data? The Horizon folder will be empty."))
+                    .setPositiveButton(Ui.t("Перенести", "Move"), (d, w) -> migrate(Storage.home(this), Storage.appDir(this), null))
+                    .setNegativeButton(Ui.t("Отмена", "Cancel"), null)
+                    .show();
+            return;
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(Ui.t("Папка Horizon", "The Horizon folder"))
+                .setMessage(Ui.t(
+                        "Игра может хранить свои файлы (saves, mods, resourcepacks, logs…) в папке Horizon в корне памяти — рядом с Download и Android. Её видно в любом файловом менеджере, и она не удаляется вместе с приложением.\n\nДля этого Android попросит «Доступ ко всем файлам». Без него всё остаётся в Android/data/dev.horizonlab.horizon/files, как раньше. Уже скачанное перенесётся, ничего не потеряется.",
+                        "The game can keep its files (saves, mods, resourcepacks, logs…) in a Horizon folder in the root of the storage, next to Download and Android. Any file manager sees it, and it stays when the app is uninstalled.\n\nAndroid will ask for \"All files access\" for that. Without it everything stays in Android/data/dev.horizonlab.horizon/files, as before. What's already downloaded moves over, nothing is lost."))
+                .setPositiveButton(Ui.t("Дать доступ", "Grant access"), (d, w) -> {
+                    if (Storage.granted(this)) {
+                        moveToShared();
+                        return;
+                    }
+                    waitingAccess = true;
+                    Intent i = Storage.permissionIntent(this);
+                    try {
+                        if (i != null) startActivity(i);
+                        else requestPermissions(new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 2);
+                    } catch (Exception e) {
+                        waitingAccess = false;
+                    }
+                })
+                .setNegativeButton(Ui.t("Оставить как есть", "Keep it as is"), null)
+                .show();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (waitingAccess) {
+            waitingAccess = false;
+            if (Storage.granted(this)) moveToShared();
+            else {
+                message.setTextColor(Ui.WARN);
+                message.setText(Ui.t("Доступа нет — файлы остаются в Android/data.", "No access: the files stay in Android/data."));
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        if (request != 2) return;
+        waitingAccess = false;
+        if (Storage.granted(this)) moveToShared();
+    }
+
+    private void moveToShared() {
+        File to = Storage.sharedDir();
+        if (!Storage.usable(to)) {
+            message.setTextColor(Ui.WARN);
+            message.setText(Ui.t("Не удалось создать ", "Could not create ") + to);
+            return;
+        }
+        migrate(Storage.appDir(this), to, to);
+    }
+
+    /** Moves the game folder on a background thread, with progress; `chosen` is the new home (null: the app folder). */
+    private void migrate(File from, File to, File chosen) {
+        android.app.ProgressDialog wait = new android.app.ProgressDialog(this);
+        wait.setCancelable(false);
+        wait.setMessage(Ui.t("Переносим файлы…", "Moving the files…"));
+        wait.show();
+        new Thread(() -> {
+            String error = null;
+            try {
+                // Chosen first: if the move stops halfway the game still finds what moved,
+                // and the rest is moved on the next try (nothing is ever overwritten).
+                Storage.choose(this, chosen);
+                Storage.move(from, to, (n, name) -> runOnUiThread(() ->
+                        wait.setMessage(Ui.t("Переносим файлы… ", "Moving the files… ") + n + "\n" + name)));
+            } catch (Exception e) {
+                error = e.getMessage();
+            }
+            String err = error;
+            runOnUiThread(() -> {
+                wait.dismiss();
+                dir = Storage.home(this);
+                folderStatus.setText(folderLine());
+                folder.setText(folderButton());
+                message.setTextColor(err == null ? Ui.GREEN : Ui.WARN);
+                message.setText(err == null
+                        ? Ui.t("Готово. Папка игры: ", "Done. The game folder: ") + Storage.home(this)
+                        : Ui.t("Перенос прерван (", "The move stopped (") + err
+                                + Ui.t("). Нажмите ещё раз — уже перенесённое не пострадает.", "). Press it again; what moved already is safe."));
+            });
+        }, "horizon-move").start();
     }
 
     private String cutoutMode() {

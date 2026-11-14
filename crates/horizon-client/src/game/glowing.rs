@@ -11,6 +11,14 @@ pub(super) fn team_color(team: Option<&sb::Team>) -> u32 {
         .unwrap_or(0xFF_FFFF)
 }
 
+/// HORIZON_NO_GLOW=1 (the Android launcher's "Glow outline: off"): no glowing outlines at all.
+/// The outline pass is a few full-screen passes, heavy on a weak GPU when a server keeps the
+/// Glowing effect on everyone, and it is built in, so a resource pack can't turn it off.
+fn outlines_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("HORIZON_NO_GLOW").is_ok_and(|v| v == "1"))
+}
+
 impl Game<'_> {
     /// `Entity.isCurrentlyGlowing` of an entity that is not living (an item, a projectile):
     /// its `Glowing` tag, or shared flag 6 as a server sent it.
@@ -25,6 +33,9 @@ impl Game<'_> {
     /// The outline an entity is drawn with: vanilla's (`Some` team colour when it glows),
     /// then what mods made of it (`native_entity_outline`).
     pub(super) fn entity_outline(&self, id: u32, kind: &str, vanilla: Option<u32>) -> Option<u32> {
+        if outlines_off() {
+            return None;
+        }
         let mut outline = vanilla;
         self.native_entity_outline(id, kind, &mut outline);
         outline.map(|rgb| rgb & 0xFF_FFFF)

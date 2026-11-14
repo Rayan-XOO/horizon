@@ -13,7 +13,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 
-/** Shows the game folder (getExternalFilesDir) as a "Horizon" root in the system Files app. */
+/** Shows the game folder (Storage.home: the app's folder or Horizon/ in shared storage) as a "Horizon" root in the system Files app. */
 public class HorizonDocumentsProvider extends DocumentsProvider {
     private static final String ROOT_ID = "horizon";
     private static final String PREFIX = "root:";
@@ -33,7 +33,7 @@ public class HorizonDocumentsProvider extends DocumentsProvider {
     }
 
     private File baseDir() throws FileNotFoundException {
-        File dir = getContext().getExternalFilesDir(null);
+        File dir = Storage.home(getContext());
         if (dir == null) throw new FileNotFoundException("external storage unavailable");
         dir.mkdirs();
         try {

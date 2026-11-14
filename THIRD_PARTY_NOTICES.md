@@ -395,3 +395,10 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FO
 OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+## Monocraft
+
+The Android launcher's pixel font, `packaging/android/assets/fonts/Monocraft.ttf`, is
+[Monocraft](https://github.com/IdreesInc/Monocraft) v4.2.1 by Idrees Hassan, licensed under the
+SIL Open Font License 1.1; the full license is next to it in `Monocraft-OFL.txt`. It is an
+original font inspired by the game's look and contains no Minecraft assets.

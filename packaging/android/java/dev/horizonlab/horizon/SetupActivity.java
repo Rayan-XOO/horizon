@@ -47,10 +47,7 @@ public class SetupActivity extends Activity
     private Button copyError;
 
     static String home(Context c) {
-        File dir = c.getExternalFilesDir(null);
-        if (dir == null) dir = c.getFilesDir();
-        dir.mkdirs();
-        return dir.getAbsolutePath();
+        return Storage.home(c).getAbsolutePath();
     }
 
     /** Whether the derived pack can be found (a build URL or the local zip). */
@@ -61,6 +58,39 @@ public class SetupActivity extends Activity
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        File chosen = Storage.chosen(this);
+        if (chosen != null && !Storage.granted(this)) {
+            // The Horizon folder was chosen, but the access to it is gone (revoked, or a backup
+            // restored): asked again instead of quietly starting on the empty app folder.
+            Ui.card(this);
+            new AlertDialog.Builder(this)
+                    .setTitle(Ui.t("Нет доступа к папке Horizon", "No access to the Horizon folder"))
+                    .setMessage(Ui.t(
+                            "Файлы игры лежат в " + chosen + ", но у приложения больше нет доступа ко всем файлам. Дайте доступ снова или играйте из папки приложения (миры из Horizon/ там не появятся).",
+                            "The game files are in " + chosen + ", but the app no longer has all-files access. Grant it again, or play from the app folder (the worlds in Horizon/ won't be there)."))
+                    .setCancelable(false)
+                    .setPositiveButton(Ui.t("Дать доступ", "Grant access"), (d, w) -> {
+                        waitingAccess = true;
+                        Intent i = Storage.permissionIntent(this);
+                        if (i != null) {
+                            try {
+                                startActivity(i);
+                                return;
+                            } catch (Exception ignored) {
+                            }
+                        }
+                        requestPermissions(new String[] {android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+                    })
+                    .setNegativeButton(Ui.t("Папка приложения", "App folder"), (d, w) -> {
+                        try {
+                            Storage.choose(this, null);
+                        } catch (Exception ignored) {
+                        }
+                        recreate();
+                    })
+                    .show();
+            return;
+        }
         home = home(this);
         if (nativeReady(home) == 1) {
             launch();
@@ -353,6 +383,22 @@ public class SetupActivity extends Activity
     private void launch() {
         startActivity(new Intent(this, ProfileActivity.class));
         finish();
+    }
+
+    private boolean waitingAccess;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (waitingAccess) {
+            waitingAccess = false;
+            recreate();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        recreate();
     }
 
     @Override
