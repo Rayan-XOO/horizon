@@ -168,6 +168,17 @@ fn apply_safe_mode(internal: &std::path::Path, home: &std::path::Path) {
         .and_then(|t| t.trim().parse().ok())
         .unwrap_or(0);
     let chosen = chosen_api(home);
+    let version = crash::version();
+    if let Ok(note) = std::fs::read_to_string(&forced)
+        && note.lines().find_map(|l| l.strip_prefix("version:")) != Some(version.as_str())
+        && chosen != GraphicsApi::OpenGl
+    {
+        // Safe start from another release: this one may have fixed what failed. Tried once; a
+        // single failure brings safe start back.
+        log::info!("Horizon: safe start was from another version; trying {} again", chosen.label());
+        let _ = std::fs::remove_file(&forced);
+        failures = 1;
+    }
     if let Ok(note) = std::fs::read_to_string(&forced) {
         // A note from before 0.4.6 names no API: only Vulkan picked since lifts it.
         let failed = note
@@ -192,8 +203,9 @@ fn apply_safe_mode(internal: &std::path::Path, home: &std::path::Path) {
         let _ = std::fs::write(
             &forced,
             format!(
-                "Vulkan failed to start twice; delete this file to try it again\napi:{}\n",
-                chosen.name()
+                "Vulkan failed to start twice; delete this file to try it again\napi:{}\nversion:{}\n",
+                chosen.name(),
+                version
             ),
         );
     }
@@ -206,10 +218,10 @@ fn apply_safe_mode(internal: &std::path::Path, home: &std::path::Path) {
         }
     }
     let _ = std::fs::write(&pending, format!("{}", failures + 1));
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(25));
-        let _ = std::fs::remove_file(pending);
-    });
+    // Cleared once the renderer has drawn 120 frames (game/perf_log.rs): a launch that dies
+    // creating its pipelines counts, however long the loading took.
+    // SAFETY: still before any other thread starts.
+    unsafe { std::env::set_var("HORIZON_LAUNCH_PENDING", &pending) };
 }
 
 /// The graphics API the video settings name (horizon-graphics.txt in the game folder, which

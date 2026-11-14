@@ -166,8 +166,15 @@ impl SessionLock {
             .create(true)
             .truncate(false)
             .open(world.join("session.lock"))?;
-        file.try_lock()
-            .map_err(|_| format!("{} is already open in another instance", world.display()))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::Error(e)) if locks_unsupported(&e) => {
+                log::warn!("{}: no file locks here ({e}); the world opens unlocked", world.display());
+            }
+            Err(_) => {
+                return Err(format!("{} is already open in another instance", world.display()).into());
+            }
+        }
         file.set_len(0)?;
         file.write_all(&[0x26, 0x03])?;
         file.flush()?;
@@ -9464,4 +9471,13 @@ mod calculated_blending_save_tests {
         drop(owner);
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+/// A filesystem without file locks: Android's shared storage (FUSE, /storage/emulated/0)
+/// answers ENOSYS, some network filesystems EOPNOTSUPP or ENOLCK. Nothing to lock there, so
+/// the work goes on unlocked rather than failing.
+fn locks_unsupported(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Unsupported
+        || (cfg!(any(target_os = "linux", target_os = "android"))
+            && matches!(e.raw_os_error(), Some(37 | 38 | 95)))
 }

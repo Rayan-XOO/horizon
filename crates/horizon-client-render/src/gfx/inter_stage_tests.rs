@@ -350,7 +350,8 @@ fn no_render_pipeline_binds_a_buffer_off_16_bytes() {
         sources.len(),
         files.len()
     );
-    for must in ["terrain.wgsl", "hdr_stats.wgsl", "visibility buffer", "GPU culling occlusion test"] {
+    // terrain.wgsl needs hdr_light.wgsl's declarations: checked as the assembled "terrain".
+    for must in ["terrain", "hdr_stats.wgsl", "visibility buffer", "GPU culling occlusion test"] {
         assert!(sources.iter().any(|(n, _)| n == must), "{must} is not checked");
     }
     let (mut render, mut compute) = (Vec::new(), Vec::new());
@@ -394,4 +395,120 @@ fn a_two_float_uniform_is_off_16_bytes() {
             return vec4<f32>(f32(l.w[i]));
         }";
     assert!(unaligned_buffers(padded).is_empty());
+}
+
+/// Every shader parses, validates and translates for each backend the game ships: SPIR-V
+/// (Vulkan) and GLSL ES 3.10 / 3.20 (OpenGL ES, ANGLE). A mistake here is no test failure in the
+/// renderer's own tests (they run on desktop Vulkan, or not at all), but a panic at start-up on
+/// a phone: 0.4.7's terrain shader read a wrapped storage array without its `.w`
+/// ("Invalid sub-access into type"), which only `create_shader_module` reported.
+#[test]
+fn every_shader_builds_for_vulkan_and_opengl_es() {
+    use naga::back::glsl;
+    use naga::valid::{Capabilities, ValidationFlags, Validator};
+    let composed = composed();
+    let mut sources: Vec<(String, String)> = composed
+        .iter()
+        .map(|(name, _, source)| ((*name).to_owned(), source.clone()))
+        .collect();
+    let mut files = Vec::new();
+    wgsl_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    files.sort();
+    for file in &files {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let source = std::fs::read_to_string(file).unwrap();
+        if naga::front::wgsl::parse_str(&source).is_ok()
+            || !composed.iter().any(|(_, parts, _)| parts.contains(&&*name))
+        {
+            sources.push((name, source));
+        }
+    }
+    // The default override specializes written light away: its active form too.
+    let written: Vec<(String, String)> = sources
+        .iter()
+        .filter(|(_, source)| source.contains("override HDR_WRITE_LIGHT: bool = false;"))
+        .map(|(name, source)| {
+            (
+                format!("{name} (HDR_WRITE_LIGHT)"),
+                source.replace(
+                    "override HDR_WRITE_LIGHT: bool = false;",
+                    "override HDR_WRITE_LIGHT: bool = true;",
+                ),
+            )
+        })
+        .collect();
+    sources.extend(written);
+    let mut failed = Vec::new();
+    for (name, source) in &sources {
+        let module = match naga::front::wgsl::parse_str(source) {
+            Ok(m) => m,
+            Err(e) => {
+                failed.push(format!("{name}: {}", e.emit_to_string(source)));
+                continue;
+            }
+        };
+        let info = match Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module) {
+            Ok(info) => info,
+            Err(e) => {
+                failed.push(format!("{name}: {}", e.emit_to_string(source)));
+                continue;
+            }
+        };
+        for entry in &module.entry_points {
+            // What wgpu does before any backend: the overrides take their defaults here.
+            let constants = Default::default();
+            let (module, info) = match naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                Some((entry.stage, &entry.name)),
+                &constants,
+            ) {
+                Ok(done) => done,
+                Err(e) => {
+                    failed.push(format!("{name}::{} (overrides): {e}", entry.name));
+                    continue;
+                }
+            };
+            let spv = naga::back::spv::Options::default();
+            let spv_pipeline = naga::back::spv::PipelineOptions {
+                shader_stage: entry.stage,
+                entry_point: entry.name.clone(),
+            };
+            if let Err(e) = naga::back::spv::write_vec(&module, &info, &spv, Some(&spv_pipeline)) {
+                failed.push(format!("{name}::{} (SPIR-V): {e}", entry.name));
+            }
+            // Never built on OpenGL: frame generation (Vulkan only) and the custom-item glint
+            // (`CitGlintPass::new` keeps the vanilla glint there).
+            if name == "interpolation.wgsl" || (name.starts_with("hud.wgsl") && entry.name == "fs_cit_glint") {
+                continue;
+            }
+            // Compute stages need GLSL ES 3.10; both versions the GL backend asks for.
+            for version in [310, 320] {
+                let options = glsl::Options {
+                    version: glsl::Version::Embedded { version, is_webgl: false },
+                    ..Default::default()
+                };
+                let pipeline = glsl::PipelineOptions {
+                    shader_stage: entry.stage,
+                    entry_point: entry.name.clone(),
+                    multiview: None,
+                };
+                let mut out = String::new();
+                let written = glsl::Writer::new(
+                    &mut out,
+                    &module,
+                    &info,
+                    &options,
+                    &pipeline,
+                    naga::proc::BoundsCheckPolicies::default(),
+                )
+                .and_then(|mut w| w.write().map(|_| ()));
+                if let Err(e) = written {
+                    failed.push(format!("{name}::{} (GLSL ES {version}): {e}", entry.name));
+                }
+            }
+        }
+    }
+    assert!(sources.len() >= 30, "only {} shaders checked", sources.len());
+    assert!(failed.is_empty(), "{} failed:\n{}", failed.len(), failed.join("\n"));
 }

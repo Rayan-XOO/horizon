@@ -14,7 +14,12 @@ pub(super) struct PerfLog {
     frames: u32,
     total: Duration,
     worst: Duration,
+    /// Frames the renderer drew since the start, up to [`STARTED`].
+    drawn: u32,
 }
+
+/// Frames drawn after which the launch counts as a good one (safe start's counter clears).
+const STARTED: u32 = 120;
 
 impl PerfLog {
     /// One frame of `elapsed`; `Some` with the window's numbers when a line is due.
@@ -31,7 +36,7 @@ impl PerfLog {
         let fps = self.frames as f32 / span.as_secs_f32();
         let avg = self.total.as_secs_f32() * 1000.0 / self.frames.max(1) as f32;
         let worst = self.worst.as_secs_f32() * 1000.0;
-        *self = Self { since: Some(now), ..Self::default() };
+        *self = Self { since: Some(now), drawn: self.drawn, ..Self::default() };
         Some((fps, avg, worst))
     }
 }
@@ -55,9 +60,25 @@ fn core_clocks() -> Option<(u64, u64)> {
     Some((*clocks.iter().min()?, *clocks.iter().max()?))
 }
 
+/// The renderer has drawn for a while: the launch-attempt file android_main.rs left
+/// (HORIZON_LAUNCH_PENDING) goes, so the failed-launch count for safe start begins at 0 again.
+fn launch_succeeded() {
+    if let Some(pending) = std::env::var_os("HORIZON_LAUNCH_PENDING") {
+        if std::fs::remove_file(&pending).is_ok() {
+            log::info!("Horizon: started fine, failed-launch count reset");
+        }
+    }
+}
+
 impl super::Game<'_> {
     /// Once a frame, with the time since the last one.
     pub(super) fn perf_log_frame(&mut self, elapsed: Duration) {
+        if self.perf_log.drawn < STARTED && self.renderer.is_some() {
+            self.perf_log.drawn += 1;
+            if self.perf_log.drawn == STARTED {
+                launch_succeeded();
+            }
+        }
         if !cfg!(target_os = "android") || self.player.is_none() {
             return;
         }

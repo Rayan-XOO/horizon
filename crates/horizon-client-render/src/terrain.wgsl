@@ -593,9 +593,9 @@ fn section_corner(vertex: u32) -> SectionCorner {
     }
     if vertex >= FAR_BASE {
         let far_slot = (vertex - FAR_BASE) >> 2u;
-        let a = arena_page[far_slot * 3u];
-        let b = arena_page[far_slot * 3u + 1u];
-        let c = arena_page[far_slot * 3u + 2u];
+        let a = arena_page.w[far_slot * 3u];
+        let b = arena_page.w[far_slot * 3u + 1u];
+        let c = arena_page.w[far_slot * 3u + 2u];
         // `FULL`: the quad's four vertices, word 0 slots on, as a section's spill.
         if (c.y & 0x80000000u) != 0u {
             return SectionCorner(arena_vertex(far_slot + a.x + (vertex & 3u)), far_slot, true);

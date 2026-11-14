@@ -253,6 +253,8 @@ pub fn open_latest(dir: &Path) -> io::Result<Option<Latest>> {
     match lock.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Ok(None),
+        // No locks on this filesystem: one game per folder is all there is to guard.
+        Err(fs::TryLockError::Error(e)) if locks_unsupported(&e) => {}
         Err(fs::TryLockError::Error(e)) => return Err(e),
     }
     let mut file = OpenOptions::new()
@@ -907,4 +909,13 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&home);
     }
+}
+
+/// A filesystem without file locks: Android's shared storage (FUSE, /storage/emulated/0)
+/// answers ENOSYS, some network filesystems EOPNOTSUPP or ENOLCK. Nothing to lock there, so
+/// the work goes on unlocked rather than failing.
+fn locks_unsupported(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Unsupported
+        || (cfg!(any(target_os = "linux", target_os = "android"))
+            && matches!(e.raw_os_error(), Some(37 | 38 | 95)))
 }

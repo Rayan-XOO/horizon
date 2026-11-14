@@ -326,7 +326,10 @@ pub(super) fn hold(out: &Path) -> io::Result<()> {
                 .create(true)
                 .truncate(false)
                 .open(use_path(out))?;
-            file.lock_shared()?;
+            match file.lock_shared() {
+                Err(e) if !locks_unsupported(&e) => return Err(e),
+                _ => {}
+            }
             held.push((out.into(), file));
             held.len() - 1
         }
@@ -388,6 +391,8 @@ fn remove_unused(out: &Path) -> io::Result<()> {
         match lock.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => return Ok(()),
+            // Without locks nothing tells an overlay in use from a stale one: keep it.
+            Err(fs::TryLockError::Error(e)) if locks_unsupported(&e) => return Ok(()),
             Err(fs::TryLockError::Error(e)) => return Err(e),
         }
     }
@@ -411,7 +416,10 @@ pub(super) fn build(vanilla: &Path, packs: &[Pack], out: &Path) -> io::Result<()
         .create(true)
         .truncate(false)
         .open(lock_path(out))?;
-    lock.lock()?;
+    match lock.lock() {
+        Err(e) if !locks_unsupported(&e) => return Err(e),
+        _ => {}
+    }
     let vanilla_key = absolute(vanilla)?;
     let marker_path = marker_path(out);
     let signature = pack_signature(packs);
@@ -1274,4 +1282,13 @@ mod tests {
             );
         }
     }
+}
+
+/// A filesystem without file locks: Android's shared storage (FUSE, /storage/emulated/0)
+/// answers ENOSYS, some network filesystems EOPNOTSUPP or ENOLCK. Nothing to lock there, so
+/// the work goes on unlocked rather than failing.
+fn locks_unsupported(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Unsupported
+        || (cfg!(any(target_os = "linux", target_os = "android"))
+            && matches!(e.raw_os_error(), Some(37 | 38 | 95)))
 }

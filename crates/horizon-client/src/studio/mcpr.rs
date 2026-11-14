@@ -1033,7 +1033,11 @@ fn stream_is_unlocked(stream: &Path) -> bool {
     let Ok(file) = OpenOptions::new().read(true).write(true).open(stream) else {
         return false;
     };
-    file.try_lock().is_ok()
+    match file.try_lock() {
+        Ok(()) => true,
+        Err(std::fs::TryLockError::Error(e)) => locks_unsupported(&e),
+        Err(std::fs::TryLockError::WouldBlock) => false,
+    }
 }
 
 /// Cut a leftover stream to its last whole frame, as [`frame_at`] defines one,
@@ -1664,4 +1668,13 @@ mod tests {
         assert_eq!(sidecar.duration, 2 * FLUSH_INTERVAL_MS);
         assert_eq!(sidecar.generator, "Horizon Studio");
     }
+}
+
+/// A filesystem without file locks: Android's shared storage (FUSE, /storage/emulated/0)
+/// answers ENOSYS, some network filesystems EOPNOTSUPP or ENOLCK. Nothing to lock there, so
+/// the work goes on unlocked rather than failing.
+fn locks_unsupported(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Unsupported
+        || (cfg!(any(target_os = "linux", target_os = "android"))
+            && matches!(e.raw_os_error(), Some(37 | 38 | 95)))
 }

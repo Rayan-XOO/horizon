@@ -245,7 +245,10 @@ impl CitGlintPass {
         coverage: bool,
     ) -> Option<Self> {
         use wgpu::util::DeviceExt;
-        if textures.is_empty() {
+        // `fs_cit_glint` samples one image through two samplers, which naga's GLSL writer can't
+        // give OpenGL: the pipeline would fail validation (a panic at start). OpenGL keeps the
+        // vanilla glint.
+        if textures.is_empty() || device.adapter_info().backend == wgpu::Backend::Gl {
             return None;
         }
         // wgpu's OpenGL backend makes 1 layer a 2D texture and 6n a cube map
