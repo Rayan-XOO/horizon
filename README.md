@@ -16,11 +16,13 @@
   <img src="https://img.shields.io/badge/Android-8.0%2B%20arm64%20%7C%20armv7-3DDC84?logo=android&logoColor=white" alt="Android 8.0+">
   <img src="https://img.shields.io/badge/Minecraft-Java%2026.3-5D9C3F" alt="Minecraft Java 26.3">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/Rayan-XOO/horizon" alt="License"></a>
+  <a href="https://discord.gg/zjMy9Nx9T7"><img src="https://img.shields.io/badge/Discord-Horizon%20Android-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Rayan-XOO/horizon/releases/latest"><b>Скачать APK / Download APK</b></a> ·
   <a href="https://4pda.to/forum/index.php?showtopic=1128662">4PDA</a> ·
+  <a href="https://discord.gg/zjMy9Nx9T7">Discord</a> ·
   <a href="#русский">Русский</a> ·
   <a href="#english">English</a>
 </p>
@@ -180,6 +182,7 @@ Horizon — это Minecraft: Java Edition 26.3, заново написанны
 - Все версии выходят здесь, на GitHub: [Releases](https://github.com/Rayan-XOO/horizon/releases). Чтобы получать уведомления о новых версиях, нажми вверху **Watch → Custom → Releases**.
 - Новый APK ставится поверх старого, данные и миры остаются.
 - Тема на 4PDA: [Horizon для Android](https://4pda.to/forum/index.php?showtopic=1128662) — там новости, вопросы и помощь.
+- Сервер в Discord: [Horizon Android](https://discord.gg/zjMy9Nx9T7) — общение, помощь, моды и раскладки управления.
 - Нашёл баг? Пиши в [Issues](https://github.com/Rayan-XOO/horizon/issues) или в теме на 4PDA и приложи логи (кнопка «Поделиться логами» в лаунчере).
 
 ### Поддерживаемые устройства
@@ -380,6 +383,7 @@ If the mod doesn't work, check **Options → Mods**: it says why the mod didn't 
 - Every version comes out here on GitHub: [Releases](https://github.com/Rayan-XOO/horizon/releases). To get notified about new versions, click **Watch → Custom → Releases** at the top.
 - A new APK installs over the old one; your data and worlds stay.
 - 4PDA topic (Russian): [Horizon for Android](https://4pda.to/forum/index.php?showtopic=1128662), for news, questions and help.
+- Discord server: [Horizon Android](https://discord.gg/zjMy9Nx9T7), for chat, help, mods and control layouts (Russian and English channels).
 - Found a bug? Open an [issue](https://github.com/Rayan-XOO/horizon/issues) or post in the 4PDA topic, and attach logs (the launcher's "Share logs" button).
 
 ### Supported Devices
